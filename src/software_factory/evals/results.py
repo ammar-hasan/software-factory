@@ -8,6 +8,7 @@ is missing proves nothing about behaviour.
 from __future__ import annotations
 
 import enum
+import re
 from dataclasses import dataclass, field
 
 
@@ -21,11 +22,15 @@ class Outcome(enum.StrEnum):
 class FailureClass(enum.StrEnum):
     """Why a test did not pass. The distinction that makes `regression-proven` real.
 
-    Only ``ASSERTION`` is a statement about behaviour. Everything else means the test
-    body never ran, or never ran meaningfully.
+    Only ``ASSERTION`` is a statement about behaviour. ``EXISTENCE`` is carved out of it
+    because an assertion that a name exists is not a behavioural claim: a test whose whole
+    content is ``assert hasattr(mod, "new_fn")`` fails at the parent commit with a genuine
+    ``AssertionError`` and proves only that the name did not exist -- the same bypass an
+    import error gives, one keystroke away.
     """
 
     ASSERTION = "assertion"
+    EXISTENCE = "existence"
     COLLECTION = "collection"
     IMPORT = "import"
     FIXTURE = "fixture"
@@ -34,29 +39,81 @@ class FailureClass(enum.StrEnum):
     UNKNOWN = "unknown"
 
 
-#: Substrings that identify a failure as structural rather than behavioural. Ordered so
-#: the most specific match wins.
-_CLASSIFIERS: tuple[tuple[FailureClass, tuple[str, ...]], ...] = (
-    (FailureClass.IMPORT, ("importerror", "modulenotfounderror", "cannot import name")),
-    (FailureClass.COLLECTION, ("collection error", "errors during collection", "syntaxerror")),
-    (FailureClass.FIXTURE, ("fixture", "error at setup", "setup failed")),
-    (FailureClass.TIMEOUT, ("timeout", "timed out")),
-    (FailureClass.CRASH, ("segmentation fault", "core dumped", "killed")),
-    (FailureClass.ASSERTION, ("assertionerror", "assert ", "expected", "failed:")),
+#: Structural failures, matched on the exception *type* at the start of a line rather than
+#: as bare substrings. Substring matching misread real assertion output constantly:
+#: `assert config.timeout == 30` contains "timeout", `assert proc.killed is False`
+#: contains "killed", and a fixture named in a traceback contains "fixture" -- each of
+#: which rejected a genuine regression test.
+_EXCEPTION_LINE = re.compile(
+    r"^\s*(?:E\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_.]*Error|[A-Za-z_][A-Za-z0-9_.]*Exception)\b",
+    re.MULTILINE,
+)
+
+_STRUCTURAL_EXCEPTIONS: dict[str, FailureClass] = {
+    "ImportError": FailureClass.IMPORT,
+    "ModuleNotFoundError": FailureClass.IMPORT,
+    "SyntaxError": FailureClass.COLLECTION,
+    "IndentationError": FailureClass.COLLECTION,
+    "CollectionError": FailureClass.COLLECTION,
+    "TimeoutError": FailureClass.TIMEOUT,
+    "Failed": FailureClass.UNKNOWN,
+}
+
+#: Phrasings a test runner uses for its own structural problems, as whole phrases.
+_STRUCTURAL_PHRASES: tuple[tuple[FailureClass, tuple[str, ...]], ...] = (
+    (FailureClass.IMPORT, ("cannot import name", "no module named")),
+    (
+        FailureClass.COLLECTION,
+        ("error during collection", "errors during collection", "error collecting"),
+    ),
+    (FailureClass.FIXTURE, ("error at setup of", "fixture ", "not found in", "errors at setup")),
+    (FailureClass.TIMEOUT, ("timed out after", "test exceeded", "timeout >")),
+    (FailureClass.CRASH, ("segmentation fault", "core dumped", "worker crashed")),
+)
+
+#: An assertion whose subject is only a name's presence. Not a behavioural claim.
+_EXISTENCE_ASSERTION = re.compile(
+    r"assert\s+(?:"
+    r"hasattr\s*\("
+    r"|not\s+hasattr\s*\("
+    r"|['\"]?\w+['\"]?\s+in\s+dir\s*\("
+    r"|callable\s*\("
+    r"|\w+(?:\.\w+)*\s+is\s+not\s+None\s*$"
+    r")",
+    re.IGNORECASE,
 )
 
 
 def classify_failure(message: str) -> FailureClass:
     """Classify a failure from its message.
 
-    Structural classes are checked before ``ASSERTION`` on purpose: an import error
-    whose traceback happens to contain the word "assert" is still an import error, and
-    treating it as behavioural is exactly the bypass this exists to close.
+    Order: structural exception type, then structural phrase, then existence assertion,
+    then behavioural assertion. Structural classes win because a test that never ran its
+    body proves nothing about behaviour -- but they are matched precisely, so a genuine
+    assertion that merely *mentions* a timeout or a fixture is not misread as one.
     """
+    if not message.strip():
+        return FailureClass.UNKNOWN
+
+    for match in _EXCEPTION_LINE.finditer(message):
+        name = match.group("name").rsplit(".", 1)[-1]
+        structural = _STRUCTURAL_EXCEPTIONS.get(name)
+        if structural is not None and structural is not FailureClass.UNKNOWN:
+            return structural
+        if name == "AssertionError":
+            break
+
     lowered = message.lower()
-    for failure_class, markers in _CLASSIFIERS:
-        if any(marker in lowered for marker in markers):
+    for failure_class, phrases in _STRUCTURAL_PHRASES:
+        if any(phrase in lowered for phrase in phrases):
             return failure_class
+
+    if _EXISTENCE_ASSERTION.search(message):
+        return FailureClass.EXISTENCE
+
+    if "assertionerror" in lowered or re.search(r"^\s*(?:E\s+)?assert\s", message, re.MULTILINE):
+        return FailureClass.ASSERTION
+
     return FailureClass.UNKNOWN
 
 

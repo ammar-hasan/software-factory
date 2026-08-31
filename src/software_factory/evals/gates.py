@@ -423,8 +423,27 @@ def evidence_complete(ctx: GateContext) -> GateResult:
         return GateResult("evidence-complete", GateOutcome.FAIL, findings=tuple(findings))
 
     expired = ctx.bundle.expired_claims()
-    detail = f"{len(expired)} claim(s) rest on expired evidence" if expired else ""
-    return GateResult("evidence-complete", GateOutcome.PASS, detail=detail)
+    if expired:
+        # The record says a claim resting on expired evidence must never read as
+        # satisfied. Passing it with a note in `detail` is exactly reading as satisfied.
+        return GateResult(
+            "evidence-complete",
+            GateOutcome.FAIL,
+            findings=tuple(
+                Finding(
+                    criterion="every claim resolves to evidence that still exists",
+                    observed="every supporting artifact has expired",
+                    expected="at least one surviving artifact per claim",
+                    remediation=(
+                        "Re-run the validation to produce fresh evidence, or withdraw the "
+                        "claim. Expired evidence is not evidence."
+                    ),
+                    locator=claim.text[:80],
+                )
+                for claim in expired
+            ),
+        )
+    return GateResult("evidence-complete", GateOutcome.PASS)
 
 
 def no_unreviewed_external(ctx: GateContext) -> GateResult:

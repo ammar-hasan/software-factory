@@ -325,8 +325,9 @@ def test_a_supported_claim_passes() -> None:
     assert evidence_complete(context(stage="REVIEW", bundle=bundle)).outcome is GateOutcome.PASS
 
 
-def test_an_expired_evidence_body_is_reported_not_treated_as_satisfied() -> None:
-    """Retention removes content, never the record. The claim renders as expired."""
+def test_a_claim_resting_only_on_expired_evidence_fails() -> None:
+    """Retention removes content, never the record -- and an expired claim is not
+    satisfied. Passing it with a note in `detail` was exactly reading as satisfied."""
     bundle = EvidenceBundle(id="b1", run_id="r1", work_item_id="w1", stage="REVIEW")
     bundle.add(
         EvidenceItem(
@@ -341,8 +342,8 @@ def test_an_expired_evidence_body_is_reported_not_treated_as_satisfied() -> None
 
     outcome = evidence_complete(context(stage="REVIEW", bundle=bundle))
 
-    assert outcome.outcome is GateOutcome.PASS
-    assert "expired" in outcome.detail
+    assert outcome.outcome is GateOutcome.FAIL
+    assert "Expired evidence is not evidence" in outcome.findings[0].remediation
 
 
 def test_a_sealed_bundle_cannot_be_edited() -> None:
@@ -579,7 +580,11 @@ def proposal(**kwargs) -> ImprovementProposal:
         "regressions_addressed": ("run-1", "run-2"),
         "metric_delta": 0.15,
         "holdout_delta": 0.10,
-        "counter_metrics": {"cost_per_change": 0.0, "rework_rate": -0.01},
+        "counter_metrics": {
+            "cost_per_change": 0.0,
+            "rework_rate": -0.01,
+            "human_review_cost": 0.0,
+        },
     }
     base.update(kwargs)
     return ImprovementProposal(**base)  # type: ignore[arg-type]
@@ -601,10 +606,33 @@ def test_a_proposal_that_does_not_generalise_is_refused() -> None:
 
 def test_a_proposal_degrading_a_counter_metric_is_refused() -> None:
     """This is the concrete defence against moving a metric while reality gets worse."""
-    verdict = evaluate_proposal(proposal(counter_metrics={"human_review_cost": -0.20}))
+    verdict = evaluate_proposal(
+        proposal(
+            counter_metrics={
+                "cost_per_change": 0.0,
+                "rework_rate": 0.0,
+                "human_review_cost": -0.20,
+            }
+        )
+    )
 
     assert not verdict.accepted
     assert "counter-metrics degraded" in verdict.reason
+
+
+def test_a_proposal_with_no_counter_metrics_is_refused() -> None:
+    """An empty panel satisfied the "mandatory" panel, which made it not mandatory."""
+    verdict = evaluate_proposal(proposal(counter_metrics={}))
+
+    assert not verdict.accepted
+    assert "no counter-metrics reported" in verdict.reason
+
+
+def test_a_proposal_with_a_partial_panel_is_refused() -> None:
+    verdict = evaluate_proposal(proposal(counter_metrics={"cost_per_change": 0.0}))
+
+    assert not verdict.accepted
+    assert "incomplete" in verdict.reason
 
 
 def test_a_self_referential_proposal_needs_a_second_reviewer() -> None:

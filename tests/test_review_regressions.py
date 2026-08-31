@@ -566,3 +566,253 @@ def test_c11_admission_refuses_a_no_phrased_contradiction_against_canon(
 
     assert not isinstance(outcome, Memory)
     assert outcome.reason.value == "contradiction"
+
+
+# ============================================================================ MAJOR
+
+
+# ------------------------------------------------------------------------------ M20
+
+
+def test_m20_a_judge_that_always_answers_the_majority_label_is_not_trusted() -> None:
+    """kappa returned 1.0 for the degenerate single-category case, so the laziest
+    possible judge scored perfectly on the measure designed to catch it."""
+    from software_factory.evals import cohens_kappa
+
+    lazy = ["ran"] * 100
+
+    assert cohens_kappa(lazy, lazy) == 0.0
+
+
+def test_m20_real_agreement_still_scores() -> None:
+    from software_factory.evals import cohens_kappa
+
+    human = ["ran"] * 60 + ["not_run"] * 40
+
+    assert cohens_kappa(list(human), human) == pytest.approx(1.0)
+
+
+# ------------------------------------------------------------------------------ M21
+
+
+def proposal(**kwargs):
+    from software_factory.evals import ImprovementProposal
+
+    base: dict[str, object] = {
+        "target": "agents/builder/agent.md",
+        "kind": "prompt",
+        "rationale": "builder skips tests",
+        "regressions_addressed": ("run-1",),
+        "metric_delta": 0.2,
+        "holdout_delta": 0.1,
+        "counter_metrics": {
+            "cost_per_change": 0.0,
+            "rework_rate": 0.0,
+            "human_review_cost": 0.0,
+        },
+    }
+    base.update(kwargs)
+    return ImprovementProposal(**base)  # type: ignore[arg-type]
+
+
+def test_m21_an_empty_counter_metric_panel_is_refused() -> None:
+    """An empty panel satisfied the "mandatory" panel, which made it not mandatory."""
+    from software_factory.evals import evaluate_proposal
+
+    verdict = evaluate_proposal(proposal(counter_metrics={}))
+
+    assert not verdict.accepted
+
+
+def test_m21_a_partial_panel_is_refused() -> None:
+    from software_factory.evals import evaluate_proposal
+
+    verdict = evaluate_proposal(proposal(counter_metrics={"cost_per_change": 0.0}))
+
+    assert not verdict.accepted
+    assert "incomplete" in verdict.reason
+
+
+# ------------------------------------------------------------------------------ M22
+
+
+def test_m22_a_claim_resting_only_on_expired_evidence_fails() -> None:
+    """The record says such a claim must never read as satisfied; it passed with a note."""
+    from software_factory.evals import EvidenceBundle, EvidenceClass, EvidenceItem
+    from software_factory.evals.gates import evidence_complete
+
+    bundle = EvidenceBundle(id="b", run_id="r", work_item_id="w", stage="REVIEW")
+    bundle.add(
+        EvidenceItem(
+            id="e1",
+            evidence_class=EvidenceClass.TEST_RESULTS,
+            digest="d",
+            location="results.json",
+            tombstoned=True,
+        )
+    )
+    bundle.claim("Tests pass.", "e1")
+
+    outcome = evidence_complete(GateContext(stage="REVIEW", calibration=object(), bundle=bundle))
+
+    assert outcome.outcome is GateOutcome.FAIL
+
+
+# ------------------------------------------------------------------------------ M23
+
+
+def test_m23_repointing_a_claim_changes_the_seal() -> None:
+    """Sealing hashed only the claim texts, so the claim-to-artifact mapping could be
+    rewritten after sealing without the digest noticing."""
+    from software_factory.evals import EvidenceBundle, EvidenceClass, EvidenceItem
+
+    def sealed(support: str) -> str:
+        bundle = EvidenceBundle(id="b", run_id="r", work_item_id="w", stage="BUILD")
+        for name in ("e1", "e2"):
+            bundle.add(
+                EvidenceItem(
+                    id=name,
+                    evidence_class=EvidenceClass.DIFF,
+                    digest=f"digest-{name}",
+                    location=name,
+                )
+            )
+        bundle.claim("Tests pass.", support)
+        return bundle.seal()
+
+    assert sealed("e1") != sealed("e2")
+
+
+# ------------------------------------------------------------------------------ M24
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "AssertionError: assert response.status == 200\n where response = client_fixture.get('/')",
+        "AssertionError: assert config.timeout == 30",
+        "AssertionError: assert proc.killed is False",
+    ],
+)
+def test_m24_a_real_assertion_is_not_misread_as_structural(message: str) -> None:
+    """Bare substring markers rejected genuine regression tests: "timeout", "killed" and
+    "fixture" all appear constantly in real assertion output."""
+    from software_factory.evals.results import FailureClass, classify_failure
+
+    assert classify_failure(message) is FailureClass.ASSERTION
+
+
+def test_m24_an_existence_assertion_does_not_prove_a_regression() -> None:
+    """`assert hasattr(mod, "new_fn")` fails at the parent with a genuine AssertionError
+    and proves only that a name did not exist -- the import bypass, one keystroke away."""
+    from software_factory.evals.results import FailureClass, classify_failure
+
+    assert classify_failure('E   AssertionError: assert hasattr(mod, "new_fn")') is (
+        FailureClass.EXISTENCE
+    )
+
+
+def test_m24_an_existence_assertion_fails_regression_proven() -> None:
+    from software_factory.evals.gates import regression_proven
+    from software_factory.evals.results import Outcome, TestResult, TestRun
+
+    test_id = "tests/test_new.py::test_exists"
+    parent = TestRun(
+        command="pytest",
+        commit="parent",
+        exit_code=1,
+        results=[
+            TestResult(
+                test_id=test_id,
+                outcome=Outcome.FAILED,
+                message='E   AssertionError: assert hasattr(mod, "new_fn")',
+            )
+        ],
+    )
+    tip = TestRun(
+        command="pytest",
+        commit="tip",
+        exit_code=0,
+        results=[TestResult(test_id=test_id, outcome=Outcome.PASSED)],
+    )
+
+    outcome = regression_proven(
+        GateContext(
+            stage="BUILD",
+            work_class="defect",
+            calibration=object(),
+            new_test_ids=(test_id,),
+            tests_at_parent=parent,
+            tests_at_tip=tip,
+        )
+    )
+
+    assert outcome.outcome is GateOutcome.FAIL
+
+
+def test_m24_a_behavioural_assertion_still_proves_a_regression() -> None:
+    from software_factory.evals.gates import regression_proven
+    from software_factory.evals.results import Outcome, TestResult, TestRun
+
+    test_id = "tests/test_bom.py::test_bom"
+    parent = TestRun(
+        command="pytest",
+        commit="parent",
+        exit_code=1,
+        results=[
+            TestResult(
+                test_id=test_id,
+                outcome=Outcome.FAILED,
+                message="E   AssertionError: assert '\\ufeffid' == 'id'",
+            )
+        ],
+    )
+    tip = TestRun(
+        command="pytest",
+        commit="tip",
+        exit_code=0,
+        results=[TestResult(test_id=test_id, outcome=Outcome.PASSED)],
+    )
+
+    outcome = regression_proven(
+        GateContext(
+            stage="BUILD",
+            work_class="defect",
+            calibration=object(),
+            new_test_ids=(test_id,),
+            tests_at_parent=parent,
+            tests_at_tip=tip,
+        )
+    )
+
+    assert outcome.outcome is GateOutcome.PASS
+
+
+# ------------------------------------------------------------------------------ M37
+
+
+@pytest.mark.parametrize(
+    ("request_text", "expected"),
+    [
+        ("Add a debug flag to the importer", "feature"),
+        ("How does error handling work?", "investigation"),
+        ("The uploaded page renders blank", "defect"),
+        ("Export no longer includes the header row", "defect"),
+        ("Totals should be in account currency but show USD", "defect"),
+    ],
+)
+def test_m37_classification_matches_words_not_substrings(request_text: str, expected: str) -> None:
+    """Substring matching read "debug" as a bug and missed a real defect worded without a
+    keyword -- and a defect misread as a feature skips regression-proven entirely."""
+    from software_factory.orchestrator import classify_request
+
+    assert classify_request(request_text).value == expected
+
+
+def test_m37_a_guess_with_nothing_to_go_on_reports_itself_as_unconfident() -> None:
+    """A caller about to skip a gate on a work class should know it was inferred from
+    nothing."""
+    from software_factory.orchestrator import classification_is_confident
+
+    assert not classification_is_confident("Add semicolon delimiter support")
+    assert classification_is_confident("The importer crashes on BOM headers")

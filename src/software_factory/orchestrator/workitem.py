@@ -15,6 +15,7 @@ Two properties are load-bearing:
 from __future__ import annotations
 
 import enum
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -408,22 +409,69 @@ def new_id() -> str:
     return f"wi_{uuid.uuid4().hex[:12]}"
 
 
-def classify_request(text: str) -> WorkClass:
-    """A cheap first guess at work class, refined by triage.
+#: Word-boundary patterns, not substrings. Substring matching read "debug" as a bug and
+#: "How does error handling work?" as a defect, and -- the damaging direction -- missed a
+#: real defect worded without a keyword, which silently skipped `regression-proven`.
+_QUESTION = re.compile(
+    r"\b(?:why|how\s+does|how\s+do|what\s+happens|investigate|understand|explain)\b",
+    re.IGNORECASE,
+)
+_DEFECT_WORDS = re.compile(
+    r"\b(?:bug|bugs|broken|breaks|regression|regressions|crash|crashes|crashing|defect|"
+    r"defects|fails|failing|failure|traceback|exception|misbehav\w*|incorrect|wrong)\b",
+    re.IGNORECASE,
+)
+#: Symptom phrasings that describe a defect without naming one. These are why the previous
+#: keyword list was dangerous: "the uploaded page renders blank" matched nothing.
+_DEFECT_SYMPTOMS = re.compile(
+    r"\b(?:renders?\s+blank|returns?\s+(?:the\s+)?wrong|no\s+longer|stopped\s+working|"
+    r"does\s*n[o']?t\s+work|doesn't\s+work|not\s+working|hangs?|times?\s+out|"
+    r"loses?\s+data|duplicat\w*\s+(?:rows?|records?|entries)|off\s+by\s+one|"
+    r"should\s+(?:be|show|return)\b.{0,40}\bbut\b)",
+    re.IGNORECASE,
+)
+_REFACTOR = re.compile(
+    r"\b(?:refactor\w*|clean\s*up|tidy|restructure|rename|extract|simplif\w+)\b", re.IGNORECASE
+)
+_REVIEW = re.compile(
+    r"\b(?:review|look\s+at\s+(?:this|my)\s+(?:pr|change)|check\s+my\s+change)\b",
+    re.IGNORECASE,
+)
 
-    Deliberately shallow: getting this wrong costs one gate configuration, and triage
-    corrects it with actual evidence. Guessing harder here would be false precision.
+
+def classify_request(text: str) -> WorkClass:
+    """A first guess at work class, refined by triage.
+
+    Deliberately shallow -- triage corrects it with evidence, and guessing harder here
+    would be false precision. But the guess is not consequence-free: a defect misread as a
+    feature skips `regression-proven` entirely, so symptom phrasings are matched as well
+    as keywords, and questions are checked before defect words so "how does error handling
+    work?" is not read as an error report.
+
+    Callers that care should pass an explicit class; :func:`classification_is_confident`
+    reports whether this guess found anything to go on at all.
     """
-    lowered = text.lower()
-    if any(
-        word in lowered
-        for word in ("bug", "broken", "regression", "crash", "error", "fails", "defect")
-    ):
-        return WorkClass.DEFECT
-    if any(word in lowered for word in ("refactor", "clean up", "tidy", "restructure")):
-        return WorkClass.REFACTOR
-    if any(word in lowered for word in ("review", "look at this pr", "check my change")):
+    if _REVIEW.search(text):
         return WorkClass.REVIEW
-    if any(word in lowered for word in ("why", "investigate", "how does", "understand")):
+    if _QUESTION.search(text) and not _DEFECT_SYMPTOMS.search(text):
         return WorkClass.INVESTIGATION
+    if _DEFECT_WORDS.search(text) or _DEFECT_SYMPTOMS.search(text):
+        return WorkClass.DEFECT
+    if _REFACTOR.search(text):
+        return WorkClass.REFACTOR
     return WorkClass.FEATURE
+
+
+def classification_is_confident(text: str) -> bool:
+    """Whether the guess rests on an actual signal rather than falling through to FEATURE.
+
+    A caller that is about to skip a gate on the strength of a work class should know
+    whether that class was inferred from nothing.
+    """
+    return bool(
+        _REVIEW.search(text)
+        or _QUESTION.search(text)
+        or _DEFECT_WORDS.search(text)
+        or _DEFECT_SYMPTOMS.search(text)
+        or _REFACTOR.search(text)
+    )

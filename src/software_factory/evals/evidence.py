@@ -122,11 +122,16 @@ class EvidenceBundle:
     def seal(self) -> str:
         """Freeze the bundle and return its digest."""
         self.sealed_at = utc_now()
-        material = (
-            "|".join(sorted(f"{item.id}:{item.digest}" for item in self.items.values()))
-            + "||"
-            + "|".join(sorted(c.text for c in self.claims))
+        # The claim-to-artifact mapping is part of what is sealed. Hashing only the claim
+        # texts left `supported_by` rewritable after sealing, so a claim could be
+        # re-pointed at different evidence without changing the seal.
+        items = sorted(
+            f"{item.id}:{item.digest}:{int(item.tombstoned)}" for item in self.items.values()
         )
+        claims = sorted(
+            f"{claim.text}->{','.join(sorted(claim.supported_by))}" for claim in self.claims
+        )
+        material = "|".join(items) + "||" + "|".join(claims)
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     def as_dict(self) -> dict[str, object]:

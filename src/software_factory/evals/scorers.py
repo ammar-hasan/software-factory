@@ -152,8 +152,13 @@ def cohens_kappa(judge: list[str], human: list[str]) -> float:
     observed = sum(1 for a, b in zip(judge, human, strict=True) if a == b) / n
     categories = set(judge) | set(human)
     expected = sum((judge.count(c) / n) * (human.count(c) / n) for c in categories)
+    if len(categories) < 2:
+        # Both raters used one label. Chance agreement is total, so kappa is undefined --
+        # and returning 1.0 made an always-majority-label judge look perfectly calibrated,
+        # which is exactly the judge kappa exists to catch.
+        return 0.0
     if expected >= 1.0:
-        return 1.0 if observed >= 1.0 else 0.0
+        return 0.0
     return (observed - expected) / (1 - expected)
 
 
@@ -277,6 +282,11 @@ class ProposalVerdict:
 
 COUNTER_METRIC_TOLERANCE = -0.02
 
+#: The panel every proposal must report. Chosen so that the common ways of moving a target
+#: metric without improving anything -- spending more, reworking more, pushing effort onto
+#: reviewers -- each show up somewhere.
+REQUIRED_COUNTER_METRICS = frozenset({"cost_per_change", "rework_rate", "human_review_cost"})
+
 
 def evaluate_proposal(
     proposal: ImprovementProposal, scorer: Scorer | None = None
@@ -307,6 +317,22 @@ def evaluate_proposal(
                 f"held-out performance moved {proposal.holdout_delta:+.1%}; the gain does not "
                 "survive contact with tasks the loop could not see"
             ),
+        )
+
+    if not proposal.counter_metrics:
+        return ProposalVerdict(
+            False,
+            (
+                "no counter-metrics reported; a target metric moving on its own is not "
+                "evidence of improvement, which is the entire point of the panel"
+            ),
+        )
+
+    missing = REQUIRED_COUNTER_METRICS - set(proposal.counter_metrics)
+    if missing:
+        return ProposalVerdict(
+            False,
+            f"counter-metric panel is incomplete; missing: {', '.join(sorted(missing))}",
         )
 
     degraded = {
