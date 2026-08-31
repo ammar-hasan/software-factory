@@ -62,14 +62,42 @@ class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
     cached_input_tokens: int = 0
-    """Reported separately, because folding cached tokens into the input count makes cost
-    trends incomparable across a caching change (completeness review)."""
+    """How many of ``input_tokens`` were served from cache.
+
+    **Inclusive**: ``input_tokens`` counts every input token and this names the cached
+    subset of them, so ``cost`` bills ``input_tokens - cached_input_tokens``. The
+    docstring used to say only "reported separately", which an adapter author could
+    reasonably read as disjoint -- and under that reading every cost figure is
+    under-reported by exactly the cache hit rate, silently and in the flattering
+    direction. Each adapter asserts the invariant; see ``Usage.check``.
+    """
 
     latency_s: float = 0.0
+
+    def check(self) -> None:
+        """Assert the inclusive-cache convention. Called by every adapter."""
+        if self.cached_input_tokens > self.input_tokens:
+            raise ValueError(
+                f"cached_input_tokens ({self.cached_input_tokens}) exceeds input_tokens "
+                f"({self.input_tokens}); cached tokens are a subset of the input count, "
+                "not a separate total"
+            )
 
     def cost(self, *, per_mtok_in: float, per_mtok_out: float) -> float:
         billable_in = max(0, self.input_tokens - self.cached_input_tokens)
         return (billable_in / 1e6) * per_mtok_in + (self.output_tokens / 1e6) * per_mtok_out
+
+    @classmethod
+    def observed(cls, **fields: object) -> Usage:
+        """Build a `Usage` from an adapter's report, checking the cache convention.
+
+        Every adapter goes through here rather than calling the constructor, so a provider
+        that reports cached tokens disjointly is caught at the boundary instead of
+        under-reporting cost by the cache hit rate for the life of the deployment.
+        """
+        usage = cls(**fields)  # type: ignore[arg-type]
+        usage.check()
+        return usage
 
     def merged(self, other: Usage) -> Usage:
         return Usage(

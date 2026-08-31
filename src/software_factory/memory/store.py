@@ -35,7 +35,12 @@ class MemoryStoreError(FactoryError):
 
 @dataclass(frozen=True, slots=True)
 class Mutation:
-    """One recorded change to a memory. Every mutation is auditable (FR-6.11)."""
+    """One recorded change to a memory. Every mutation is auditable (FR-6.11).
+
+    ``before`` is filled by replay -- the previous record's ``after`` for the same id --
+    rather than stored twice in the log. It was declared and never populated, so a reader
+    following the docstring got `None` for every entry and could not see what changed.
+    """
 
     memory_id: str
     op: str
@@ -44,6 +49,12 @@ class Mutation:
     at: datetime
     before: dict[str, Any] | None = None
     after: dict[str, Any] | None = None
+    tombstone: bool = False
+    """True for an erasure or delete record.
+
+    Its ``after`` is a stub -- an id and a digest, no claim -- so a consumer that reads it
+    as a memory gets a malformed one. The flag is how it can tell without guessing.
+    """
 
 
 class MemoryStore:
@@ -375,6 +386,9 @@ class MemoryStore:
     def mutations(self, memory_id: str | None = None) -> list[Mutation]:
         """Replay the log as a mutation history, optionally for one memory."""
         history: list[Mutation] = []
+        # The state each memory was in before the record being read. Replayed rather than
+        # stored: writing both sides would double the log for a value that is already there.
+        previous: dict[str, dict[str, Any]] = {}
         if not self.path.exists():
             return history
         with self._locked(shared=True):
@@ -390,16 +404,23 @@ class MemoryStore:
             reason = record.get("reason")
             if reason is None and record.get("op") == "use":
                 reason = "cited in a passing run" if record.get("helped") else "cited"
+            body = record.get("memory")
+            op = str(record["op"])
+            tombstone = op in ("delete", "erased") or bool((body or {}).get("erased"))
             history.append(
                 Mutation(
                     memory_id=target,
-                    op=str(record["op"]),
+                    op=op,
                     actor=str(record.get("actor", "")),
                     reason=str(reason or ""),
                     at=datetime.fromisoformat(record["at"]),
-                    after=record.get("memory"),
+                    before=previous.get(target),
+                    after=body,
+                    tombstone=tombstone,
                 )
             )
+            if body is not None:
+                previous[target] = body
         return history
 
     # -------------------------------------------------------------------- utilities

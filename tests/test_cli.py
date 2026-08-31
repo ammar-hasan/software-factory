@@ -222,10 +222,40 @@ def test_ledger_tail_returns_the_most_recent_entries(tmp_path: Path) -> None:
 
 
 def test_doctor_reports_environment_checks() -> None:
-    result = runner.invoke(app, ["doctor", "--json"])
+    """Every check reports a verdict, a detail, and -- when failing -- a remediation.
 
-    checks = {c["check"] for c in payload(result.output)["checks"]}
-    assert {"python", "git"} <= checks
+    The previous assertion was that the check *names* were present. `requires-python` is
+    `>=3.11`, so the python check cannot be false in an environment that can run this at
+    all: a check that cannot fail proves nothing about the reporting around it (T12).
+    """
+    result = runner.invoke(app, ["doctor", "--json"])
+    checks = payload(result.output)["checks"]
+
+    assert {"python", "git"} <= {c["check"] for c in checks}
+    for check in checks:
+        assert isinstance(check["ok"], bool)
+        assert check["detail"], f"{check['check']} reports no detail"
+        if not check["ok"]:
+            assert check["remediation"], f"{check['check']} fails with no remediation"
+
+
+def test_doctor_fails_and_says_why_when_a_required_tool_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The half that matters: `doctor` exists to report a broken environment, and nothing
+    tested that it reports one."""
+    import shutil
+
+    real = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda name: None if name == "git" else real(name))
+
+    result = runner.invoke(app, ["doctor", "--json"])
+    body = payload(result.output)
+
+    assert body["ok"] is False
+    git_check = next(c for c in body["checks"] if c["check"] == "git")
+    assert git_check["ok"] is False
+    assert "Install git" in git_check["remediation"]
 
 
 # --------------------------------------------------------- knowledge subsystem commands

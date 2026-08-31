@@ -12,6 +12,7 @@ the chain, so appends serialise.
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
@@ -27,6 +28,23 @@ try:  # pragma: no cover - platform dependent
     _HAVE_FCNTL = True
 except ImportError:  # pragma: no cover - Windows
     _HAVE_FCNTL = False
+
+
+def _reject_unserialisable(payload: dict[str, Any] | None) -> None:
+    """Raise unless the payload is representable in JSON exactly as given."""
+    if payload is None:
+        return
+    try:
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        raise LedgerError(
+            f"ledger payload is not JSON-serialisable: {exc}",
+            remediation=(
+                "Convert sets to sorted lists, dataclasses to dicts, and enums to their "
+                "values before appending. A payload the ledger has to guess at is a payload "
+                "whose hash cannot be reproduced."
+            ),
+        ) from exc
 
 
 class Ledger:
@@ -51,6 +69,12 @@ class Ledger:
         The tail is re-read under the lock rather than cached, so a second process
         appending between our calls cannot fork the chain.
         """
+        # Refused here rather than stringified at hash time. `digest()` used `default=str`,
+        # so a value JSON could not serialise was hashed as its `str()` -- and `str()` of a
+        # set varies with PYTHONHASHSEED, so an entry sealed in one process could fail
+        # verification in another and report tampering that never happened.
+        _reject_unserialisable(payload)
+
         with self._locked():
             if self.torn_tail():
                 # A previous write did not complete. Dropping the fragment is the only way

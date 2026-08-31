@@ -429,7 +429,27 @@ def test_sampling_is_deterministic() -> None:
         sampling_rate=50,
     )
 
-    assert scorer.samples("run-123") == scorer.samples("run-123")
+    # Calling one pure function twice with one argument cannot distinguish determinism
+    # from anything at all (T8). What is worth asserting is that the realised rate matches
+    # the configured one, and that the selection is a property of *this* scorer.
+    runs = [f"run-{index:05d}" for index in range(2000)]
+    selected = [run for run in runs if scorer.samples(run)]
+
+    assert 0.45 <= len(selected) / len(runs) <= 0.55
+
+    # Deterministic: the same scorer and run always agree.
+    assert all(scorer.samples(run) for run in selected)
+
+    # And scorer-specific, so two scorers at the same rate do not sample the same runs.
+    other = Scorer(
+        name="tests-run-b",
+        labels=(Label("ran", 1.0), Label("not_run", 0.0)),
+        passing_score=1.0,
+        sampling_rate=50,
+    )
+    other_selected = {run for run in runs if other.samples(run)}
+    overlap = len(set(selected) & other_selected) / len(selected)
+    assert 0.4 <= overlap <= 0.6, f"the two scorers' samples overlap {overlap:.0%}"
 
 
 def test_a_zero_sample_rate_scores_nothing() -> None:

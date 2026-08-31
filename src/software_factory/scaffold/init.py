@@ -54,7 +54,9 @@ def init_factory(
     skipped so a re-run on a partly-initialised directory is safe and legible.
     """
     result = InitResult(root=root)
-    review_by = (dt.date.today() + dt.timedelta(days=365)).isoformat()
+    # UTC, like every other timestamp this package writes. `date.today()` is local
+    # time, so a scaffold written at 23:30 in UTC-5 was dated a year from tomorrow.
+    review_by = (dt.datetime.now(dt.UTC).date() + dt.timedelta(days=365)).isoformat()
 
     files: dict[str, str] = {
         "factory.yaml": templates.FACTORY_YAML.format(

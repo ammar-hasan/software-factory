@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections import deque
 from contextlib import suppress
 from pathlib import Path
 from typing import Annotated, Any
@@ -399,7 +400,9 @@ def ledger_tail(
     """Show the most recent entries."""
     ledger = Ledger(path)
     try:
-        entries = list(ledger.read())[-count:]
+        # A bounded window, not the whole ledger: `list(...)[-count:]` held every entry in
+        # memory to show twenty of them, on a log designed to grow forever.
+        entries = list(deque(ledger.read(), maxlen=count))
     except FactoryError as exc:
         _fail(exc, as_json)
         return

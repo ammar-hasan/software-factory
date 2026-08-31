@@ -373,7 +373,7 @@ factory's declared ceiling tier.
 
 ### 8.4 Small-tier scaffolding
 
-Applied automatically when the active tier is at or below `scaffold_below` (default: `small`).
+Applied automatically when the active tier is at or below `scaffoldAtOrBelow` (default: `small`).
 
 | Scaffold | Behaviour |
 | --- | --- |

@@ -451,7 +451,10 @@ def enforce_budget(
         # operator to run this pass, the one action that could not help. The scope stayed
         # closed until someone archived by hand. Eviction now leaves room for one more,
         # which is the state admission accepts.
-        return len(live) >= max_items or sum(len(m.content) for m in live) >= max_bytes
+        # UTF-8 bytes, matching `ScopeBudget.max_bytes`. Characters under-counted a
+        # non-Latin store by two to four times against a bound named in bytes.
+        used = sum(len(m.content.encode("utf-8")) for m in live)
+        return len(live) >= max_items or used >= max_bytes
 
     if not over():
         return report

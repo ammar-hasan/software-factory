@@ -122,6 +122,11 @@ the poisoning failure this subsystem exists to prevent.
 """
 
 
+def _as_utc(value: datetime) -> datetime:
+    """Read a naive datetime as UTC. Every timestamp this package writes is UTC."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 def utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -220,7 +225,17 @@ class Memory:
         return {source.identity() for source in self.provenance}
 
     def is_expired(self, now: datetime | None = None) -> bool:
-        return self.expires_on is not None and (now or utc_now()) >= self.expires_on
+        """Whether this memory's TTL has passed.
+
+        `Memory` is a plain dataclass, so a caller can assign a naive `expires_on` and
+        every comparison here would raise `TypeError: can't compare offset-naive and
+        offset-aware datetimes` -- from the retrieval pipeline, on a claim that was
+        otherwise fine. A naive value is read as UTC rather than refused: the store's own
+        timestamps are all UTC, so that is the only reading that could have been meant.
+        """
+        if self.expires_on is None:
+            return False
+        return _as_utc(now or utc_now()) >= _as_utc(self.expires_on)
 
     def effective_confidence(self) -> float:
         """Confidence after the single-source cap. Decay is applied by the policy pass.

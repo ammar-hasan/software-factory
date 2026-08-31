@@ -132,9 +132,15 @@ class ToolRegistryError(Exception):
     """A tool declaration is invalid. Raised at registration, never at call time."""
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class Grants:
-    """What one agent may do this run. Resolved before the run starts; immutable during it."""
+    """What one agent may do this run. Resolved before the run starts; immutable during it.
+
+    `frozen=True` because that sentence has to be enforced, not asserted. The fields were
+    already frozensets, so their *contents* could not change -- but the dataclass was not
+    frozen, so a tool handler holding the reference could do `grants.allow_all_tools = True`
+    and widen the boundary from inside the run it bounds.
+    """
 
     tools: frozenset[str] = frozenset()
     effects: frozenset[Effect] = frozenset({Effect.READ})

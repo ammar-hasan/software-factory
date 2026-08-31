@@ -274,7 +274,11 @@ def _check_judge_independence(
     subject = resolve_execution(definition.factory.agent_defaults, agent.definition.execution)
     judge = scorer.definition.judge
     same_harness = (subject.harness.type if subject.harness else "oz") == judge.type
-    subject_model = subject.model or (subject.harness.model if subject.harness else None)
+    # `_engine_model`, shared with `_same_engine`. These two checks answer the same
+    # question -- is the reviewer running on the reviewed's engine -- and disagreed: this
+    # one never fell back to `tier`, so two agents on one tier and harness were the same
+    # engine for the critic check and different engines for the judge check.
+    subject_model = _engine_model(subject)
     same_model = subject_model is not None and subject_model == judge.model
     if same_harness and same_model:
         report.add(
@@ -325,15 +329,30 @@ def _check_review_independence(definition: Definition, report: ValidationReport)
                 )
 
 
+def _engine_model(execution: ExecutionDefaults) -> str | None:
+    """Which model an execution actually runs on, most specific first.
+
+    One definition, used by both independence checks. They had two, and the difference was
+    the `tier` fallback -- so the same pair of agents was "the same engine" for the critic
+    check and not for the judge check.
+    """
+    return (
+        execution.model
+        or (execution.harness.model if execution.harness else None)
+        or (execution.tier)
+    )
+
+
 def _same_engine(left: ExecutionDefaults, right: ExecutionDefaults) -> bool:
     left_harness = left.harness.type if left.harness else "oz"
     right_harness = right.harness.type if right.harness else "oz"
-    left_model = left.model or (left.harness.model if left.harness else None) or left.tier
-    right_model = right.model or (right.harness.model if right.harness else None) or right.tier
-    return left_harness == right_harness and left_model == right_model
+    return left_harness == right_harness and _engine_model(left) == _engine_model(right)
 
 
 def _check_skills(definition: Definition, report: ValidationReport) -> None:
+    # Hoisted: this was rebuilt inside the loop, walking every agent's skills once per
+    # skill, which made the successor check quadratic in a library it should be linear in.
+    known = {s.name for s in _all_skills(definition)}
     for skill in _all_skills(definition):
         if not description_is_specific(skill.definition.description):
             report.add(
@@ -371,7 +390,6 @@ def _check_skills(definition: Definition, report: ValidationReport) -> None:
                 )
             )
         successor = skill.definition.superseded_by
-        known = {s.name for s in _all_skills(definition)}
         if successor and successor not in known:
             report.add(
                 ValidationIssue(
@@ -458,6 +476,15 @@ def _check_secrets_declared(definition: Definition, report: ValidationReport) ->
     value_shaped = re.compile(r"^(?:sk-|ghp_|gho_|github_pat_|xox[baprs]-|AKIA)[A-Za-z0-9_\-]{8,}$")
     sources: list[tuple[Path, str, tuple[str, ...]]] = [
         (definition.root / "factory.yaml", "the factory", definition.factory.secrets),
+        # `agentDefaults` was not scanned, and it is the surface where a factory-wide grant
+        # is written -- the one FR-2.10a makes the default for every agent that does not
+        # narrow it. A value pasted there reached the whole fleet and this check said
+        # nothing about it.
+        (
+            definition.root / "factory.yaml",
+            "the factory's agent defaults",
+            definition.factory.agent_defaults.secrets or (),
+        ),
         *(
             (agent.path, f"agent {agent.name!r}", agent.definition.execution.secrets or ())
             for agent in definition.agents.values()
@@ -619,7 +646,12 @@ def _lint_policy_claims(definition: Definition, report: ValidationReport) -> Non
     policy_dir = definition.root / "policy"
     if not policy_dir.is_dir():
         return
-    for path in sorted(policy_dir.rglob("*.yaml")):
+    # `.yaml` alone missed `.yml` and `.md`, and a policy file claiming an enforcement it
+    # cannot perform is exactly as misleading in a Markdown file as in a YAML one.
+    candidates = sorted(
+        path for extension in ("*.yaml", "*.yml", "*.md") for path in policy_dir.rglob(extension)
+    )
+    for path in candidates:
         text = path.read_text(encoding="utf-8", errors="replace")
         match = _FALSE_ENFORCEMENT.search(text)
         if match:

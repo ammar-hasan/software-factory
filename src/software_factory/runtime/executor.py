@@ -130,12 +130,25 @@ class SandboxPolicy:
         env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
         env["HOME"] = str(self.workspace)
         env["PWD"] = str(self.workspace)
-        # A run that declares no network should not be able to reach one by accident
-        # through a proxy variable inherited from the operator's shell.
-        if self.network is NetworkPolicy.NONE:
-            for blocked in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
-                env.pop(blocked, None)
         env.update(self.secrets)
+        # A run that declares no network must not reach one by accident through a proxy
+        # variable. This runs *after* the secrets are merged, which is the only position
+        # where it does anything: `env_allowlist` does not carry the proxy names, so
+        # stripping before the merge only ever removed variables that were never there --
+        # dead code that read as a control. The live cases are a declared secret named
+        # `HTTPS_PROXY` and an operator who added a proxy name to `env_allowlist`.
+        if self.network is NetworkPolicy.NONE:
+            for blocked in (
+                "http_proxy",
+                "https_proxy",
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "all_proxy",
+                "ALL_PROXY",
+                "no_proxy",
+                "NO_PROXY",
+            ):
+                env.pop(blocked, None)
         return env
 
 
@@ -381,14 +394,26 @@ class LocalExecutor:
         return redact(text, self.policy.secrets)
 
     def _cap(self, text: str) -> tuple[str, bool]:
-        """Truncate output, and say so. Silent truncation is a defect (HARNESS.md T-6)."""
-        if len(text) <= self.policy.output_limit_bytes:
+        """Truncate output, and say so. Silent truncation is a defect (HARNESS.md T-6).
+
+        Measured in UTF-8 bytes, which is what `output_limit_bytes` says and what the
+        elision notice reports. It compared `len(text)` -- characters -- so output in a
+        non-Latin script ran to two to four times the declared limit while the notice
+        called the difference "bytes".
+
+        The cut points are found by decoding back from a byte slice with `errors="ignore"`,
+        so a multi-byte character is never split in half.
+        """
+        encoded = text.encode("utf-8")
+        limit = self.policy.output_limit_bytes
+        if len(encoded) <= limit:
             return text, False
-        head = self.policy.output_limit_bytes // 2
-        tail = self.policy.output_limit_bytes - head
+        head_bytes = limit // 2
+        tail_bytes = limit - head_bytes
+        head = encoded[:head_bytes].decode("utf-8", errors="ignore")
+        tail = encoded[-tail_bytes:].decode("utf-8", errors="ignore")
         return (
-            f"{text[:head]}\n\n[... {len(text) - self.policy.output_limit_bytes} bytes elided "
-            f"...]\n\n{text[-tail:]}",
+            f"{head}\n\n[... {len(encoded) - limit} bytes elided ...]\n\n{tail}",
             True,
         )
 

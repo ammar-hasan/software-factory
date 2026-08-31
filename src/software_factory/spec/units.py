@@ -53,7 +53,11 @@ class Agreement(enum.StrEnum):
 class TrustClass(enum.StrEnum):
     """Where a claim came from, and therefore how far it may travel (PRD FR-6.4b).
 
-    Ordered weakest-last so ``min`` over an iterable gives the derived trust directly.
+    Declared strongest-first, so ``max`` over ``_TRUST_ORDER`` gives the derived trust --
+    the weakest input wins, which is what monotone-downward means. The docstring used to
+    say ``min``, describing an ordering the code does not use; a second call site written
+    from the docstring rather than the code would have derived the *strongest* input's
+    trust, which is the failure this class exists to prevent.
     """
 
     VERIFIED = "verified"
@@ -224,10 +228,39 @@ class SpecUnit(BaseModel):
         return surfaces_overlap(tuple(anchor.path for anchor in self.implements), paths)
 
 
+#: A modal followed by an unmeasurable adjective, anywhere in the statement.
+#:
+#: This was anchored `^...$` and matched with `.match`, so it caught only a statement that
+#: was *entirely* the vague phrase -- "should be fast" was rejected and "The API should be
+#: fast" was accepted. Nobody writes an acceptance criterion the first way, so the screen
+#: passed essentially everything it was written to stop.
 VAGUE = re.compile(
-    r"^\W*(?:should|must|will)?\s*(?:be\s+)?"
-    r"(?:fast|quick|slow|good|nice|clean|simple|robust|reliable|scalable|performant|"
-    r"user[- ]friendly|intuitive|maintainable|secure)\W*$",
+    r"\b(?:should|must|will|shall|needs?\s+to)\s+(?:be\s+|feel\s+|remain\s+|stay\s+)?"
+    r"(?:very\s+|really\s+|reasonably\s+|fairly\s+)?"
+    r"(?:fast|quick|slow|snappy|responsive|good|nice|clean|simple|easy|robust|reliable|"
+    r"scalable|performant|efficient|user[- ]friendly|intuitive|maintainable|secure)\b",
+    re.IGNORECASE,
+)
+
+#: A number with a unit, or a comparison. Its presence turns a vague adjective into a
+#: measurable claim: "should be fast, under 200ms at p95" is checkable and must not be
+#: rejected for containing the word "fast".
+MEASURED = re.compile(
+    r"\d+\s*(?:ms|milliseconds?|s|seconds?|m|minutes?|h|hours?|%|percent|"
+    r"[kmg]?b|requests?|rows?|items?|calls?)\b"
+    r"|[<>]=?\s*\d"
+    r"|\bp\d{2}\b"
+    r"|\b(?:at\s+most|at\s+least|no\s+more\s+than|within|under|over|exceeds?)\b\s*\d",
+    re.IGNORECASE,
+)
+
+
+#: A statement that is nothing but the adjective. The anchored form is still needed: with
+#: no modal to key on, "user-friendly" has nothing for `VAGUE` to match.
+BARE_ADJECTIVE = re.compile(
+    r"^\W*(?:be\s+)?"
+    r"(?:fast|quick|slow|snappy|responsive|good|nice|clean|simple|easy|robust|reliable|"
+    r"scalable|performant|efficient|user[- ]friendly|intuitive|maintainable|secure)\W*$",
     re.IGNORECASE,
 )
 
@@ -235,11 +268,17 @@ VAGUE = re.compile(
 def criterion_is_checkable(statement: str) -> bool:
     """Reject criteria no test could distinguish from their negation (living-spec.md S-3).
 
-    A cheap syntactic screen, not a proof: it catches the common case ("should be fast")
-    and leaves the judgement calls to review. Being cheap is the point -- it runs on
-    every load.
+    A cheap syntactic screen, not a proof: it catches the common case and leaves the
+    judgement calls to review. Being cheap is the point -- it runs on every load.
+
+    A statement carrying a number with a unit, or a comparison, is left alone: the vague
+    word is then doing rhetorical work over a claim that is measurable underneath it, and
+    rejecting it would train authors to strip the explanation rather than add the number.
     """
-    return not VAGUE.match(statement.strip())
+    text = statement.strip()
+    if MEASURED.search(text):
+        return True
+    return not VAGUE.search(text) and not BARE_ADJECTIVE.match(text)
 
 
 @dataclass(frozen=True, slots=True)

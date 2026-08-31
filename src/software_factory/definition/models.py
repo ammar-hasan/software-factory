@@ -266,7 +266,13 @@ class Ladder(Strict):
     default_tier: Name | None = Field(default=None, alias="defaultTier")
     ceiling_tier: Name | None = Field(default=None, alias="ceilingTier")
     max_escalations: int = Field(default=2, alias="maxEscalations", ge=0)
-    scaffold_below: Name | None = Field(default=None, alias="scaffoldBelow")
+    scaffold_at_or_below: Name | None = Field(default=None, alias="scaffoldAtOrBelow")
+    """The highest tier that still receives scaffolding.
+
+    Inclusive, and named so. As `scaffoldBelow` the name read as exclusive while the
+    code was inclusive, and the two readings disagree exactly where it matters: the
+    lowest tier is the one that needs scaffolding most.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
@@ -275,7 +281,7 @@ class Ladder(Strict):
         names = [t.name for t in self.tiers]
         if len(names) != len(set(names)):
             raise ValueError("tier names must be unique")
-        for key in ("default_tier", "ceiling_tier", "scaffold_below"):
+        for key in ("default_tier", "ceiling_tier", "scaffold_at_or_below"):
             value = getattr(self, key)
             if value is not None and value not in names:
                 raise ValueError(f"`{key}` references unknown tier {value!r}; known: {names}")
@@ -394,7 +400,7 @@ class Platform(Strict):
     image: str | None = None
 
     @model_validator(mode="after")
-    def _linux_needs_image_digest(self) -> Self:
+    def _macos_is_aarch64(self) -> Self:
         if self.os == "macos" and self.arch != "aarch64":
             raise ValueError("macOS runners are aarch64 only")
         return self

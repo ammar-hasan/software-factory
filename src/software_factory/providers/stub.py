@@ -70,7 +70,7 @@ def says(text: str, *, tokens_in: int = 100, tokens_out: int = 50) -> Completion
     return Completion(
         text=text,
         stop_reason=StopReason.COMPLETE,
-        usage=Usage(input_tokens=tokens_in, output_tokens=tokens_out),
+        usage=Usage.observed(input_tokens=tokens_in, output_tokens=tokens_out),
         model="stub",
     )
 
@@ -81,7 +81,7 @@ def calls(name: str, arguments: dict[str, Any], *, call_id: str = "call-1") -> C
         text="",
         stop_reason=StopReason.TOOL_CALL,
         tool_calls=(ToolCall(id=call_id, name=name, arguments=arguments),),
-        usage=Usage(input_tokens=100, output_tokens=20),
+        usage=Usage.observed(input_tokens=100, output_tokens=20),
         model="stub",
     )
 

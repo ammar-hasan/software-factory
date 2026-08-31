@@ -195,7 +195,9 @@ def test_a_human_can_cancel_from_any_stage(machine: StageMachine) -> None:
     for stage in (Stage.TRIAGE, Stage.BUILD, Stage.REVIEW, Stage.BLOCKED):
         work = item(stage)
 
-        cancelled = machine.cancel(work, actor="human:maintainer", reason="no longer needed")
+        cancelled = machine.cancel(
+            work, actor="human:maintainer", reason="no longer needed", human_approved=True
+        )
 
         assert isinstance(cancelled, Transition)
         assert work.stage is Stage.CANCELLED
@@ -204,7 +206,23 @@ def test_a_human_can_cancel_from_any_stage(machine: StageMachine) -> None:
 def test_cancelling_a_terminal_item_is_refused(machine: StageMachine) -> None:
     work = item(Stage.CANCELLED)
 
-    assert isinstance(machine.cancel(work, actor="human:a", reason="again"), TransitionRefused)
+    refused = machine.cancel(work, actor="human:a", reason="again", human_approved=True)
+
+    assert isinstance(refused, TransitionRefused)
+    assert refused.code == "stage.terminal"
+
+
+def test_an_agent_cannot_cancel_a_work_item(machine: StageMachine) -> None:
+    """`cancel` said "always available to a human" and checked nothing, so it was equally
+    available to an agent -- a one-call route past every gate in the graph, offered by the
+    component that reads attacker-controlled text (N15)."""
+    work = item(Stage.BUILD)
+
+    refused = machine.cancel(work, actor="agent:conductor", reason="not worth doing")
+
+    assert isinstance(refused, TransitionRefused)
+    assert refused.code == "stage.cancel_needs_human"
+    assert work.stage is Stage.BUILD
 
 
 # ------------------------------------------------------------------------------ rework

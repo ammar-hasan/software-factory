@@ -2909,3 +2909,468 @@ def test_m31_the_mutation_history_still_shows_usage(tmp_path: Path) -> None:
 
     assert [m.op for m in history] == ["seed", "use"]
     assert history[-1].reason == "cited in a passing run"
+
+
+# ------------------------------------------------------------------------- MINOR (N-)
+# Smaller findings, kept here because each one made something read as true that was not.
+
+
+def test_n1_the_custom_role_does_not_share_the_builder_weight_table() -> None:
+    """Bound by reference, any future per-role tuning of one silently changed the other."""
+    from software_factory.definition.models import AgentRole
+    from software_factory.harness.awareness import ROLE_WEIGHTS
+
+    assert ROLE_WEIGHTS[AgentRole.CUSTOM] is not ROLE_WEIGHTS[AgentRole.BUILDER]
+    assert ROLE_WEIGHTS[AgentRole.CUSTOM] == ROLE_WEIGHTS[AgentRole.BUILDER]
+
+
+def test_n3_a_protected_section_is_trimmed_rather_than_exempted() -> None:
+    """`_apply_budget` skipped protected sections entirely and the per-section budgets
+    already sum to the whole, so the pack had no upper bound at all -- a long contract or
+    a large toolbelt silently blew the working-set ceiling the budget exists to respect."""
+    from software_factory.definition.models import AgentRole
+    from software_factory.harness.awareness import (
+        Citation,
+        CitationKind,
+        Item,
+        PackAssembler,
+        SectionId,
+        Snapshot,
+    )
+    from software_factory.memory.records import utc_now
+
+    def bulk(count: int) -> list[Item]:
+        return [
+            Item(content="x" * 400, citation=Citation(kind=CitationKind.FILE, ref=f"f{i}"))
+            for i in range(count)
+        ]
+
+    builder = PackAssembler(role=AgentRole.BUILDER, budget_tokens=400)
+    builder.register(SectionId.MISSION, lambda: (bulk(1), None))
+    builder.register(SectionId.CONTRACT, lambda: (bulk(20), None))
+    builder.register(SectionId.TOOLBELT, lambda: (bulk(20), None))
+
+    pack = builder.assemble(
+        Snapshot(
+            commit="abc",
+            definition_revision="d1",
+            memory_revision="m1",
+            ledger_seq=1,
+            skill_revision="s1",
+            assembled_at=utc_now(),
+        )
+    )
+
+    contract = pack.section(SectionId.CONTRACT)
+    assert contract is not None
+    assert contract.truncated > 0
+    # And the floor holds: an agent that cannot see its mission is not on a smaller pack.
+    mission = pack.section(SectionId.MISSION)
+    assert mission is not None
+    assert mission.items
+
+
+def test_n4_a_dense_script_is_not_budgeted_at_a_quarter_of_its_size() -> None:
+    """Four characters per token is a Latin-script rule. Counting CJK characters the same
+    way under-budgeted a non-Latin pack roughly fourfold, which overruns a context window
+    rather than wasting one."""
+    from software_factory.harness.awareness import estimate_tokens
+
+    latin = "the importer strips a byte-order mark"
+    cjk = "インポータはヘッダの先頭バイト順マークを削除する"
+
+    assert estimate_tokens(cjk) > len(cjk) / 2
+    assert estimate_tokens(latin) == (len(latin) + 3) // 4
+
+
+def test_n4_output_truncation_is_measured_in_the_unit_it_reports(tmp_path: Path) -> None:
+    """`_cap` compared characters against `output_limit_bytes` and called the difference
+    "bytes", so non-Latin output ran to several times the declared limit."""
+    from software_factory.runtime.executor import LocalExecutor, SandboxLevel, SandboxPolicy
+
+    executor = LocalExecutor(
+        SandboxPolicy(workspace=tmp_path, output_limit_bytes=200), level=SandboxLevel.PROCESS
+    )
+    capped, truncated = executor._cap("メ" * 500)
+
+    assert truncated
+    # Within a small multiple of the declared limit. Counting characters produced roughly
+    # three times the limit for this script and called the difference "bytes".
+    assert len(capped.encode("utf-8")) < 200 * 2
+    # Never mid-character: a split multi-byte sequence is not output, it is corruption.
+    capped.encode("utf-8").decode("utf-8")
+
+
+def test_n7_grants_cannot_be_widened_from_inside_the_run_they_bound() -> None:
+    """The fields were frozensets, so their contents were safe -- but the dataclass was
+    not frozen, so a tool handler holding the reference could set `allow_all_tools`."""
+    from software_factory.harness.tools import Grants
+
+    grants = Grants(tools=frozenset({"repo.read"}), effects=frozenset({Effect.READ}))
+
+    with pytest.raises((AttributeError, TypeError)):
+        grants.allow_all_tools = True  # type: ignore[misc]
+
+
+def test_n8_derived_trust_takes_the_weakest_input() -> None:
+    """The docstring described `min` over an ordering the code does not use. A second call
+    site written from it would have derived the *strongest* input's trust."""
+    from software_factory.spec.units import TrustClass, derived_trust
+
+    assert derived_trust(TrustClass.VERIFIED, TrustClass.UNTRUSTED) is TrustClass.UNTRUSTED
+    assert derived_trust(TrustClass.VERIFIED, TrustClass.OPERATOR) is TrustClass.OPERATOR
+
+
+@pytest.mark.parametrize(
+    "statement",
+    ["The API should be fast", "Responses must be snappy for the dashboard", "user-friendly"],
+)
+def test_n9_a_vague_criterion_is_caught_mid_sentence(statement: str) -> None:
+    """`VAGUE` was anchored `^...$`, so it caught only a statement that was *entirely* the
+    vague phrase -- and nobody writes a criterion that way."""
+    from software_factory.spec.units import criterion_is_checkable
+
+    assert not criterion_is_checkable(statement)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "The endpoint should be fast: under 200ms at p95",
+        "The importer strips a byte-order mark from CSV headers",
+        "Import of 10000 rows completes within 30 seconds",
+    ],
+)
+def test_n9_a_measured_criterion_survives_the_screen(statement: str) -> None:
+    """A number with a unit makes the claim checkable, whatever adjective surrounds it.
+    Rejecting it would train authors to delete the explanation, not add the number."""
+    from software_factory.spec.units import criterion_is_checkable
+
+    assert criterion_is_checkable(statement)
+
+
+def test_n11_the_scaffold_threshold_is_inclusive_and_named_so() -> None:
+    """`scaffoldBelow` read as exclusive while the code was inclusive, and the two readings
+    disagree exactly where it matters: the lowest tier is the one that needs scaffolding."""
+    from software_factory.definition.models import Ladder
+    from software_factory.harness.routing import Scaffold, scaffolds_for
+
+    ladder = Ladder.model_validate(
+        {
+            "tiers": [
+                {
+                    "name": "cheap",
+                    "provider": "local",
+                    "model": "small",
+                    "contextWindow": 32000,
+                    "workingSetCeiling": 20000,
+                    "local": True,
+                },
+                {
+                    "name": "mid",
+                    "provider": "local",
+                    "model": "mid",
+                    "contextWindow": 128000,
+                    "workingSetCeiling": 90000,
+                },
+            ],
+            "scaffoldAtOrBelow": "cheap",
+        }
+    )
+
+    assert scaffolds_for(ladder, "cheap") == frozenset(Scaffold)
+    assert scaffolds_for(ladder, "mid") == frozenset()
+
+
+def test_n12_parking_and_resuming_a_work_item_is_not_rework() -> None:
+    """The order came from the transition table's key order, with BLOCKED at index 8, so
+    every `BLOCKED -> BUILD` resume compared 3 < 8 and counted as rework -- inflating O-8
+    for every item a human ever paused."""
+    machine = StageMachine()
+    work = _work_item(Stage.BUILD)
+
+    machine.block(work, Blocker.AWAITING_HUMAN, actor="conductor", action="wait")
+    machine.advance(work, Stage.BUILD, actor="human:maintainer", reason="resuming")
+
+    assert work.returned_to_earlier_stage() == 0
+
+
+def test_n12_a_genuine_return_still_counts_as_rework() -> None:
+    machine = StageMachine()
+    work = _work_item(Stage.BUILD)
+
+    machine.advance(work, Stage.REVIEW, actor="conductor", reason="built")
+    machine.advance(work, Stage.BUILD, actor="critic", reason="changes requested")
+
+    assert work.returned_to_earlier_stage() == 1
+
+
+def _work_item(stage: Stage) -> WorkItem:
+    from software_factory.orchestrator import SourceContext
+
+    return WorkItem(
+        id="wi-n12",
+        factory="payments",
+        title="CSV importer mangles BOM headers",
+        request="Uploading a UTF-8 CSV with a BOM names the first column oddly.",
+        source=SourceContext(provider="cli", kind="direct", ref="local"),
+        stage=stage,
+    )
+
+
+def test_n13_line_of_uses_the_text_it_was_parsed_from(tmp_path: Path) -> None:
+    """`line_of` re-read `self.path` on every call, ignoring the `text=` argument `parse`
+    accepts -- so in-memory content reported lines from a different file, or from none."""
+    from software_factory.definition import frontmatter as fm
+
+    missing = tmp_path / "never-written.md"
+    document = fm.parse(missing, text="---\nname: alpha\nrole: BUILDER\n---\nBody.\n")
+
+    assert document.line_of("role") == 3
+    assert document.line_of("absent") is None
+
+
+def test_n15_cancellation_is_a_human_decision() -> None:
+    """`cancel` said "always available to a human" and checked nothing, so it was equally
+    available to an agent: a one-call route past every gate in the graph, offered by the
+    component that reads attacker-controlled text."""
+    from software_factory.orchestrator import TransitionRefused
+
+    machine = StageMachine()
+    work = _work_item(Stage.BUILD)
+
+    refused = machine.cancel(work, actor="agent:conductor", reason="skip it")
+
+    assert isinstance(refused, TransitionRefused)
+    assert refused.code == "stage.cancel_needs_human"
+    assert work.stage is Stage.BUILD
+
+
+def test_n17_an_unserialisable_ledger_payload_is_refused(tmp_path: Path) -> None:
+    """`digest()` used `default=str`, so a value JSON could not serialise was hashed as its
+    `str()` -- and `str()` of a set varies with PYTHONHASHSEED, so an entry sealed in one
+    process could fail verification in another and report tampering that never happened.
+    Grants and effect sets are frozensets and plausible payload values."""
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+
+    with pytest.raises(LedgerError, match="not JSON-serialisable"):
+        ledger.append(
+            EntryType.TOOL_CALLED,
+            actor="harness",
+            subject="run-1",
+            payload={"effects": frozenset({"read", "write"})},
+        )
+
+    assert list(ledger.read()) == []
+
+
+def test_n18_the_byte_budget_counts_bytes(tmp_path: Path) -> None:
+    """`sum(len(m.content))` counted characters against a field named `max_bytes`, so a
+    store of non-Latin claims held two to four times its declared budget -- and the budget
+    exists to bound what `load()` reads back."""
+    from software_factory.memory.admission import ScopeBudget
+
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    store.load()
+    # Ten characters of CJK is 30 UTF-8 bytes.
+    _chain_memory(store, "M1", lane=Lane.CANON)
+    held = store.get("M1")
+    assert held is not None
+    held.content = "バイト順マーク削除" * 4
+
+    refused = admit(
+        Candidate(
+            content="The importer reads headers as UTF-8 with a byte-order mark.",
+            kind=Kind.FACT,
+            scope=Scope.REPOSITORY,
+            scope_ref="acme/svc",
+            provenance=(Source(kind=SourceKind.RUN, ref="run-new"),),
+        ),
+        store,
+        budget=ScopeBudget(max_items=1000, max_bytes=100),
+    )
+
+    assert isinstance(refused, Rejected)
+    assert refused.reason is RejectionReason.BUDGET
+
+
+def test_n19_a_naive_expiry_does_not_raise() -> None:
+    """`Memory` is a plain dataclass, so a caller can assign a naive `expires_on` -- and
+    every comparison raised TypeError out of the retrieval pipeline on a claim that was
+    otherwise fine."""
+    import datetime as dt
+
+    from software_factory.spec.units import TrustClass
+
+    memory = Memory(
+        id="M1",
+        lane=Lane.CANON,
+        kind=Kind.FACT,
+        scope=Scope.REPOSITORY,
+        scope_ref="acme/svc",
+        content="The importer strips a byte-order mark.",
+        provenance=(Source(kind=SourceKind.RUN, ref="r1"),),
+        trust=TrustClass.INTERNAL,
+        expires_on=dt.datetime(2020, 1, 1),  # naive, and in the past
+    )
+
+    assert memory.is_expired() is True
+
+
+def test_n22_a_shared_source_does_not_drop_an_otherwise_independent_memory(
+    tmp_path: Path,
+) -> None:
+    """`any(count >= cap for source in sources)` dropped a memory as soon as *any* one of
+    its sources was at cap, and then charged *all* of them. So the more sources a memory
+    had, the more likely it was to collide with the cap and the more of the cap it consumed
+    -- the exact inverse of a rule that exists to stop one source dominating a result.
+
+    Two equally corroborated memories here, so the single-source confidence cap cannot be
+    what separates them: they differ only in sharing one source out of five.
+    """
+    from software_factory.memory.retrieval import RetrievalRequest, retrieve
+    from software_factory.spec.units import TrustClass
+
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    store.load()
+    shared = Source(kind=SourceKind.RUN, ref="run-shared")
+
+    def put(memory_id: str, prefix: str) -> None:
+        store.put(
+            Memory(
+                id=memory_id,
+                lane=Lane.CANON,
+                kind=Kind.FACT,
+                scope=Scope.REPOSITORY,
+                scope_ref="acme/svc",
+                content=f"The importer handles byte-order marks in CSV headers ({memory_id}).",
+                provenance=(
+                    shared,
+                    *(Source(kind=SourceKind.RUN, ref=f"{prefix}{i}") for i in range(4)),
+                ),
+                confidence=0.9,
+                trust=TrustClass.INTERNAL,
+            ),
+            op="seed",
+            actor="test",
+            reason="fixture",
+        )
+
+    put("alpha", "a-run-")
+    put("beta", "b-run-")
+
+    result = retrieve(
+        store,
+        RetrievalRequest(
+            query="byte-order marks in CSV headers",
+            scopes=((Scope.REPOSITORY, "acme/svc"),),
+            limit=3,
+        ),
+    )
+
+    returned = {memory.id for memory in result.memories}
+    assert returned == {"alpha", "beta"}, "one memory was dropped for sharing a single source"
+
+
+def test_n22_a_single_source_still_cannot_dominate_a_result(tmp_path: Path) -> None:
+    """The fix must not remove the cap. Six memories from one run, and the cap still holds."""
+    from software_factory.memory.retrieval import RetrievalRequest, retrieve
+    from software_factory.spec.units import TrustClass
+
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    store.load()
+    only = Source(kind=SourceKind.RUN, ref="run-noisy")
+    for index in range(6):
+        store.put(
+            Memory(
+                id=f"m{index}",
+                lane=Lane.CANON,
+                kind=Kind.FACT,
+                scope=Scope.REPOSITORY,
+                scope_ref="acme/svc",
+                content=f"The importer handles byte-order marks in CSV headers (case {index}).",
+                provenance=(only,),
+                confidence=0.9,
+                trust=TrustClass.INTERNAL,
+            ),
+            op="seed",
+            actor="test",
+            reason="fixture",
+        )
+
+    result = retrieve(
+        store,
+        RetrievalRequest(
+            query="byte-order marks in CSV headers",
+            scopes=((Scope.REPOSITORY, "acme/svc"),),
+            limit=6,
+        ),
+    )
+
+    assert len(result.memories) == 1
+    assert result.dropped_diversity == 5
+
+
+def test_n24_a_description_saying_cannot_does_not_pass_the_boundary_check() -> None:
+    """The substring "not " occurs inside "cannot ", so a description saying only what the
+    skill *needs* satisfied a check about what it *excludes*."""
+    from software_factory.definition.models import SkillStatus
+    from software_factory.skills.registry import SkillRecord, SkillRegistry
+
+    registry = SkillRegistry()
+    registry.add(
+        SkillRecord(
+            name="csv-import",
+            description="Use this when importing CSV. This skill cannot be used without a token.",
+            body="body",
+            status=SkillStatus.ACTIVE,
+        )
+    )
+
+    problems = registry.description_problems("csv-import")
+
+    assert any(problem.code == "description.no_boundary" for problem in problems)
+
+
+def test_n24_a_description_that_really_states_a_boundary_passes() -> None:
+    from software_factory.definition.models import SkillStatus
+    from software_factory.skills.registry import SkillRecord, SkillRegistry
+
+    registry = SkillRegistry()
+    registry.add(
+        SkillRecord(
+            name="csv-import",
+            description=(
+                "Use this when importing CSV files with encoding problems. Not for "
+                "Excel workbooks or fixed-width exports."
+            ),
+            body="body",
+            status=SkillStatus.ACTIVE,
+        )
+    )
+
+    problems = registry.description_problems("csv-import")
+
+    assert not any(problem.code == "description.no_boundary" for problem in problems)
+
+
+def test_n25_a_provider_reporting_cached_tokens_disjointly_is_caught() -> None:
+    """The field said only "reported separately", which an adapter author could read as
+    disjoint -- and under that reading every cost figure is under-reported by exactly the
+    cache hit rate, silently and in the flattering direction."""
+    from software_factory.providers.base import Usage
+
+    with pytest.raises(ValueError, match="subset of the input count"):
+        Usage.observed(input_tokens=100, cached_input_tokens=400, output_tokens=20)
+
+
+def test_n26_an_escalation_is_discriminated_by_type_not_by_attribute() -> None:
+    """This was the one place a union was discriminated by `hasattr`, and the `type: ignore`
+    it needed meant the strict type checker was not covering the branch."""
+    import inspect
+
+    from software_factory.harness import loop as loop_module
+
+    source = inspect.getsource(loop_module.TurnLoop._finish)
+    assert "hasattr(escalation" not in source
+    assert "isinstance(escalation, Escalation)" in source

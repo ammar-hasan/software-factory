@@ -157,18 +157,29 @@ class WorkItem:
     def stages_visited(self) -> tuple[Stage, ...]:
         return (*(t.from_stage for t in self.history), self.stage)
 
-    def returned_to_earlier_stage(self) -> int:
-        """How many times this item went backwards. The rework signal (metric O-8)."""
-        order: list[Stage] = list(DEFAULT_TRANSITIONS)
+    def returned_to_earlier_stage(self, order: tuple[Stage, ...] | None = None) -> int:
+        """How many times this item went backwards. The rework signal (metric O-8).
+
+        Two corrections. The order came from `list(DEFAULT_TRANSITIONS)` -- the transition
+        table's key order, including `BLOCKED` at index 8 -- so a factory with a custom
+        graph was measured against the default one, and every `BLOCKED -> BUILD` resume
+        compared 3 < 8 and counted as rework. Parking an item is not doing it twice, so
+        O-8 was inflated for every item a human ever paused.
+        """
+        # `DEFAULT_ORDER` is defined below this class, so it is read here rather than
+        # bound as a default argument.
+        positions = {stage: index for index, stage in enumerate(order or DEFAULT_ORDER)}
         count = 0
         for transition in self.history:
             if transition.to_stage in TERMINAL or transition.to_stage is Stage.BLOCKED:
                 continue
-            try:
-                if order.index(transition.to_stage) < order.index(transition.from_stage):
-                    count += 1
-            except ValueError:  # pragma: no cover - custom graphs
+            if transition.from_stage is Stage.BLOCKED:
+                continue  # a resume, not a return
+            start, end = positions.get(transition.from_stage), positions.get(transition.to_stage)
+            if start is None or end is None:
                 continue
+            if end < start:
+                count += 1
         return count
 
     def as_dict(self) -> dict[str, object]:
@@ -333,11 +344,35 @@ class StageMachine:
             item.parked_at = parked_at
         return transition
 
-    def cancel(self, item: WorkItem, *, actor: str, reason: str) -> Transition | TransitionRefused:
-        """Cancel from any stage. Always available to a human (PRD FR-4.8)."""
+    def cancel(
+        self,
+        item: WorkItem,
+        *,
+        actor: str,
+        reason: str,
+        human_approved: bool = False,
+    ) -> Transition | TransitionRefused:
+        """Cancel from any stage. Available to a human (PRD FR-4.8), and only to a human.
+
+        The docstring said "always available to a human" and the body checked nothing, so
+        an agent could cancel any work item from any stage -- a one-call route around every
+        gate in the graph, in the one component that reads attacker-controlled text.
+        `human_approved` is the same flag `advance` already uses for a skip, so the two
+        human-authority decisions are expressed the same way and recorded the same way.
+        """
         if item.terminal:
             return TransitionRefused(
                 "stage.terminal", f"{item.id} is already {item.stage.value}", "Nothing to do."
+            )
+        if not human_approved:
+            return TransitionRefused(
+                "stage.cancel_needs_human",
+                f"cancelling {item.id} is a human decision",
+                (
+                    "Cancellation ends the work with no verification and no handoff, so it "
+                    "is not an agent's to make. A human must approve it, and the approval "
+                    "is recorded against their identity."
+                ),
             )
         transition = Transition(
             from_stage=item.stage,

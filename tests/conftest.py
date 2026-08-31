@@ -37,7 +37,7 @@ ladder:
       capabilities: [code, tools, reasoning]
   defaultTier: local-small
   ceilingTier: mid
-  scaffoldBelow: local-small
+  scaffoldAtOrBelow: local-small
 agentDefaults:
   tier: local-small
   runner: linux

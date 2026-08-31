@@ -68,7 +68,18 @@ class LedgerEntry:
     hash: str = ""
 
     def digest(self) -> str:
-        """Compute this entry's hash from its content."""
+        """Compute this entry's hash from its content.
+
+        No `default=str` fallback. A payload value JSON could not serialise was hashed as
+        `str(value)`, and `str()` of a set depends on `PYTHONHASHSEED` -- grants and effect
+        sets are frozensets and plausible payload values, so an entry sealed in one process
+        and verified in another could report a "content hash mismatch" that was nothing but
+        two different iteration orders. A tamper-evidence mechanism that cries wolf is one
+        that gets ignored.
+
+        A non-serialisable payload is refused at `Ledger.append` instead, where the caller
+        can still fix it.
+        """
         material = json.dumps(
             {
                 "seq": self.seq,
@@ -82,7 +93,6 @@ class LedgerEntry:
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,
-            default=str,
         )
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
 

@@ -267,6 +267,38 @@ def test_secret_value_pasted_into_a_definition_is_an_error(factory_root: Path) -
     assert not report.ok
 
 
+def test_a_secret_value_in_factory_yaml_is_an_error(factory_root: Path) -> None:
+    """The same rule, on the other two surfaces it can appear on (T11). The check covered
+    only `agents/*/agent.md`, and `factory.yaml` is where a factory-wide grant is written
+    -- which M18 showed reaches every agent."""
+    text = (factory_root / "factory.yaml").read_text(encoding="utf-8")
+    write(
+        factory_root / "factory.yaml",
+        text + "secrets: [ghp_abcdefghijklmnopqrstuvwxyz0123456789]\n",
+    )
+
+    definition, report = load(factory_root)
+    validate(definition, report)
+
+    assert "secret.value_in_definition" in codes(report)
+
+
+def test_a_secret_value_in_agent_defaults_is_an_error(factory_root: Path) -> None:
+    text = (factory_root / "factory.yaml").read_text(encoding="utf-8")
+    write(
+        factory_root / "factory.yaml",
+        text.replace(
+            "agentDefaults:",
+            "agentDefaults:\n  secrets: [ghp_abcdefghijklmnopqrstuvwxyz0123456789]",
+        ),
+    )
+
+    definition, report = load(factory_root)
+    validate(definition, report)
+
+    assert "secret.value_in_definition" in codes(report)
+
+
 def test_unpinned_runner_image_warns(factory_root: Path) -> None:
     write(
         factory_root / "runners" / "loose.yaml",

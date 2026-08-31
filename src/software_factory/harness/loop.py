@@ -19,7 +19,12 @@ from typing import Any
 import jsonschema
 
 from software_factory.harness.awareness import AwarenessPack, estimate_tokens
-from software_factory.harness.routing import RoutingState, Trigger, may_escalate
+from software_factory.harness.routing import (
+    Escalation,
+    RoutingState,
+    Trigger,
+    may_escalate,
+)
 from software_factory.harness.tools import (
     BlastRadius,
     Calibration,
@@ -414,9 +419,12 @@ class TurnLoop:
 
         self.routing.schema_failures = result.repair_attempts
         escalation = may_escalate(self.routing, Trigger.SCHEMA_REPEAT)
-        if hasattr(escalation, "to_tier"):
+        # `isinstance`, not an attribute probe. This was the one place a union was
+        # discriminated by `hasattr`, and the `type: ignore` it needed meant the strict type
+        # checker was not covering the branch -- in a codebase whose premise is that it does.
+        if isinstance(escalation, Escalation):
             result.escalations.append(
-                f"schema_repeat: {escalation.from_tier} -> {escalation.to_tier}"  # type: ignore[union-attr]
+                f"schema_repeat: {escalation.from_tier} -> {escalation.to_tier}"
             )
             result.repair_attempts = 0
             return None

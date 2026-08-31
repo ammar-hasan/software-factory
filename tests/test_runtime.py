@@ -265,16 +265,53 @@ def test_declared_secrets_reach_the_command_but_not_the_captured_output(
     assert "<SF_TOKEN:redacted>" in result.stdout
 
 
-def test_proxy_variables_are_stripped_when_no_network_is_granted(tmp_path: Path) -> None:
-    """A run declaring no network must not reach one through an inherited proxy var."""
+def test_an_inherited_proxy_variable_never_reaches_any_run(tmp_path: Path) -> None:
+    """The allowlist is what keeps an inherited proxy out, in every network mode.
+
+    This test used to be named for the proxy-stripping branch and passed without it: the
+    allowlist does not carry proxy names, so `environment()` never copied one from
+    `os.environ` in the first place (T4). Testing the allowlist is worth doing -- it is
+    just a different property from the one the name claimed.
+    """
     os.environ["https_proxy"] = "http://proxy.invalid:8080"
     try:
-        env = policy(tmp_path, network=NetworkPolicy.NONE).environment()
+        for network in (NetworkPolicy.NONE, NetworkPolicy.OPEN):
+            env = policy(tmp_path, network=network).environment()
+            assert "https_proxy" not in env
+            assert "HTTPS_PROXY" not in env
     finally:
         os.environ.pop("https_proxy", None)
 
-    assert "https_proxy" not in env
+
+def test_a_declared_secret_cannot_smuggle_a_proxy_into_a_no_network_run(
+    tmp_path: Path,
+) -> None:
+    """The live case for the stripping branch, and the one it did not cover.
+
+    Secrets are merged into the environment, so a secret named `HTTPS_PROXY` walked
+    straight past a strip that ran before the merge -- turning `network: none` into
+    unrestricted egress through a name an operator chose.
+    """
+    env = policy(
+        tmp_path,
+        network=NetworkPolicy.NONE,
+        secrets={"HTTPS_PROXY": "http://proxy.invalid:8080", "SF_TOKEN": "keep-me"},
+    ).environment()
+
     assert "HTTPS_PROXY" not in env
+    assert env["SF_TOKEN"] == "keep-me"
+
+
+def test_an_open_network_run_keeps_a_declared_proxy(tmp_path: Path) -> None:
+    """The strip is conditioned on the declaration, not applied unconditionally: a run that
+    declares open egress may legitimately need the proxy to reach it."""
+    env = policy(
+        tmp_path,
+        network=NetworkPolicy.OPEN,
+        secrets={"HTTPS_PROXY": "http://proxy.internal:8080"},
+    ).environment()
+
+    assert env["HTTPS_PROXY"] == "http://proxy.internal:8080"
 
 
 # --------------------------------------------------------------- violation classes

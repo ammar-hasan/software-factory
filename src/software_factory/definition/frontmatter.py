@@ -33,6 +33,14 @@ class Document:
     body: str
     frontmatter_start_line: int
     body_start_line: int
+    source_lines: tuple[str, ...] = ()
+    """The document's own lines, as parsed.
+
+    `line_of` used to re-read `self.path` on every call, and `_record_pydantic` calls it
+    once per validation error -- so a file with twenty errors was read twenty times. Worse,
+    it ignored the `text=` argument `parse` accepts, so `parse(path, text=...)` for
+    in-memory content reported lines from a different file, or from none.
+    """
 
     def line_of(self, key: str) -> int | None:
         """Best-effort source line for a top-level frontmatter key.
@@ -43,11 +51,7 @@ class Document:
         if key not in self.frontmatter:
             return None
         pattern = re.compile(rf"^\s*{re.escape(key)}\s*:")
-        try:
-            lines = self.path.read_text(encoding="utf-8").splitlines()
-        except OSError:  # pragma: no cover - only on a race with deletion
-            return None
-        for offset, line in enumerate(lines):
+        for offset, line in enumerate(self.source_lines):
             if offset < self.frontmatter_start_line:
                 continue
             if offset >= self.body_start_line - 1:
@@ -75,6 +79,7 @@ def parse(path: Path, text: str | None = None) -> Document:
             body=raw,
             frontmatter_start_line=0,
             body_start_line=1,
+            source_lines=tuple(lines),
         )
 
     closing: int | None = None
@@ -112,6 +117,7 @@ def parse(path: Path, text: str | None = None) -> Document:
         body="\n".join(lines[closing + 1 :]).strip("\n"),
         frontmatter_start_line=1,
         body_start_line=closing + 2,
+        source_lines=tuple(lines),
     )
 
 

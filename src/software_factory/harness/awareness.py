@@ -17,6 +17,7 @@ from __future__ import annotations
 import enum
 import hashlib
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -141,11 +142,19 @@ ROLE_WEIGHTS: dict[AgentRole, dict[SectionId, float]] = {
         SectionId.OPEN_QUESTIONS: 0.10,
     },
 }
-ROLE_WEIGHTS[AgentRole.CUSTOM] = ROLE_WEIGHTS[AgentRole.BUILDER]
+# A copy, not the same dict: bound by reference, any future per-role tuning of one
+# would silently change the other, and nothing about `CUSTOM`'s weights is meant to
+# follow BUILDER's forever -- it starts there.
+ROLE_WEIGHTS[AgentRole.CUSTOM] = dict(ROLE_WEIGHTS[AgentRole.BUILDER])
 
 #: How much of the tier's effective working set the pack may occupy, leaving room for
 #: the run itself (awareness.md A-11).
 PACK_BUDGET_FRACTION = 0.35
+
+#: The fraction of its own budget a protected section keeps even when the pack overflows.
+#: An empty contract or toolbelt is not a smaller pack; it is one whose reader cannot tell
+#: what they are not being shown.
+PROTECTED_FLOOR = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,15 +259,26 @@ class AwarenessPack:
         return [item.citation.render() for section in self.sections for item in section.items]
 
     def digest(self) -> str:
-        """Content digest. Two packs with identical content have identical digests."""
+        """Digest of everything the pack renders. Identical packs, identical digests.
+
+        The snapshot is deliberately *not* mixed in. It carries `assembled_at`, so two
+        packs assembled a microsecond apart differed while claiming content equality; the
+        snapshot digest is a separate field that `as_dict` already reports, which is where
+        "assembled from this state" belongs. `omissions` and `degradations` *are* mixed in,
+        because `render()` emits them: two packs whose rendered text differs must not share
+        a digest, or the digest cannot be used to say a reader saw the same thing.
+        """
         material = "\n".join(
             f"{section.id.value}|{item.citation.render()}|{item.content}"
             for section in self.sections
             for item in section.items
         )
-        return hashlib.sha256(
-            (self.snapshot.digest() + "||" + material).encode("utf-8")
-        ).hexdigest()
+        notices = "\n".join(
+            f"{kind}|{name}|{reason}"
+            for kind, entries in (("omitted", self.omissions), ("degraded", self.degradations))
+            for name, reason in entries
+        )
+        return hashlib.sha256((notices + "||" + material).encode("utf-8")).hexdigest()
 
     def render(self) -> str:
         parts = [section.render() for section in self.sections if section.items]
@@ -291,16 +311,27 @@ class AwarenessPack:
         }
 
 
+#: Scripts whose characters cost roughly one token each rather than four.
+_DENSE_SCRIPT = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]")
+
+
 def estimate_tokens(text: str) -> int:
     """Cheap, deterministic token estimate.
 
     Deliberately not a real tokenizer: budgeting has to be reproducible across machines
     and model families, and a per-provider tokenizer would make the same inputs produce
-    different packs. Roughly four characters per token, floored at one per non-empty item.
+    different packs.
+
+    Roughly four characters per token for Latin script, floored at one per non-empty item.
+    Dense scripts cost far more per character -- a CJK character is commonly a token or
+    more on its own -- so counting characters under-budgeted a non-Latin pack by around
+    four times, which is the direction that overruns a context window rather than wasting
+    one. Those characters are counted individually.
     """
     if not text:
         return 0
-    return max(1, (len(text) + 3) // 4)
+    dense = sum(1 for character in text if _DENSE_SCRIPT.match(character))
+    return max(1, dense + (len(text) - dense + 3) // 4)
 
 
 #: A section builder returns items and, optionally, a degradation reason.
@@ -380,17 +411,67 @@ def _apply_budget(pack: AwarenessPack) -> None:
     """Trim to budget by dropping whole items from the tail of each section.
 
     Never mid-item: half an item is worse than an absent one, because a reader cannot
-    tell which half they are missing. Protected sections and protected items survive
-    regardless.
+    tell which half they are missing. Protected *items* always survive; protected
+    *sections* are trimmed last rather than exempted.
+
+    Exempting them left the pack with no upper bound at all -- the per-section budgets
+    already sum to the whole, so a long contract or a large toolbelt silently blew the
+    working-set ceiling the budget exists to respect, and the section that overflowed was
+    by construction one nobody was watching. The pass now runs unprotected sections first
+    and only then trims protected ones, so a pack that fits stays untouched and one that
+    does not loses its least-important content first.
     """
     for section in pack.sections:
         if section.id in PROTECTED:
             continue
-        while section.tokens() > section.budget_tokens and section.items:
-            for index in range(len(section.items) - 1, -1, -1):
-                if not section.items[index].protected:
-                    section.items.pop(index)
-                    section.truncated += 1
-                    break
-            else:
-                break  # everything left is protected
+        _trim_to(section, section.budget_tokens)
+
+    if pack.tokens() <= pack.budget_tokens:
+        return
+
+    # Still over. Take the excess from the protected sections, largest first, but never to
+    # nothing: an agent that cannot see its mission or its contract is not working to a
+    # smaller pack, it is working blind, and it has no way to know what it is missing.
+    for section in sorted(pack.sections, key=lambda s: -s.tokens()):
+        if section.id not in PROTECTED:
+            continue
+        excess = pack.tokens() - pack.budget_tokens
+        if excess <= 0:
+            break
+        floor = max(1, int(section.budget_tokens * PROTECTED_FLOOR))
+        before = section.tokens()
+        _trim_to(section, max(floor, before - excess), keep_at_least=1)
+        if section.tokens() < before:
+            pack.degradations.append(
+                (section.id.value, "trimmed to fit the pack budget; this section is protected")
+            )
+
+    # The floor can be larger than the budget -- one mission item may exceed the whole pack.
+    # Say so rather than either pretending the pack fits or dropping the mission.
+    if pack.tokens() > pack.budget_tokens:
+        pack.degradations.append(
+            (
+                "pack",
+                f"protected content is {pack.tokens()} tokens against a "
+                f"{pack.budget_tokens}-token budget; the floor was kept",
+            )
+        )
+
+
+def _trim_to(section: Section, target: int, *, keep_at_least: int = 0) -> None:
+    """Drop unprotected items from the tail until the section fits, or cannot shrink.
+
+    The running total is carried rather than recomputed: `section.tokens()` sums every item
+    and the loop called it once per removal, which is quadratic in a section that has to
+    lose a lot.
+    """
+    total = section.tokens()
+    while total > target and len(section.items) > keep_at_least:
+        for index in range(len(section.items) - 1, -1, -1):
+            if not section.items[index].protected:
+                total -= section.items[index].tokens()
+                section.items.pop(index)
+                section.truncated += 1
+                break
+        else:
+            return  # everything left is protected

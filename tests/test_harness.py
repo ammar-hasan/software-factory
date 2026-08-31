@@ -110,7 +110,7 @@ def ladder() -> Ladder:
             ],
             "defaultTier": "local-small",
             "ceilingTier": "large",
-            "scaffoldBelow": "local-small",
+            "scaffoldAtOrBelow": "local-small",
             "maxEscalations": 2,
         }
     )
@@ -147,14 +147,24 @@ def test_the_same_snapshot_produces_the_same_digest() -> None:
     assert build() == build()
 
 
-def test_a_different_snapshot_produces_a_different_digest() -> None:
+def test_a_different_snapshot_is_distinguishable_from_the_pack() -> None:
+    """The two questions are separate and the pack answers both.
+
+    `digest()` answers "did the reader see the same text", and must not move because the
+    clock did -- the snapshot carries `assembled_at`, so mixing it in made two identical
+    packs assembled a microsecond apart differ while claiming content equality (N2). "Was
+    this assembled from the same state" is the snapshot's own digest, which `as_dict`
+    reports beside it.
+    """
     builder = assembler()
     fill(builder, mission=[item("Fix the BOM bug.", "work-1")])
 
-    first = builder.assemble(snapshot(commit="abc123")).digest()
-    second = builder.assemble(snapshot(commit="def456")).digest()
+    first = builder.assemble(snapshot(commit="abc123"))
+    second = builder.assemble(snapshot(commit="def456"))
 
-    assert first != second
+    assert first.digest() == second.digest()
+    assert first.snapshot.digest() != second.snapshot.digest()
+    assert first.as_dict()["snapshot"] != second.as_dict()["snapshot"]
 
 
 def test_every_item_is_cited() -> None:

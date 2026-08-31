@@ -173,17 +173,26 @@ def _apply_diversity(
         # each other, which is not what a parent cap is for.
         parent_ids = set(memory.parents)
 
-        if any(per_source.get(sid, 0) >= max_per_source for sid in source_ids):
+        # Charged to the *least-used* source, not to all of them. `any(... >= cap)` over
+        # every source meant a memory with five independent sources was dropped as soon as
+        # any one of them was at cap, and then -- for the ones that survived -- consumed
+        # five counter slots rather than one. That inverts the cap's whole purpose: it
+        # exists to stop a single source from dominating a result, and it was making the
+        # best-corroborated memory the first thing to go.
+        charged_source = min(source_ids, key=lambda sid: (per_source.get(sid, 0), sid))
+        if per_source.get(charged_source, 0) >= max_per_source:
             dropped += 1
             continue
-        if parent_ids and any(per_parent.get(pid, 0) >= max_per_parent for pid in parent_ids):
+        charged_parent = (
+            min(parent_ids, key=lambda pid: (per_parent.get(pid, 0), pid)) if parent_ids else None
+        )
+        if charged_parent is not None and per_parent.get(charged_parent, 0) >= max_per_parent:
             dropped += 1
             continue
 
-        for sid in source_ids:
-            per_source[sid] = per_source.get(sid, 0) + 1
-        for pid in parent_ids:
-            per_parent[pid] = per_parent.get(pid, 0) + 1
+        per_source[charged_source] = per_source.get(charged_source, 0) + 1
+        if charged_parent is not None:
+            per_parent[charged_parent] = per_parent.get(charged_parent, 0) + 1
         kept.append(memory)
 
     return kept, dropped

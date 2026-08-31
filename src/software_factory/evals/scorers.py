@@ -100,8 +100,14 @@ class Scorer:
             return False
         if self.sampling_rate >= 100:
             return True
+        # Scaled, not `% 100`. 2**32 is not a multiple of 100, so the modulo gave the
+        # first 96 buckets a very slightly higher probability than the rest. Statistically
+        # immaterial at these rates -- but this method's whole pitch is that it is the
+        # reproducible, unbiased alternative to random sampling, and a sampler with a known
+        # bias cannot make that claim while the fix is one line.
         digest = hashlib.sha256(f"{self.name}:{run_id}".encode()).hexdigest()
-        return int(digest[:8], 16) % 100 < self.sampling_rate
+        bucket = int(digest[:8], 16) * 100 // (1 << 32)
+        return bucket < self.sampling_rate
 
     @property
     def trusted(self) -> bool:

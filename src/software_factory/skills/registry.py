@@ -13,6 +13,7 @@ here mutates a definition: skills live in files, and files change through review
 from __future__ import annotations
 
 import enum
+import re
 from dataclasses import dataclass, field
 
 from software_factory.definition.models import AgentRole, SkillStatus, Stage
@@ -26,6 +27,15 @@ Bounded deliberately: past a small number, additional options degrade selection 
 than improving it. When a library outgrows this, the answer is sharper descriptions and
 splits, not a bigger offer (skills.md K-17).
 """
+
+#: Phrases that state what a skill is *not* for. Word-anchored: the bare substring
+#: "not " occurs inside "cannot ", so a description saying only what the skill needs
+#: passed a check about what it excludes.
+_BOUNDARY_MARKER = re.compile(
+    r"\bnot\b|\bnever\b|\bexcept\b|\brather than\b|\bunlike\b|\bdoes not\b|"
+    r"\bis not for\b|\binstead of\b",
+    re.IGNORECASE,
+)
 
 MIN_TRIALS = 20
 MIN_LIFT = 0.10
@@ -513,7 +523,10 @@ class SkillRegistry:
                     "State the condition under which an agent should reach for it.",
                 )
             )
-        if not any(marker in text for marker in ("not ", "never ", "except", "rather than")):
+        # Word boundaries: the substring "not " occurs inside "cannot ", so "This skill
+        # cannot be used without a token" satisfied "says what it is not for" while
+        # saying nothing of the kind.
+        if not _BOUNDARY_MARKER.search(text):
             problems.append(
                 Refusal(
                     "description.no_boundary",

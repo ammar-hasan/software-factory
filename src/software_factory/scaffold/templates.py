@@ -30,7 +30,7 @@ repositories:
 ladder:
   defaultTier: local-small
   ceilingTier: mid
-  scaffoldBelow: local-small
+  scaffoldAtOrBelow: local-small
   maxEscalations: 2
   tiers:
     - name: local-small

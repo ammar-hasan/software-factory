@@ -40,7 +40,7 @@ _SEMANTIC_RULES: dict[str, tuple[str, ...]] = {
         "agentDefaults declares exactly one of `model`, `tier`, or `harness`",
         "repositories are unique by owner/name",
         "at most one tracker integration",
-        "ladder tier names are unique, and defaultTier/ceilingTier/scaffoldBelow resolve",
+        "ladder tier names are unique, and defaultTier/ceilingTier/scaffoldAtOrBelow resolve",
         "each tier's workingSetCeiling does not exceed its contextWindow",
     ),
     "agent": (

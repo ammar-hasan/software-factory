@@ -385,13 +385,38 @@ def test_a_contradiction_quarantines_both_sides(store: MemoryStore) -> None:
 
 
 def test_the_policy_pass_is_idempotent(store: MemoryStore) -> None:
+    """`policing.py` makes this claim for the *whole* pass, and the test ran one quarter
+    of it: `revalidate_anchors` violated it outright (M1) and consolidation merged across
+    lanes (C2), both invisible to a test that only called `detect_contradictions`.
+    """
+    from software_factory.memory.policing import run_pass
+    from software_factory.spec.units import digest_text
+
     admitted(store, content="Retries are enabled for the payments webhook.")
     admitted(store, content="Retries are disabled for the payments webhook.")
+    admitted(store, content="The importer reads headers as UTF-8 with a byte-order mark.")
 
-    detect_contradictions(store)
-    second = detect_contradictions(store)
+    anchored = admitted(store, content="strip_bom lstrips the BOM from the first cell.")
+    anchored.kind = Kind.ANCHOR
+    anchored.provenance = (
+        Source(
+            kind=SourceKind.FILE,
+            ref="src/importers/csv.py",
+            locator="src/importers/csv.py:strip_bom",
+            excerpt_digest=digest_text("def strip_bom(text):\n    return text\n"),
+        ),
+    )
+    store.put(anchored, op="anchor", actor="test", reason="fixture")
 
-    assert second.quarantined == []
+    # The anchor has drifted, and stays drifted: the world does not change between passes.
+    def resolve(_locator: str) -> str:
+        return "def strip_bom(text):\n    return text.lstrip('\\ufeff')\n"
+
+    first = run_pass(store, resolve=resolve)
+    second = run_pass(store, resolve=resolve)
+
+    assert first.acted, "the fixture did not exercise the pass"
+    assert not second.acted, "running the pass twice on an unchanged store acted twice"
 
 
 def test_expired_memories_are_archived(store: MemoryStore) -> None:
@@ -736,12 +761,21 @@ def test_provenance_tree_answers_why_this_exists(store: MemoryStore) -> None:
 
 
 def test_erasure_destroys_content_and_records_that_it_happened(store: MemoryStore) -> None:
-    """Deletion has to be possible in an append-only design, and auditable."""
+    """Deletion has to be possible in an append-only design, and auditable.
+
+    The content assertion is the point and was missing (T3). Both of the other two passed
+    under C10, where `erase` appended a tombstone and left the original record -- content,
+    provenance and all -- in a file whose whole selling point is that it is greppable. For
+    a subject-erasure request that is the difference between compliance and a claim of it.
+    """
     memory = admitted(store)
+    content = memory.content
+    assert content in store.path.read_text(encoding="utf-8")
 
     store.erase(memory.id, actor="human:dpo", reason="erasure request")
 
     assert store.get(memory.id) is None
+    assert content not in store.path.read_text(encoding="utf-8")
     ops = [m.op for m in store.mutations(memory.id)]
     assert "delete" in ops
 

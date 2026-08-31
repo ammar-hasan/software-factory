@@ -81,6 +81,11 @@ _SECRET_SHAPED = re.compile(
 class ScopeBudget:
     max_items: int = 5000
     max_bytes: int = 8_000_000
+    """Measured in UTF-8 bytes, as the name says.
+
+    It counted characters, so a store of non-Latin claims held two to four times the
+    declared budget -- and the budget exists to bound what `load()` reads back.
+    """
 
 
 def admit(
@@ -177,7 +182,8 @@ def admit(
             )
 
     live = [m for m in existing if m.lane is not Lane.ARCHIVE]
-    if len(live) >= budget.max_items or sum(len(m.content) for m in live) >= budget.max_bytes:
+    used_bytes = sum(len(m.content.encode("utf-8")) for m in live)
+    if len(live) >= budget.max_items or used_bytes >= budget.max_bytes:
         return Rejected(
             RejectionReason.BUDGET,
             f"scope {candidate.scope.value}:{candidate.scope_ref} is at its budget",

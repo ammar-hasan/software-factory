@@ -294,11 +294,18 @@ def scaffolds_for(ladder: Ladder, tier_name: str) -> frozenset[Scaffold]:
 
     Tier-conditioned and recorded, never silent: a run at a high tier must not quietly
     behave differently from what its configuration says.
+
+    The threshold is inclusive, which is why the field is `scaffoldAtOrBelow` rather than
+    `scaffoldBelow`. The old name was ambiguous against this behaviour, and the ambiguity
+    was not cosmetic: the lowest tier is precisely the one that needs the scaffolding, so
+    reading the name as exclusive would have made `scaffoldBelow: <lowest tier>` mean "no
+    scaffolding anywhere" -- the opposite of what an operator writing it wants, and the
+    opposite of the premise that a modest model in a good harness is the point.
     """
-    if ladder.scaffold_below is None:
+    if ladder.scaffold_at_or_below is None:
         return frozenset()
     try:
-        threshold = ladder.index_of(ladder.scaffold_below)
+        threshold = ladder.index_of(ladder.scaffold_at_or_below)
         current = ladder.index_of(tier_name)
     except KeyError:
         return frozenset()
