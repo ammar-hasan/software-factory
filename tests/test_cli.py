@@ -630,3 +630,48 @@ def test_spend_on_a_factory_that_has_not_run_says_so(tmp_path: Path) -> None:
 
     assert body["spent"] == 0
     assert body["byCause"] == {}
+
+
+def test_govern_classes_reports_contents_and_retention() -> None:
+    """A retention policy that does not say what is in the thing being retained is a number
+    with no argument behind it (FR-27.1)."""
+    body = payload(runner.invoke(app, ["govern", "classes", "--json"]).output)
+
+    by_class = {c["class"]: c for c in body["classes"]}
+    assert by_class["ledger"]["erasableBySubject"] is False
+    assert "personal_data" in by_class["transcript"]["contains"]
+    assert all(c["rationale"] for c in body["classes"])
+
+
+def test_govern_seal_and_verify_round_trip(tmp_path: Path) -> None:
+    """Bounded growth is otherwise a claim with no mechanism (NFR-3.2, FR-27.2)."""
+    from software_factory.ledger import EntryType, Ledger
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    for index in range(25):
+        ledger.append(EntryType.RUN_STARTED, actor="worker", subject=f"run-{index}")
+
+    sealed = payload(
+        runner.invoke(app, ["govern", "seal", str(ledger.path), "--size", "10", "--json"]).output
+    )
+    assert [s["index"] for s in sealed["sealed"]] == [0, 1]
+    assert sealed["sealedThrough"] == 20
+
+    verified = payload(runner.invoke(app, ["govern", "verify", str(ledger.path), "--json"]).output)
+    assert verified["segments"] == 2
+
+
+def test_govern_seal_on_a_short_ledger_says_so(tmp_path: Path) -> None:
+    """A partial segment would have to be re-sealed as it grew, and a seal that changes is
+    not a seal."""
+    from software_factory.ledger import EntryType, Ledger
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append(EntryType.RUN_STARTED, actor="worker", subject="run-0")
+
+    body = payload(
+        runner.invoke(app, ["govern", "seal", str(ledger.path), "--size", "10", "--json"]).output
+    )
+
+    assert body["sealed"] == []
+    assert body["sealedThrough"] == 0

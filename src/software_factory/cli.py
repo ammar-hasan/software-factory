@@ -820,6 +820,132 @@ def gates(as_json: JsonOpt = False) -> None:
     raise typer.Exit(EXIT_OK)
 
 
+govern_app = typer.Typer(
+    help="Data classification, retention, and ledger segmentation.", no_args_is_help=True
+)
+app.add_typer(govern_app, name="govern")
+
+
+@govern_app.command("classes")
+def govern_classes(as_json: JsonOpt = False) -> None:
+    """What each persisted class can contain, how long it is kept, and why.
+
+    A retention policy that does not say what is *in* the thing being retained is a number
+    with no argument behind it (FR-27.1).
+    """
+    from software_factory.governance import DEFAULT_CLASSIFICATION
+
+    rows = [rule.as_dict() for rule in DEFAULT_CLASSIFICATION.values()]
+
+    if as_json:
+        _emit({"ok": True, "classes": rows})
+        raise typer.Exit(EXIT_OK)
+
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("class", "may contain", "retention", "erasable", "why"):
+        table.add_column(column, overflow="fold")
+    for row in rows:
+        raw_retention = row["retention"]
+        if raw_retention is None:
+            kept = "[dim]until erased[/]"
+        else:
+            seconds = int(str(raw_retention))
+            kept = f"{seconds // 86400}d" if seconds >= 86400 else f"{seconds // 3600}h"
+        table.add_row(
+            str(row["class"]),
+            ", ".join(row["contains"]),  # type: ignore[arg-type]
+            kept,
+            "yes" if row["erasableBySubject"] else "[dim]no[/]",
+            str(row["rationale"]),
+        )
+    console.print(table)
+    raise typer.Exit(EXIT_OK)
+
+
+@govern_app.command("seal")
+def govern_seal(
+    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    size: Annotated[int, typer.Option("--size", help="Entries per segment.")] = 10_000,
+    as_json: JsonOpt = False,
+) -> None:
+    """Seal complete ledger segments so an archived prefix stays verifiable.
+
+    Bounded growth (NFR-3.2) is otherwise a claim with no mechanism: an append-only log grows
+    forever and `verify()` gets slower every day until nobody runs it. Segment digests chain
+    across the boundary, so verifying a later segment needs the earlier segment's digest and
+    not its entries (FR-27.2). Sealing does not delete anything -- archiving is a separate
+    act, and the manifest is what makes it safe to take.
+    """
+    from software_factory.governance import Manifest, seal
+
+    manifest_path = path.with_suffix(path.suffix + ".segments")
+    ledger = Ledger(path)
+    manifest = Manifest.load(manifest_path)
+    try:
+        sealed = seal(ledger, manifest, size=size)
+        manifest.verify()
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    if as_json:
+        _emit(
+            {
+                "ok": True,
+                "manifest": str(manifest_path),
+                "sealed": [s.as_dict() for s in sealed],
+                "sealedThrough": manifest.sealed_through,
+            }
+        )
+        raise typer.Exit(EXIT_OK)
+
+    if not sealed:
+        console.print(
+            f"[dim]Nothing to seal: fewer than {size} unsealed entries. "
+            f"Sealed through {manifest.sealed_through}.[/]"
+        )
+        raise typer.Exit(EXIT_OK)
+    for segment in sealed:
+        console.print(
+            f"sealed segment {segment.index}: entries {segment.first_seq}-{segment.last_seq} "
+            f"[dim]({segment.digest[:12]})[/]"
+        )
+    console.print(f"\nManifest: {manifest_path}")
+    raise typer.Exit(EXIT_OK)
+
+
+@govern_app.command("verify")
+def govern_verify(
+    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    as_json: JsonOpt = False,
+) -> None:
+    """Verify the segment chain, which works over an archived prefix."""
+    from software_factory.governance import Manifest
+
+    manifest_path = path.with_suffix(path.suffix + ".segments")
+    manifest = Manifest.load(manifest_path)
+    try:
+        manifest.verify()
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    if as_json:
+        _emit(
+            {
+                "ok": True,
+                "segments": len(manifest.segments),
+                "sealedThrough": manifest.sealed_through,
+            }
+        )
+        raise typer.Exit(EXIT_OK)
+    console.print(
+        f"[green]verified[/] — {len(manifest.segments)} segment(s), "
+        f"sealed through entry {manifest.sealed_through}"
+    )
+    raise typer.Exit(EXIT_OK)
+
+
 @app.command()
 def spend(
     path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
