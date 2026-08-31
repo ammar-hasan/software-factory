@@ -11,6 +11,7 @@ Findings are recorded in `docs/reviews/code-review.md`.
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,7 @@ from software_factory.ledger import EntryType, Ledger, LedgerError
 from software_factory.memory import (
     Candidate,
     Kind,
+    Lane,
     Memory,
     MemoryStore,
     PromotionCriterion,
@@ -1070,3 +1072,465 @@ def test_m18_an_agent_that_declares_nothing_still_inherits() -> None:
     resolved = resolve_for_agent(factory, ExecutionDefaults.model_validate({}))
 
     assert resolved.secrets == ("audit-token",)
+
+
+# ---------------------------------------------------------------------------------- M8
+# The negation screen read two *agreeing* units as contradicting.
+
+
+CACHE_SOURCE = "def enabled_for(route):\n    return route.public\n"
+
+
+def _spec_unit(unit_id: str, intent: str, *, digest: str | None = None) -> object:
+    from software_factory.spec.units import CodeAnchor, SpecUnit, TestAnchor, UnitStatus
+
+    return SpecUnit(
+        id=unit_id,
+        title="cache policy",
+        status=UnitStatus.ACTIVE,
+        intent=intent,
+        implements=(CodeAnchor(path="src/cache.py", symbol="enabled_for", digest=digest),),
+        verifies=(TestAnchor(path="tests/test_cache.py", test_id="test_routes"),),
+    )
+
+
+def test_m8_two_units_that_both_forbid_do_not_contradict() -> None:
+    """Every prefix pair made an agreement look like a conflict.
+
+    "must " is a prefix of "must not ", so a unit saying "must not" satisfied the positive
+    branch too. `_shares_object` then split one side on "must " and the other on "must not ",
+    compared "not be enabled for admin routes" against "be enabled for public routes", found
+    them similar, and marked both CONTRADICTED -- blocking the build with two units that
+    said the same thing.
+    """
+    from software_factory.spec.agreement import find_conflicts
+
+    left = _spec_unit("CAC-1", "The cache must not be enabled for admin routes.")
+    right = _spec_unit("CAC-2", "The cache must not be enabled for public routes.")
+
+    assert find_conflicts([left, right]) == {}
+
+
+def test_m8_two_units_that_both_assert_do_not_contradict() -> None:
+    from software_factory.spec.agreement import find_conflicts
+
+    left = _spec_unit("CAC-1", "The cache must be enabled for admin routes.")
+    right = _spec_unit("CAC-2", "The cache must be enabled for public routes.")
+
+    assert find_conflicts([left, right]) == {}
+
+
+def test_m8_a_genuine_contradiction_is_still_caught() -> None:
+    """The fix must not buy quiet by switching the screen off."""
+    from software_factory.spec.agreement import find_conflicts
+
+    left = _spec_unit("CAC-1", "The cache must be enabled for admin routes.")
+    right = _spec_unit("CAC-2", "The cache must not be enabled for admin routes.")
+
+    conflicts = find_conflicts([left, right])
+
+    assert conflicts["CAC-1"] == ("CAC-2",)
+    assert conflicts["CAC-2"] == ("CAC-1",)
+
+
+def test_m8_the_word_this_no_longer_matches_the_is_negation() -> None:
+    """Substring matching found "is " inside "this ", so any two units mentioning "this"
+    were candidates for the is/is not pair."""
+    from software_factory.spec.agreement import find_conflicts
+
+    left = _spec_unit("CAC-1", "This lookup is not cached for admin routes.")
+    right = _spec_unit("CAC-2", "This lookup skips the shared cache for admin routes.")
+
+    assert find_conflicts([left, right]) == {}
+
+
+# ---------------------------------------------------------------------------------- M9
+# A unit whose tests were never run reported AGREED.
+
+
+def test_m9_unrun_tests_are_unverified_not_agreed() -> None:
+    """The outcome callable answers pass / fail / unknown, and unknown was folded into
+    "not failing" -- so declaring a test and never running it read exactly like passing."""
+    from software_factory.spec.agreement import evaluate
+    from software_factory.spec.units import Agreement, digest_text
+
+    anchored = _spec_unit(
+        "CAC-1",
+        "The cache must be enabled for public routes.",
+        digest=digest_text(CACHE_SOURCE),
+    )
+
+    result = evaluate(
+        anchored,
+        resolve=lambda _path, _symbol: CACHE_SOURCE,
+        outcome=lambda _locator: None,
+    )
+
+    assert result.state is Agreement.UNVERIFIED
+    assert not result.blocks_build
+    assert "no recorded outcome" in result.reason
+
+
+def test_m9_unverified_wins_over_drift() -> None:
+    """ "Behaviour appears preserved, so re-anchor" is a claim about passing tests. An
+    unrun test supports no such claim, so it must not be reported as benign drift."""
+    from software_factory.spec.agreement import evaluate
+    from software_factory.spec.units import Agreement, digest_text
+
+    anchored = _spec_unit(
+        "CAC-1",
+        "The cache must be enabled for public routes.",
+        digest=digest_text(CACHE_SOURCE),
+    )
+
+    result = evaluate(
+        anchored,
+        resolve=lambda _path, _symbol: CACHE_SOURCE.replace("public", "internal"),
+        outcome=lambda _locator: None,
+    )
+
+    assert result.state is Agreement.UNVERIFIED
+    assert result.drifted_anchors
+
+
+def test_m9_a_passing_test_still_agrees() -> None:
+    from software_factory.spec.agreement import evaluate
+    from software_factory.spec.units import Agreement, digest_text
+
+    anchored = _spec_unit(
+        "CAC-1",
+        "The cache must be enabled for public routes.",
+        digest=digest_text(CACHE_SOURCE),
+    )
+
+    result = evaluate(
+        anchored, resolve=lambda _path, _symbol: CACHE_SOURCE, outcome=lambda _locator: True
+    )
+
+    assert result.state is Agreement.AGREED
+
+
+# --------------------------------------------------------------------------------- M25
+# An archived intermediate broke the poisoning-containment cascade.
+
+
+def _chain_memory(
+    store: MemoryStore, memory_id: str, *, parents: tuple[str, ...] = (), lane: Lane
+) -> Memory:
+    from software_factory.spec.units import TrustClass
+
+    memory = Memory(
+        id=memory_id,
+        lane=lane,
+        kind=Kind.FACT,
+        scope=Scope.REPOSITORY,
+        scope_ref="acme/svc",
+        content=f"claim {memory_id} about the importer's header handling.",
+        provenance=(Source(kind=SourceKind.RUN, ref=f"run-{memory_id}"),),
+        confidence=0.9,
+        trust=TrustClass.INTERNAL,
+        parents=parents,
+    )
+    store.put(memory, op="seed", actor="test", reason="fixture")
+    return memory
+
+
+def test_m25_a_collapsed_provenance_running_through_an_archive_still_collapses(
+    tmp_path: Path,
+) -> None:
+    """A -> B -> C with B archived earlier. B was skipped *and* left out of `invalidated`,
+    so C saw B as a surviving parent and was merely weakened -- though its entire
+    provenance ran through two withdrawn memories. The docstring calls this the
+    containment mechanism for poisoning; here it did not contain.
+    """
+    from software_factory.memory.policing import invalidate
+
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    store.load()
+    _chain_memory(store, "A", lane=Lane.CANON)
+    _chain_memory(store, "B", parents=("A",), lane=Lane.ARCHIVE)
+    _chain_memory(store, "C", parents=("B",), lane=Lane.CANON)
+
+    report = invalidate(store, "A", reason="the source run was found to be fabricated")
+
+    assert "C" in report.invalidated
+    assert "C" not in report.weakened
+    survivor = store.get("C")
+    assert survivor is not None
+    assert survivor.lane is Lane.ARCHIVE
+
+
+def test_m25_an_independent_parent_still_saves_a_descendant(tmp_path: Path) -> None:
+    """The fix must not archive everything downstream regardless of corroboration."""
+    from software_factory.memory.policing import invalidate
+
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    store.load()
+    _chain_memory(store, "A", lane=Lane.CANON)
+    _chain_memory(store, "X", lane=Lane.CANON)
+    _chain_memory(store, "C", parents=("A", "X"), lane=Lane.CANON)
+
+    invalidate(store, "A", reason="the source run was found to be fabricated")
+
+    survivor = store.get("C")
+    assert survivor is not None
+    assert survivor.lane is Lane.CANON
+    assert survivor.confidence < 0.9
+
+
+def test_m25_cascade_does_not_depend_on_traversal_order(tmp_path: Path) -> None:
+    """A descendant can be examined before the parent whose collapse decides it.
+
+    A -> B and A -> X -> Y -> B. The traversal discovers B on the first hop, while Y is two
+    hops further out, so B is judged when only A is known to be invalid: it keeps Y as a
+    "surviving" parent and is merely weakened, even though Y collapses moments later. A
+    single pass in discovery order cannot get this right; the cascade iterates to a fixed
+    point instead.
+    """
+    from software_factory.memory.policing import invalidate
+
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    store.load()
+    _chain_memory(store, "A", lane=Lane.CANON)
+    _chain_memory(store, "X", parents=("A",), lane=Lane.CANON)
+    _chain_memory(store, "Y", parents=("X",), lane=Lane.CANON)
+    _chain_memory(store, "B", parents=("A", "Y"), lane=Lane.CANON)
+
+    report = invalidate(store, "A", reason="the source run was found to be fabricated")
+
+    assert {"X", "Y", "B"} <= set(report.invalidated)
+    assert not report.weakened
+    withdrawn = store.get("B")
+    assert withdrawn is not None
+    assert withdrawn.lane is Lane.ARCHIVE
+
+
+# --------------------------------------------------------------------------------- M35
+# Turn-limit exhaustion was reported as a gate failure.
+
+
+def test_m35_turn_exhaustion_is_a_budget_breach_not_a_verdict() -> None:
+    """`RunStatus` says there is deliberately no `unknown`, then reused GATE_FAILED -- "the
+    work was checked and did not pass" -- for "the loop ran out of turns and produced
+    nothing". An operator reading the ledger could not tell the critic's rejection from a
+    loop that span forty times, and the repair ladder was fed a failure no repair addresses.
+    """
+    from software_factory.harness import BlastRadius, Grants, RoutingState
+    from software_factory.harness.loop import Budget, RunStatus, TurnLoop
+    from software_factory.harness.tools import Example, Tool, ToolRegistry, ToolSuccess
+    from software_factory.providers import StubProvider, calls
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="repo.read",
+            description="Read a file.",
+            effect=Effect.READ,
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+            output_schema={"type": "string"},
+            handler=lambda args: ToolSuccess(value=f"contents of {args['path']}"),
+            examples=(Example(inputs={"path": "a"}, output="contents of a"),),
+        )
+    )
+    provider = StubProvider([calls("repo.read", {"path": "a"}, call_id=f"c{i}") for i in range(50)])
+    turn_loop = TurnLoop(
+        provider=provider,
+        registry=registry,
+        grants=Grants(tools=frozenset({"repo.read"}), effects=frozenset({Effect.READ})),
+        pack=_minimal_pack(),
+        contract=BlastRadius(writable_paths=("workspace/",)),
+        budget=Budget(tool_calls=10_000, turns=4),
+        routing=RoutingState(ladder=_minimal_ladder(), current="local-small"),
+        role_prompt="You make the change and prove it.",
+        task="The importer mangles BOM headers.",
+    )
+
+    result = turn_loop.run()
+
+    assert result.status is RunStatus.BUDGET_EXCEEDED
+    assert result.status is not RunStatus.GATE_FAILED
+    assert "turns: 4 of 4" in (result.reason or "")
+
+
+def test_m35_a_blocked_run_maps_to_the_budget_blocker_not_a_terminal_gate_failure() -> None:
+    """The status is only half the fix: the coordinator translates it into a blocker, and
+    that is where an operator reads "this needs a bigger budget" or "this needs a human"."""
+    from software_factory.harness.loop import RunStatus
+    from software_factory.orchestrator.coordinator import Coordinator
+
+    assert Coordinator._blocker_for(_outcome(RunStatus.BUDGET_EXCEEDED)) is (
+        Blocker.BUDGET_EXCEEDED
+    )
+    assert Coordinator._blocker_for(_outcome(RunStatus.GATE_FAILED)) is (
+        Blocker.GATE_FAILED_TERMINAL
+    )
+
+
+def _outcome(status: object) -> object:
+    """The smallest thing `_blocker_for` reads: an outcome carrying a run with a status."""
+
+    class _Run:
+        def __init__(self) -> None:
+            self.status = status
+
+    class _Outcome:
+        def __init__(self) -> None:
+            self.run = _Run()
+
+    return _Outcome()
+
+
+def _minimal_pack() -> object:
+    from software_factory.definition.models import AgentRole
+    from software_factory.harness.awareness import PackAssembler, Snapshot
+    from software_factory.memory.records import utc_now
+
+    builder = PackAssembler(role=AgentRole.BUILDER, budget_tokens=2000)
+    return builder.assemble(
+        Snapshot(
+            commit="abc",
+            definition_revision="d1",
+            memory_revision="m1",
+            ledger_seq=1,
+            skill_revision="s1",
+            assembled_at=utc_now(),
+        )
+    )
+
+
+def _minimal_ladder() -> object:
+    from software_factory.harness.routing import Ladder
+
+    return Ladder.model_validate(
+        {
+            "tiers": [
+                {
+                    "name": "local-small",
+                    "provider": "local",
+                    "model": "small",
+                    "contextWindow": 32000,
+                    "workingSetCeiling": 20000,
+                    "local": True,
+                },
+                {
+                    "name": "mid",
+                    "provider": "local",
+                    "model": "mid",
+                    "contextWindow": 128000,
+                    "workingSetCeiling": 90000,
+                },
+            ],
+            "defaultTier": "local-small",
+            "ceilingTier": "mid",
+            "maxEscalations": 2,
+        }
+    )
+
+
+# --------------------------------------------------------------------------------- M36
+# The subprocess timeout could not reach anything the command spawned.
+
+
+def test_m36_a_timeout_kills_the_whole_process_group(tmp_path: Path) -> None:
+    """`subprocess.run`'s timeout path calls `Popen.kill()`, which signals only the direct
+    child. The child was made a session leader, so a test runner's workers or a build
+    daemon it spawned outlived the timeout -- holding the workspace open while
+    `WorkspaceFactory.destroy` raced them with rmtree.
+    """
+    import os
+    import signal as signal_module
+
+    from software_factory.runtime.executor import LocalExecutor, SandboxLevel, SandboxPolicy
+
+    marker = tmp_path / "grandchild.pid"
+    # The parent spawns a long-lived grandchild, records its pid, then blocks. Killing only
+    # the parent leaves the grandchild running.
+    program = (
+        "import os, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        f"open({str(marker)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(120)\n"
+    )
+    executor = LocalExecutor(
+        SandboxPolicy(workspace=tmp_path, wall_clock_s=2), level=SandboxLevel.PROCESS
+    )
+
+    result = executor.run([sys.executable, "-c", program], timeout_s=2)
+
+    assert result.timed_out
+    assert result.exit_code == 124
+    assert marker.exists(), "the grandchild never started; the test proves nothing"
+
+    grandchild = int(marker.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(grandchild, 0)
+        except (ProcessLookupError, PermissionError):
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(grandchild, signal_module.SIGKILL)
+        pytest.fail(f"grandchild {grandchild} survived the timeout")
+
+
+def test_m36_a_timeout_still_returns_the_partial_output(tmp_path: Path) -> None:
+    """The output up to the timeout is frequently the useful part, so killing the group
+    must not cost it."""
+    from software_factory.runtime.executor import LocalExecutor, SandboxLevel, SandboxPolicy
+
+    program = "import sys, time; print('started', flush=True); time.sleep(120)"
+    executor = LocalExecutor(
+        SandboxPolicy(workspace=tmp_path, wall_clock_s=2), level=SandboxLevel.PROCESS
+    )
+
+    result = executor.run([sys.executable, "-c", program], timeout_s=2)
+
+    assert result.timed_out
+    assert "started" in result.stdout
+
+
+def test_m36_resource_limits_are_applied_inside_the_sandbox_not_to_the_helper() -> None:
+    """The ceilings were set from a preexec_fn, so under a namespace sandbox they landed on
+    bwrap: the helper's own address space was charged against the run's memory ceiling and
+    the confined program got what was left. The shim now sits after `--`, which is the only
+    position that bounds the target and nothing else."""
+    from software_factory.runtime.executor import LocalExecutor, SandboxLevel, SandboxPolicy
+
+    executor = LocalExecutor(
+        SandboxPolicy(workspace=Path("/tmp"), memory_mb=512, cpu_seconds=17),
+        level=SandboxLevel.NAMESPACE,
+    )
+
+    wrapped = executor._wrap(["pytest", "-q"])
+    separator = wrapped.index("--")
+
+    assert wrapped[0] == "bwrap"
+    assert "ulimit" not in " ".join(wrapped[:separator]), "limits landed on the helper"
+    inner = wrapped[separator + 1 :]
+    assert inner[:2] == ["/bin/sh", "-c"]
+    assert "ulimit -t 17" in inner[2]
+    assert "ulimit -v 524288" in inner[2]
+    assert inner[-2:] == ["pytest", "-q"]
+
+
+def test_m36_the_limit_shim_execs_so_no_extra_process_survives(tmp_path: Path) -> None:
+    """`exec "$@"` replaces the shell. Without it every command would leave a shell parent
+    behind, which is exactly the orphan the group kill exists to prevent."""
+    from software_factory.runtime.executor import LocalExecutor, SandboxLevel, SandboxPolicy
+
+    executor = LocalExecutor(
+        SandboxPolicy(workspace=tmp_path, memory_mb=512, cpu_seconds=17),
+        level=SandboxLevel.PROCESS,
+    )
+
+    result = executor.run(
+        [sys.executable, "-c", "import resource; print(resource.getrlimit(resource.RLIMIT_CPU))"]
+    )
+
+    assert result.ok, result.stderr
+    assert "(17, 17)" in result.stdout

@@ -271,22 +271,42 @@ def invalidate(
     demote(root, store, reason=reason, actor=actor)
     report.invalidated.append(root.id)
 
-    invalidated = {root.id}
-    for descendant in store.descendants_of(memory_id):
-        if descendant.lane is Lane.ARCHIVE:
-            continue
-        surviving_parents = [p for p in descendant.parents if p not in invalidated]
-        if not surviving_parents:
-            demote(
-                descendant,
-                store,
-                reason=f"provenance collapsed: every parent traces to invalidated {root.id}",
-                actor=actor,
-            )
-            invalidated.add(descendant.id)
-            report.invalidated.append(descendant.id)
-            continue
+    descendants = store.descendants_of(memory_id)
 
+    # An already-archived descendant was skipped *and* left out of `invalidated`, so its own
+    # children still saw it as a surviving parent. A -> B -> C with B archived earlier left C
+    # merely weakened, though its entire provenance ran through two withdrawn memories. A
+    # withdrawn memory supports nothing; seed it into the set rather than stepping over it.
+    invalidated = {root.id} | {d.id for d in descendants if d.lane is Lane.ARCHIVE}
+
+    # `descendants_of` is breadth-first over a graph the store itself documents as possibly
+    # cyclic, so arrival order is not topological -- a child can be examined before the
+    # parent whose collapse decides it. Iterate to a fixed point instead of trusting order.
+    pending = [d for d in descendants if d.lane is not Lane.ARCHIVE]
+    collapsed: list[Memory] = []
+    changed = True
+    while changed:
+        changed = False
+        surviving: list[Memory] = []
+        for candidate in pending:
+            if any(parent not in invalidated for parent in candidate.parents):
+                surviving.append(candidate)
+                continue
+            collapsed.append(candidate)
+            invalidated.add(candidate.id)
+            changed = True
+        pending = surviving
+
+    for descendant in collapsed:
+        demote(
+            descendant,
+            store,
+            reason=f"provenance collapsed: every parent traces to invalidated {root.id}",
+            actor=actor,
+        )
+        report.invalidated.append(descendant.id)
+
+    for descendant in pending:
         descendant.confidence *= COLLAPSE_PENALTY
         if descendant.lane is Lane.CANON and descendant.confidence < CANON_FLOOR:
             descendant.lane = Lane.ARCHIVE

@@ -7,6 +7,7 @@ anyone having to trust a model's reading of the code.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
@@ -79,7 +80,13 @@ def evaluate(
             drifted_anchors=tuple(unresolved),
         )
 
-    failing = [a.locator() for a in unit.verifies if outcome(a.locator()) is False]
+    # `outcome` has three answers, not two. Folding `None` into "not failing" made a unit
+    # whose tests have never run indistinguishable from one whose tests passed, and the
+    # `spec-agreement` gate read it as satisfied -- the third of the three questions in this
+    # module's docstring answered by assumption.
+    outcomes = {anchor.locator(): outcome(anchor.locator()) for anchor in unit.verifies}
+    failing = [locator for locator, passed in outcomes.items() if passed is False]
+    unknown = [locator for locator, passed in outcomes.items() if passed is None]
     drifted = tuple(s.locator for s in states if s.drifted)
 
     if failing:
@@ -99,6 +106,19 @@ def evaluate(
             unit_id=unit.id,
             state=Agreement.UNVERIFIED,
             reason="no test anchors; nothing checks this intent",
+            drifted_anchors=drifted,
+        )
+
+    # Ahead of the drift branch on purpose: "behaviour appears preserved, so re-anchor"
+    # is a claim about passing tests, and an unrun test supports no such claim.
+    if unknown:
+        return AgreementResult(
+            unit_id=unit.id,
+            state=Agreement.UNVERIFIED,
+            reason=(
+                f"{len(unknown)} verifying test(s) have no recorded outcome "
+                f"({', '.join(unknown[:3])}); nothing has checked this intent yet"
+            ),
             drifted_anchors=drifted,
         )
 
@@ -145,15 +165,51 @@ def find_conflicts(units: list[SpecUnit]) -> dict[str, tuple[str, ...]]:
     return {unit_id: tuple(sorted(others)) for unit_id, others in conflicts.items()}
 
 
+@dataclass(frozen=True, slots=True)
+class _NegationPair:
+    """One assert/forbid pair, as word-boundary patterns.
+
+    Patterns rather than substrings because the substring form matched inside words:
+    ``"is "`` is present in ``"this "``, so any two units mentioning "this" were candidates
+    for a contradiction.
+    """
+
+    positive: re.Pattern[str]
+    negative: re.Pattern[str]
+
+
+def _pair(positive: str, negative: str) -> _NegationPair:
+    return _NegationPair(re.compile(positive), re.compile(negative))
+
+
 _NEGATIONS = (
-    ("must ", "must not "),
-    ("should ", "should not "),
-    ("always ", "never "),
-    ("is ", "is not "),
-    ("allow", "forbid"),
-    ("enable", "disable"),
-    ("include", "exclude"),
+    _pair(r"\bmust\b", r"\bmust\s+not\b"),
+    _pair(r"\bshall\b", r"\bshall\s+not\b"),
+    _pair(r"\bshould\b", r"\bshould\s+not\b"),
+    _pair(r"\balways\b", r"\bnever\b"),
+    _pair(r"\bis\b", r"\bis\s+not\b"),
+    _pair(r"\ballow(?:s|ed|ing)?\b", r"\bforbid(?:s|den|ding)?\b"),
+    _pair(r"\benable(?:s|d|ing)?\b", r"\bdisable(?:s|d|ing)?\b"),
+    _pair(r"\binclude(?:s|d|ing)?\b", r"\bexclude(?:s|d|ing)?\b"),
 )
+
+
+def _polarity(text: str, pair: _NegationPair) -> tuple[bool, str] | None:
+    """Which side of one negation pair a text falls on, and the clause after the marker.
+
+    The negative is tested first because three of these pairs are prefix-shaped: any text
+    containing "must not" contains "must " too. Testing the positive first therefore put
+    *both* sides of an agreement on opposite polarities -- two units that each said
+    "the cache must not be enabled" were read as one asserting and one forbidding, both
+    were marked CONTRADICTED, and the build was blocked by two units that agreed.
+    """
+    negative = pair.negative.search(text)
+    if negative is not None:
+        return True, text[negative.end() :]
+    positive = pair.positive.search(text)
+    if positive is not None:
+        return False, text[positive.end() :]
+    return None
 
 
 def _negates(left: SpecUnit, right: SpecUnit) -> bool:
@@ -165,20 +221,25 @@ def _negates(left: SpecUnit, right: SpecUnit) -> bool:
     plainly rather than hidden.
     """
     a, b = left.intent.lower(), right.intent.lower()
-    for positive, negative in _NEGATIONS:
-        if positive in a and negative in b and _shares_object(a, b, positive, negative):
-            return True
-        if negative in a and positive in b and _shares_object(b, a, positive, negative):
+    for pair in _NEGATIONS:
+        left_side = _polarity(a, pair)
+        right_side = _polarity(b, pair)
+        if left_side is None or right_side is None:
+            continue
+        left_negated, left_tail = left_side
+        right_negated, right_tail = right_side
+        if left_negated == right_negated:
+            # Both assert, or both forbid. That is agreement on this pair, not conflict.
+            continue
+        if _shares_object(left_tail, right_tail):
             return True
     return False
 
 
-def _shares_object(positive_text: str, negative_text: str, positive: str, negative: str) -> bool:
+def _shares_object(left_tail: str, right_tail: str) -> bool:
     """True when the two clauses talk about the same thing after the modal verb."""
-    left_tail = positive_text.split(positive, 1)[1][:60]
-    right_tail = negative_text.split(negative, 1)[1][:60]
-    left_words = {w for w in left_tail.split() if len(w) > 3}
-    right_words = {w for w in right_tail.split() if len(w) > 3}
+    left_words = {w for w in left_tail[:60].split() if len(w) > 3}
+    right_words = {w for w in right_tail[:60].split() if len(w) > 3}
     if not left_words or not right_words:
         return False
     overlap = len(left_words & right_words) / min(len(left_words), len(right_words))

@@ -15,6 +15,7 @@ from __future__ import annotations
 import enum
 import os
 import shutil
+import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -23,6 +24,10 @@ from pathlib import Path
 from software_factory.definition.models import NetworkPolicy
 from software_factory.errors import FactoryError
 from software_factory.evals.gates import ViolationClass
+
+#: How long to wait for a SIGKILLed process group to release the output pipes. Anything
+#: still holding them after this could not be signalled, so its output is unreachable.
+_REAP_GRACE_S = 5.0
 
 
 class ExecutorError(FactoryError):
@@ -210,40 +215,28 @@ class LocalExecutor:
             )
 
         wrapped = self._wrap(command)
+        deadline = timeout_s or self.policy.wall_clock_s
         started = time.monotonic()
         try:
-            completed = subprocess.run(
+            # Popen rather than subprocess.run because `run`'s timeout path calls
+            # Popen.kill(), which signals the direct child alone. The child is a session
+            # leader, so a test runner's workers, a build daemon or a language server it
+            # spawned all outlive the timeout -- holding the workspace open while
+            # WorkspaceFactory.destroy races them with rmtree. Reaping needs killpg, and
+            # killpg needs the handle.
+            #
+            # start_new_session replaces the old preexec_fn=os.setsid. It does the same
+            # thing, but subprocess implements it between fork and exec in async-signal-safe
+            # code; a Python-level preexec_fn can deadlock there, and an orchestrator
+            # running agents concurrently is exactly the threaded caller that provokes it.
+            process = subprocess.Popen(
                 wrapped,
                 cwd=workdir,
                 env=self.policy.environment(),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                check=False,
-                timeout=timeout_s or self.policy.wall_clock_s,
-                preexec_fn=self._limits if os.name == "posix" else None,
-            )
-            duration = time.monotonic() - started
-            stdout, out_truncated = self._cap(self._redact(completed.stdout))
-            stderr, err_truncated = self._cap(self._redact(completed.stderr))
-            return CommandResult(
-                command=tuple(command),
-                exit_code=completed.returncode,
-                stdout=stdout,
-                stderr=stderr,
-                duration_s=duration,
-                truncated=out_truncated or err_truncated,
-            )
-        except subprocess.TimeoutExpired as expired:
-            duration = time.monotonic() - started
-            stdout, _ = self._cap(self._redact(_decode(expired.stdout)))
-            stderr, _ = self._cap(self._redact(_decode(expired.stderr)))
-            return CommandResult(
-                command=tuple(command),
-                exit_code=124,
-                stdout=stdout,
-                stderr=stderr or f"timed out after {duration:.0f}s",
-                duration_s=duration,
-                timed_out=True,
+                start_new_session=os.name == "posix",
             )
         except FileNotFoundError as missing:
             return CommandResult(
@@ -254,10 +247,67 @@ class LocalExecutor:
                 duration_s=time.monotonic() - started,
             )
 
+        timed_out = False
+        out: str | None
+        err: str | None
+        try:
+            out, err = process.communicate(timeout=deadline)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            out, err = self._reap(process)
+
+        duration = time.monotonic() - started
+        stdout, out_truncated = self._cap(self._redact(_decode(out)))
+        stderr, err_truncated = self._cap(self._redact(_decode(err)))
+        if timed_out:
+            return CommandResult(
+                command=tuple(command),
+                exit_code=124,
+                stdout=stdout,
+                stderr=stderr or f"timed out after {duration:.0f}s",
+                duration_s=duration,
+                timed_out=True,
+                truncated=out_truncated or err_truncated,
+            )
+        return CommandResult(
+            command=tuple(command),
+            exit_code=process.returncode,
+            stdout=stdout,
+            stderr=stderr,
+            duration_s=duration,
+            truncated=out_truncated or err_truncated,
+        )
+
+    @staticmethod
+    def _reap(process: subprocess.Popen[str]) -> tuple[str | None, str | None]:
+        """Kill a timed-out command and everything it spawned, then collect what it wrote.
+
+        The partial output is frequently the useful part of a timeout, so this returns it
+        rather than discarding it -- but only after the group is gone, because a survivor
+        still holding the pipe would keep `communicate` blocking forever.
+        """
+        if os.name == "posix":
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                # Already reaped, or the group is not ours to signal. Fall through to the
+                # direct kill: a best-effort escalation must not raise over the timeout it
+                # is reporting.
+                process.kill()
+        else:
+            process.kill()
+        try:
+            # Bounded: the group has had SIGKILL, so anything still holding the pipe is a
+            # process we could not signal. Give up on its output rather than hang the run.
+            return process.communicate(timeout=_REAP_GRACE_S)
+        except subprocess.TimeoutExpired:
+            return None, None
+
     def _wrap(self, command: list[str]) -> list[str]:
         """Wrap a command in the strongest available confinement."""
+        limited = self._limited(command)
         if self.level is not SandboxLevel.NAMESPACE:
-            return command
+            return limited
 
         args = [
             "bwrap",
@@ -299,17 +349,28 @@ class LocalExecutor:
             args += ["--bind", str(writable), str(writable)]
         if self.policy.network is NetworkPolicy.NONE:
             args.append("--unshare-net")
-        return [*args, "--", *command]
+        return [*args, "--", *limited]
 
-    def _limits(self) -> None:  # pragma: no cover - runs in the child process
-        """Resource ceilings, enforced by the OS rather than requested politely."""
-        import resource
+    def _limited(self, command: list[str]) -> list[str]:
+        """Resource ceilings, enforced by the OS rather than requested politely.
 
-        resource.setrlimit(resource.RLIMIT_CPU, (self.policy.cpu_seconds, self.policy.cpu_seconds))
-        limit = self.policy.memory_mb * 1024 * 1024
-        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
-        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-        os.setsid()
+        Innermost on purpose. These were set from a `preexec_fn`, which put them on the
+        *sandbox helper*: bwrap's own address space was charged against the run's memory
+        ceiling, and the program actually being confined got whatever was left. Placing the
+        shim inside `--` bounds the target and nothing else.
+
+        `ulimit` with neither -H nor -S sets both the soft and the hard limit, matching what
+        `setrlimit((n, n))` did; `exec` replaces the shell so no extra process survives.
+        """
+        if os.name != "posix":
+            return command
+        limits = (
+            f"ulimit -t {self.policy.cpu_seconds}; "
+            f"ulimit -v {self.policy.memory_mb * 1024}; "
+            "ulimit -c 0; "
+            'exec "$@"'
+        )
+        return ["/bin/sh", "-c", limits, "sh", *command]
 
     def _redact(self, text: str) -> str:
         """Strip declared secret values from output before anyone sees it.

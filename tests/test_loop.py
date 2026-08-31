@@ -521,16 +521,23 @@ def test_every_non_completed_status_carries_a_reason() -> None:
         assert result.reason
 
 
-def test_running_out_of_turns_is_a_gate_failure_not_a_silent_stop() -> None:
+def test_running_out_of_turns_is_a_budget_breach_not_a_silent_stop() -> None:
+    """Turn exhaustion ends the run, and ends it as a budget -- not as a verdict.
+
+    This test previously asserted GATE_FAILED, which is the bug M35 names: an operator
+    reading the ledger could not tell "the critic rejected the output" from "the loop span
+    three times and produced none", and the repair ladder was handed a failure that no
+    repair could address.
+    """
     registry = ToolRegistry()
     registry.register(read_tool())
     provider = StubProvider(
         [calls("repo.read", {"path": "a"}, call_id=f"c{i}") for i in range(100)]
     )
-    turn_loop = loop(provider, registry=registry, budget=Budget(tool_calls=10_000))
-    turn_loop.max_turns = 3
+    turn_loop = loop(provider, registry=registry, budget=Budget(tool_calls=10_000, turns=3))
 
     result = turn_loop.run()
 
-    assert result.status is RunStatus.GATE_FAILED
-    assert "no output after 3 turns" in (result.reason or "")
+    assert result.status is RunStatus.BUDGET_EXCEEDED
+    assert "turns: 3 of 3" in (result.reason or "")
+    assert result.spend.turns == 3

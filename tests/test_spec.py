@@ -147,15 +147,22 @@ def test_unit_without_test_anchors_is_unverified() -> None:
     assert not result.blocks_build
 
 
-def test_unknown_test_outcome_does_not_contradict() -> None:
-    """A test we have not run is not a test that failed."""
+def test_unknown_test_outcome_is_unverified_not_agreed() -> None:
+    """A test we have not run is neither a test that failed nor a test that passed.
+
+    This test previously asserted AGREED, which is the bug M9 names: the outcome callable
+    answers pass / fail / unknown, and folding unknown into "not failing" let a unit whose
+    tests have never executed report the same state as one whose tests passed.
+    """
     result = evaluate(
         unit(digest=digest_text(SOURCE)),
         resolve=resolver(SOURCE),
         outcome=outcomes(),
     )
 
-    assert result.state is Agreement.AGREED
+    assert result.state is Agreement.UNVERIFIED
+    assert not result.blocks_build
+    assert "no recorded outcome" in result.reason
 
 
 # ------------------------------------------------------------------ cross-unit conflict

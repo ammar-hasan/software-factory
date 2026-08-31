@@ -71,12 +71,20 @@ def escape_delimiters(text: str) -> str:
 
 @dataclass(slots=True)
 class Budget:
-    """Four independent bounds. Whichever binds first ends the run (HARNESS.md L-4)."""
+    """Five independent bounds. Whichever binds first ends the run (HARNESS.md L-4).
+
+    ``turns`` lives here rather than on the loop because it is a bound of exactly the same
+    kind as the other four, and because running out of it must end the run the same way:
+    as a budget, not as a verdict on the work. Reporting turn exhaustion as a gate failure
+    told an operator reading the ledger that the output had been checked and rejected,
+    and fed the repair-and-escalate ladder a failure no repair could address.
+    """
 
     wall_clock_s: float = 1800.0
     tool_calls: int = 200
     tokens: int = 400_000
     cost_units: float = 100.0
+    turns: int = 40
 
     def exceeded(self, spent: Spend) -> str | None:
         if spent.elapsed_s >= self.wall_clock_s:
@@ -87,6 +95,8 @@ class Budget:
             return f"tokens: {spent.tokens} of {self.tokens}"
         if spent.cost_units >= self.cost_units:
             return f"cost: {spent.cost_units:.2f} of {self.cost_units:.2f}"
+        if spent.turns >= self.turns:
+            return f"turns: {spent.turns} of {self.turns} with no final output"
         return None
 
     def nearest_fraction(self, spent: Spend) -> float:
@@ -96,6 +106,7 @@ class Budget:
             spent.tool_calls / self.tool_calls if self.tool_calls else 0,
             spent.tokens / self.tokens if self.tokens else 0,
             spent.cost_units / self.cost_units if self.cost_units else 0,
+            spent.turns / self.turns if self.turns else 0,
         )
 
 
@@ -105,6 +116,7 @@ class Spend:
     tool_calls: int = 0
     tokens: int = 0
     cost_units: float = 0.0
+    turns: int = 0
 
     def add_usage(self, usage: Usage, *, per_mtok_in: float, per_mtok_out: float) -> None:
         self.tokens += usage.input_tokens + usage.output_tokens
@@ -173,7 +185,6 @@ class TurnLoop:
     task: str
     output_schema: dict[str, Any] | None = None
     repair_budget: int = 3
-    max_turns: int = 40
     per_mtok_in: float = 0.0
     per_mtok_out: float = 0.0
     _violation_mark: int = 0
@@ -186,10 +197,14 @@ class TurnLoop:
         # this run only ever considers violations recorded after it started.
         self._violation_mark = self.registry.violation_mark()
 
-        for _turn in range(self.max_turns):
+        # Unbounded in form only: `spend.turns` rises every pass and `Budget.turns` bounds
+        # it, so the turn bound is enforced by the same check as the other four rather than
+        # by a separate `range` whose exhaustion had to be reported as something else.
+        while True:
             breach = self.budget.exceeded(result.spend)
             if breach:
                 return self._end(result, RunStatus.BUDGET_EXCEEDED, breach)
+            result.spend.turns += 1
 
             if not warned and self.budget.nearest_fraction(result.spend) >= 0.8:
                 # A landing notice, not a request to hurry: it states what remains so the
@@ -250,8 +265,6 @@ class TurnLoop:
             finished = self._finish(completion, messages, result)
             if finished is not None:
                 return finished
-
-        return self._end(result, RunStatus.GATE_FAILED, f"no output after {self.max_turns} turns")
 
     # ------------------------------------------------------------------ composition
 
