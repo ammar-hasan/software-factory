@@ -20,7 +20,12 @@ from software_factory.memory.records import (
     SourceKind,
     utc_now,
 )
-from software_factory.memory.similarity import containment, jaccard, negates
+from software_factory.memory.similarity import (
+    analyse,
+    containment_of,
+    jaccard_of,
+    negates_of,
+)
 from software_factory.memory.store import MemoryStore
 from software_factory.spec.units import derived_trust
 
@@ -81,13 +86,36 @@ def detect_contradictions(store: MemoryStore) -> PolicyReport:
     report = PolicyReport()
     live = [m for m in store.all() if m.lane in (Lane.CANDIDATE, Lane.CANON)]
 
+    # Tokenize once, then compare only the pairs that could possibly match. `negates`
+    # requires three shared content words, so an inverted index over those words is not a
+    # heuristic here -- it enumerates exactly the candidate set. Without both, one scope at
+    # its 5000-item budget meant ~12.5M comparisons and ~25M tokenizations in a `sf memory
+    # policy --apply` the operator is waiting on.
+    analysed = {memory.id: analyse(memory.content) for memory in live}
+    by_id = {memory.id: memory for memory in live}
+    # An explicit position map: `live.index(right)` inside the loop would be a linear scan
+    # per candidate, putting back the quadratic factor this is removing.
+    position = {memory.id: rank for rank, memory in enumerate(live)}
+    index_by_token: dict[str, set[str]] = {}
+    for memory in live:
+        for token in analysed[memory.id].tokens:
+            index_by_token.setdefault(token, set()).add(memory.id)
+
     for index, left in enumerate(live):
-        for right in live[index + 1 :]:
+        neighbours: set[str] = set()
+        for token in analysed[left.id].tokens:
+            neighbours |= index_by_token.get(token, set())
+        for right_id in sorted(neighbours):
+            right = by_id[right_id]
+            # Preserve the original pair ordering so each pair is considered once, in the
+            # same order as before: quarantine reasons name "left contradicts right".
+            if position[right_id] <= index:
+                continue
             if left.scope is not right.scope or left.scope_ref != right.scope_ref:
                 continue
             if left.quarantined and right.quarantined:
                 continue
-            if not negates(left.content, right.content):
+            if not negates_of(analysed[left.id], analysed[right.id]):
                 continue
 
             report.contradictions.append((left.id, right.id))
@@ -209,27 +237,53 @@ def consolidate(store: MemoryStore) -> PolicyReport:
 
 
 def _cluster(memories: list[Memory]) -> list[list[Memory]]:
-    """Single-link clustering on lexical similarity. Deterministic given a stable order."""
+    """Single-link clustering on lexical similarity. Deterministic given a stable order.
+
+    Tokenized once and pruned by an inverted index. Both thresholds need a non-empty token
+    intersection to be met at all, so a memory sharing no content word with any cluster
+    member cannot join it -- which makes the index exact rather than approximate. The
+    previous form tested each unassigned memory against every member of a growing cluster,
+    re-tokenizing both sides each time: O(n^3) tokenizations in the worst case.
+    """
     ordered = sorted(memories, key=lambda m: m.id)
+    analysed = {memory.id: analyse(memory.content) for memory in ordered}
+    index_by_token: dict[str, set[str]] = {}
+    for memory in ordered:
+        for token in analysed[memory.id].tokens:
+            index_by_token.setdefault(token, set()).add(memory.id)
+
     clusters: list[list[Memory]] = []
     assigned: set[str] = set()
+    position = {memory.id: rank for rank, memory in enumerate(ordered)}
 
     for memory in ordered:
         if memory.id in assigned:
             continue
         cluster = [memory]
         assigned.add(memory.id)
-        for other in ordered:
-            if other.id in assigned:
-                continue
-            if any(
-                jaccard(member.content, other.content) >= DUPLICATE_MERGE_THRESHOLD
-                or containment(member.content, other.content) >= CONSOLIDATION_CONTAINMENT
-                for member in cluster
-            ):
-                cluster.append(other)
-                assigned.add(other.id)
-        clusters.append(cluster)
+        # Single-link: a new member brings its own neighbours into consideration, so the
+        # frontier grows as the cluster does. Iterating in the declared order keeps the
+        # result identical to the exhaustive scan it replaces.
+        frontier = [memory]
+        while frontier:
+            member = frontier.pop(0)
+            member_tokens = analysed[member.id]
+            candidates: set[str] = set()
+            for token in member_tokens.tokens:
+                candidates |= index_by_token.get(token, set())
+            for other_id in sorted(candidates - assigned, key=lambda i: position[i]):
+                other = ordered[position[other_id]]
+                other_tokens = analysed[other_id]
+                if (
+                    jaccard_of(member_tokens.tokens, other_tokens.tokens)
+                    >= DUPLICATE_MERGE_THRESHOLD
+                    or containment_of(member_tokens.tokens, other_tokens.tokens)
+                    >= CONSOLIDATION_CONTAINMENT
+                ):
+                    cluster.append(other)
+                    assigned.add(other_id)
+                    frontier.append(other)
+        clusters.append(sorted(cluster, key=lambda m: position[m.id]))
     return clusters
 
 

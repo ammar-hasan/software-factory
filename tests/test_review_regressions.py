@@ -2608,3 +2608,304 @@ def test_m39_a_genuinely_missing_reference_is_still_reported(tmp_path: Path) -> 
 
     assert not definition.unloaded
     assert "agent.unknown_fallback" in {issue.code for issue in report.errors}
+
+
+# --------------------------------------------------------------------------------- M27
+# Every ledger append re-read and re-parsed the whole file, under the exclusive lock.
+
+
+def test_m27_append_cost_does_not_grow_with_the_ledger(tmp_path: Path) -> None:
+    """`_tail_unlocked` walked every entry to find the last one, so append was quadratic:
+    0.97s for 500 entries, 46s for 4000, a clean 4x per doubling, with the exclusive lock
+    held throughout. `TOOL_CALLED` and `MODEL_CALLED` mean thousands of entries a day.
+
+    Timed rather than counted because the cost is I/O, not calls. The ratio is generous --
+    the point is to catch a return to quadratic, not to police a constant factor.
+    """
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+
+    def append_batch(count: int) -> float:
+        start = time.monotonic()
+        for index in range(count):
+            ledger.append(EntryType.TOOL_CALLED, actor="t", subject=f"s{index}")
+        return time.monotonic() - start
+
+    first = append_batch(400)
+    for _ in range(4):
+        append_batch(400)
+    last = append_batch(400)
+
+    # Quadratic would make the sixth batch roughly 11x the first. Linear keeps it near 1x.
+    assert last < first * 4 + 0.05, f"first {first:.3f}s, last {last:.3f}s"
+
+
+def test_m27_the_chain_is_still_read_from_the_file_on_every_append(tmp_path: Path) -> None:
+    """The tail must not be cached in memory: `append`'s promise is that a second process
+    appending between our calls cannot fork the chain, and only a fresh read keeps it."""
+    path = tmp_path / "ledger.jsonl"
+    one = Ledger(path)
+    two = Ledger(path)
+
+    one.append(EntryType.RUN_STARTED, actor="a", subject="r1")
+    two.append(EntryType.RUN_STARTED, actor="b", subject="r2")
+    one.append(EntryType.RUN_STARTED, actor="a", subject="r3")
+
+    entries = list(Ledger(path).read())
+    assert [e.seq for e in entries] == [1, 2, 3]
+    Ledger(path).verify()
+
+
+def test_m27_a_tail_larger_than_the_read_window_is_found(tmp_path: Path) -> None:
+    """The backwards window grows rather than assuming a bound: one PACK_ASSEMBLED payload
+    can exceed any fixed size."""
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append(EntryType.RUN_STARTED, actor="a", subject="r1")
+    ledger.append(EntryType.PACK_ASSEMBLED, actor="a", subject="r1", payload={"p": "x" * 200_000})
+    ledger.append(EntryType.RUN_STARTED, actor="a", subject="r2")
+
+    assert ledger.tail()[0] == 3
+    ledger.verify()
+
+
+# --------------------------------------------------------------------------------- M28
+# The policy pass re-tokenized both sides of every comparison.
+
+
+def test_m28_the_policy_pass_scales_to_a_realistic_store(tmp_path: Path) -> None:
+    """`detect_contradictions` is all-pairs and `_cluster` tests each candidate against a
+    growing cluster; both called `tokens()` on both strings every time. At the 5000-item
+    default scope budget that is ~12.5M comparisons and ~25M tokenizations in a
+    `sf memory policy --apply` an operator is waiting on.
+    """
+    import random
+
+    from software_factory.memory.policing import consolidate, detect_contradictions
+    from software_factory.spec.units import TrustClass
+
+    random.seed(20260831)
+    vocabulary = [f"symbol{i}" for i in range(4000)]
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    store.load()
+    for index in range(600):
+        store.put(
+            Memory(
+                id=f"m{index:05d}",
+                lane=Lane.CANDIDATE,
+                kind=Kind.FACT,
+                scope=Scope.REPOSITORY,
+                scope_ref="acme/svc",
+                content=" ".join(random.sample(vocabulary, 10)),
+                provenance=(Source(kind=SourceKind.RUN, ref=f"r{index}"),),
+                trust=TrustClass.INTERNAL,
+            ),
+            op="seed",
+            actor="test",
+            reason="fixture",
+        )
+
+    started = time.monotonic()
+    detect_contradictions(store)
+    consolidate(store)
+    elapsed = time.monotonic() - started
+
+    # The unfixed pass took several seconds at this size and grew quadratically.
+    assert elapsed < 2.0, f"policy pass took {elapsed:.2f}s over 600 memories"
+
+
+def test_m28_clustering_still_groups_what_it_used_to(tmp_path: Path) -> None:
+    """The inverted index is exact, not approximate: both thresholds require a non-empty
+    token intersection, so a memory sharing no content word cannot join a cluster. This
+    asserts the pruning did not change the answer."""
+    from software_factory.memory.policing import _cluster
+    from software_factory.spec.units import TrustClass
+
+    def memory(memory_id: str, content: str) -> Memory:
+        return Memory(
+            id=memory_id,
+            lane=Lane.CANDIDATE,
+            kind=Kind.FACT,
+            scope=Scope.REPOSITORY,
+            scope_ref="acme/svc",
+            content=content,
+            provenance=(Source(kind=SourceKind.RUN, ref=f"r{memory_id}"),),
+            trust=TrustClass.INTERNAL,
+        )
+
+    members = [
+        memory("a1", "The importer strips a byte-order mark from CSV headers."),
+        memory("a2", "The importer strips a byte-order mark from the CSV headers."),
+        memory("b1", "The scheduler retries a failed webhook three times."),
+    ]
+
+    clusters = _cluster(members)
+
+    grouped = {frozenset(m.id for m in cluster) for cluster in clusters}
+    assert grouped == {frozenset({"a1", "a2"}), frozenset({"b1"})}
+
+
+# --------------------------------------------------------------------------------- M29
+# Skill selection recomputed the whole collision matrix on every scored candidate.
+
+
+def _skill(name: str, description: str) -> object:
+    from software_factory.definition.models import SkillStatus
+    from software_factory.skills.registry import SkillRecord
+
+    return SkillRecord(name=name, description=description, body="body", status=SkillStatus.ACTIVE)
+
+
+def test_m29_selection_does_not_recompute_the_collision_matrix_per_candidate() -> None:
+    """`offer` calls `_score` per candidate and `_score` called `collision`, which scanned
+    the whole registry re-tokenizing two descriptions each time -- 250 000 Jaccard
+    computations for a 500-skill library, on every run, to return seven names."""
+    from software_factory.definition.models import AgentRole
+    from software_factory.skills.registry import SkillRegistry
+
+    registry = SkillRegistry()
+    for index in range(400):
+        registry.add(_skill(f"skill-{index}", f"handles topic{index} in the payments importer"))
+
+    computed = 0
+    original = SkillRegistry._compute_collisions
+
+    def counting(self: SkillRegistry) -> dict[str, float]:
+        nonlocal computed
+        computed += 1
+        return original(self)
+
+    registry._compute_collisions = counting.__get__(registry)  # type: ignore[method-assign]
+
+    offer = registry.offer(
+        role=AgentRole.BUILDER,
+        stage=Stage.BUILD,
+        surfaces={"src/importers/csv.py"},
+        task="fix the byte-order mark handling in the importer",
+    )
+
+    assert offer.offered
+    # Once for the whole call, not once per candidate. The counted assertion is the proof;
+    # a timing bound would only say the machine was fast today.
+    assert computed == 1, f"the collision matrix was computed {computed} times"
+
+    second = registry.offer(
+        role=AgentRole.BUILDER,
+        stage=Stage.BUILD,
+        surfaces={"src/importers/csv.py"},
+        task="another task entirely",
+    )
+
+    assert second.offered
+    assert computed == 1, "an unchanged registry recomputed its collision matrix"
+
+
+def test_m29_the_cached_matrix_notices_a_description_changed_in_place() -> None:
+    """`SkillRecord` is mutable, so a caller holding one can change its description without
+    passing through `add`. A cache that missed that would answer from stale tokens."""
+    from software_factory.skills.registry import SkillRegistry
+
+    registry = SkillRegistry()
+    registry.add(_skill("alpha", "reads and writes CSV headers"))
+    registry.add(_skill("beta", "schedules webhook retries with backoff"))
+
+    assert registry.collision("alpha") < 0.5
+
+    record = registry.get("beta")
+    assert record is not None
+    record.description = "reads and writes CSV headers"
+
+    assert registry.collision("alpha") == 1.0
+
+
+# --------------------------------------------------------------------------------- M31
+# Usage bookkeeping wrote a full copy of the memory, and load() read the whole file.
+
+
+def test_m31_recording_a_use_does_not_write_a_copy_of_the_claim(tmp_path: Path) -> None:
+    """`record_use` did a full `store.put()` -- content, provenance, promotion record --
+    to increment two integers. `RetrievalRequest.limit` defaults to 12, so one run appended
+    up to twelve full records of pure bookkeeping, and 200 runs a day buried the claims."""
+    import json
+
+    from software_factory.memory.retrieval import record_use
+
+    path = tmp_path / "memory.jsonl"
+    store = MemoryStore(path)
+    store.load()
+    content = "The payments importer reads headers as UTF-8 with a byte-order mark."
+    _chain_memory(store, "M1", lane=Lane.CANON)
+    stored = store.get("M1")
+    assert stored is not None
+    stored.content = content
+
+    lines = path.read_text().splitlines()
+    full_record = len(lines[0])
+
+    for _ in range(20):
+        record_use(store, ["M1"], helped=True)
+
+    usage_lines = path.read_text().splitlines()[len(lines) :]
+    records = [json.loads(line) for line in usage_lines]
+
+    assert len(records) == 20
+    assert all(record["op"] == "use" for record in records)
+    assert all("memory" not in record for record in records)
+    # The yardstick is the full record a `put` would have written, not an arbitrary number.
+    assert max(len(line) for line in usage_lines) < full_record / 2, (
+        f"a usage event costs {max(len(line) for line in usage_lines)} bytes against a "
+        f"full record's {full_record}"
+    )
+
+
+def test_m31_usage_counters_survive_a_reload(tmp_path: Path) -> None:
+    """The compact record has to replay, or the counters the eviction ranking reads are
+    lost on the next `load()`."""
+    from software_factory.memory.retrieval import record_use
+
+    path = tmp_path / "memory.jsonl"
+    store = MemoryStore(path)
+    store.load()
+    _chain_memory(store, "M1", lane=Lane.CANON)
+
+    record_use(store, ["M1"], helped=True)
+    record_use(store, ["M1"], helped=False)
+
+    reloaded = MemoryStore(path)
+    reloaded.load()
+    memory = reloaded.get("M1")
+
+    assert memory is not None
+    assert memory.use_count == 2
+    assert memory.helped_count == 1
+    assert memory.last_used_at is not None
+
+
+def test_m31_erasure_removes_usage_lines_too(tmp_path: Path) -> None:
+    """A usage line names a memory id, which is exactly what erasure must remove."""
+    from software_factory.memory.retrieval import record_use
+
+    path = tmp_path / "memory.jsonl"
+    store = MemoryStore(path)
+    store.load()
+    _chain_memory(store, "M1", lane=Lane.CANON)
+    record_use(store, ["M1"], helped=True)
+
+    store.erase("M1", actor="operator", reason="subject erasure request")
+
+    remaining = path.read_text()
+    assert '"op":"use"' not in remaining
+
+
+def test_m31_the_mutation_history_still_shows_usage(tmp_path: Path) -> None:
+    """The compact form must not make the history incomplete."""
+    from software_factory.memory.retrieval import record_use
+
+    path = tmp_path / "memory.jsonl"
+    store = MemoryStore(path)
+    store.load()
+    _chain_memory(store, "M1", lane=Lane.CANON)
+    record_use(store, ["M1"], helped=True)
+
+    history = store.mutations("M1")
+
+    assert [m.op for m in history] == ["seed", "use"]
+    assert history[-1].reason == "cited in a passing run"

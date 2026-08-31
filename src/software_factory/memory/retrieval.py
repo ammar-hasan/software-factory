@@ -200,16 +200,8 @@ def record_use(
     """
     now = utc_now()
     for memory_id in memory_ids:
-        memory = store.get(memory_id)
-        if memory is None:
-            continue
-        memory.use_count += 1
-        memory.last_used_at = now
-        if helped:
-            memory.helped_count += 1
-        store.put(
-            memory,
-            op="use",
-            actor=actor,
-            reason="cited in a passing run" if helped else "cited",
-        )
+        # A compact usage event, not a full `put`. Writing the entire serialised memory --
+        # content, provenance, promotion record -- to increment two integers meant one run
+        # appended up to `RetrievalRequest.limit` (12) such records, so a factory doing 200
+        # runs a day wrote ~2400 bookkeeping records daily and `load()` read all of them.
+        store.note_use(memory_id, helped=helped, actor=actor, at=now)

@@ -10,6 +10,7 @@ their absence never disables the fabric.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 _STOPWORDS = frozenset(
     {
@@ -156,9 +157,37 @@ def comparable(text: str) -> bool:
     return bool(tokens(text))
 
 
+@dataclass(frozen=True, slots=True)
+class Analysed:
+    """One claim, tokenized once.
+
+    Every comparison here used to tokenize both sides from scratch. `detect_contradictions`
+    is all-pairs over every live memory and `_cluster` tests each candidate against a
+    growing cluster, so with `ScopeBudget.max_items` at 5000 per scope one synchronous
+    `sf memory policy --apply` did on the order of 12.5M comparisons and 25M
+    tokenizations. Hoisting the tokenizer out of the inner loop is the whole fix.
+
+    ``sequence`` keeps order and duplicates because the negation test asks where a negator
+    sits, not merely whether one is present.
+    """
+
+    text: str
+    sequence: tuple[str, ...]
+    tokens: frozenset[str]
+
+
+def analyse(text: str) -> Analysed:
+    sequence = tuple(_scan(text))
+    return Analysed(text=text, sequence=sequence, tokens=frozenset(sequence))
+
+
 def jaccard(left: str, right: str) -> float:
     """Set overlap of content words, in [0, 1]."""
-    a, b = tokens(left), tokens(right)
+    return jaccard_of(tokens(left), tokens(right))
+
+
+def jaccard_of(a: frozenset[str] | set[str], b: frozenset[str] | set[str]) -> float:
+    """`jaccard` over token sets that have already been computed."""
     if not a or not b:
         return 0.0
     return len(a & b) / len(a | b)
@@ -170,7 +199,11 @@ def containment(left: str, right: str) -> float:
     Better than Jaccard for consolidation, where a general memory legitimately subsumes
     a specific one and their sizes differ a lot.
     """
-    a, b = tokens(left), tokens(right)
+    return containment_of(tokens(left), tokens(right))
+
+
+def containment_of(a: frozenset[str] | set[str], b: frozenset[str] | set[str]) -> float:
+    """`containment` over token sets that have already been computed."""
     if not a or not b:
         return 0.0
     return len(a & b) / min(len(a), len(b))
@@ -202,29 +235,33 @@ def negates(left: str, right: str, *, topic_threshold: float = 0.45) -> bool:
     members of an antonym pair). Requiring *exactly one* negator is what stops "X must
     not happen" and "X must not happen" from reading as a contradiction.
     """
-    left_tokens, right_tokens = tokens(left), tokens(right)
-    shared = left_tokens & right_tokens
-    if len(shared) < _MIN_SHARED_TOKENS or containment(left, right) < topic_threshold:
+    return negates_of(analyse(left), analyse(right), topic_threshold=topic_threshold)
+
+
+def negates_of(left: Analysed, right: Analysed, *, topic_threshold: float = 0.45) -> bool:
+    """`negates` over claims that have already been tokenized."""
+    shared = left.tokens & right.tokens
+    if (
+        len(shared) < _MIN_SHARED_TOKENS
+        or containment_of(left.tokens, right.tokens) < topic_threshold
+    ):
         return False
 
     # The negator has to attach to the subject the two claims share, not merely appear
     # somewhere in one of them. Without this, any sentence containing "not" contradicted
     # any sentence that reused a couple of its words.
-    left_negated = _negates_shared(left, shared)
-    right_negated = _negates_shared(right, shared)
-    if left_negated != right_negated:
+    if _negates_shared(left.sequence, shared) != _negates_shared(right.sequence, shared):
         return True
 
     return any(
-        (positive in left_tokens and negative in right_tokens)
-        or (negative in left_tokens and positive in right_tokens)
+        (positive in left.tokens and negative in right.tokens)
+        or (negative in left.tokens and positive in right.tokens)
         for positive, negative in _ANTONYMS
     )
 
 
-def _negates_shared(text: str, shared: set[str]) -> bool:
+def _negates_shared(sequence: tuple[str, ...], shared: frozenset[str]) -> bool:
     """True when a negator sits within ``_NEGATOR_WINDOW`` words of a shared content word."""
-    sequence = _scan(text)
     negator_positions = [i for i, word in enumerate(sequence) if word in _NEGATORS]
     if not negator_positions:
         return False

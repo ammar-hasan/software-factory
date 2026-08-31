@@ -16,7 +16,7 @@ import enum
 from dataclasses import dataclass, field
 
 from software_factory.definition.models import AgentRole, SkillStatus, Stage
-from software_factory.memory.similarity import jaccard
+from software_factory.memory.similarity import jaccard, jaccard_of, tokens
 from software_factory.surfaces import surfaces_overlap
 
 DEFAULT_OFFER_SIZE = 7
@@ -156,9 +156,18 @@ class SkillRegistry:
 
     def __init__(self, records: list[SkillRecord] | None = None) -> None:
         self._records: dict[str, SkillRecord] = {r.name: r for r in (records or [])}
+        self._description_tokens: dict[str, frozenset[str]] = {}
+        self._description_keys: dict[str, tuple[str, str]] = {}
+        self._collisions: dict[str, float] | None = None
+        self._collisions_for: int | None = None
 
     def add(self, record: SkillRecord) -> None:
         self._records[record.name] = record
+        self._description_tokens[record.name] = frozenset(tokens(record.description))
+        self._description_keys[record.name] = (record.name, record.description)
+        # The collision matrix is a property of the whole registry, so any change to any
+        # skill invalidates all of it. Recomputed lazily on the next read.
+        self._collisions = None
 
     def get(self, name: str) -> SkillRecord | None:
         return self._records.get(name)
@@ -226,18 +235,58 @@ class SkillRegistry:
         )
 
     def collision(self, name: str) -> float:
-        """Highest description similarity to any sibling that could be offered alongside."""
-        record = self._records.get(name)
-        if record is None:
+        """Highest description similarity to any sibling that could be offered alongside.
+
+        Read from a matrix computed once per registry version. `offer` calls `_score` per
+        candidate and `_score` called this, which scanned the whole registry re-tokenizing
+        two descriptions each time: for a 500-skill library, 250 000 Jaccard computations
+        on every run, to return the seven names `DEFAULT_OFFER_SIZE` asks for.
+        """
+        if name not in self._records:
             return 0.0
-        return max(
-            (
-                jaccard(record.description, other.description)
-                for other in self._records.values()
-                if other.name != name and other.status is not SkillStatus.RETIRED
-            ),
-            default=0.0,
+        # `SkillRecord` is mutable, so a caller holding one can change its description or
+        # status without passing through `add`. The signature is O(n) per call, against the
+        # O(n^2) Jaccards it guards -- cheap enough to check every time rather than trust
+        # that nobody did.
+        signature = self._collision_signature()
+        if self._collisions is None or self._collisions_for != signature:
+            self._collisions = self._compute_collisions()
+            self._collisions_for = signature
+        return self._collisions.get(name, 0.0)
+
+    def _collision_signature(self) -> int:
+        return hash(
+            tuple(
+                sorted(
+                    (record.name, record.status.value, record.description)
+                    for record in self._records.values()
+                )
+            )
         )
+
+    def _compute_collisions(self) -> dict[str, float]:
+        """The whole collision matrix in one pass, tokenizing each description once."""
+        live = [r for r in self._records.values() if r.status is not SkillStatus.RETIRED]
+        scores = dict.fromkeys(self._records, 0.0)
+        for index, left in enumerate(live):
+            left_tokens = self._tokens_for(left)
+            for right in live[index + 1 :]:
+                overlap = jaccard_of(left_tokens, self._tokens_for(right))
+                if overlap > scores[left.name]:
+                    scores[left.name] = overlap
+                if overlap > scores[right.name]:
+                    scores[right.name] = overlap
+        return scores
+
+    def _tokens_for(self, record: SkillRecord) -> frozenset[str]:
+        """Description tokens, cached. Records added before the cache existed fall back."""
+        key = (record.name, record.description)
+        cached = self._description_tokens.get(record.name)
+        if cached is None or self._description_keys.get(record.name) != key:
+            cached = frozenset(tokens(record.description))
+            self._description_tokens[record.name] = cached
+            self._description_keys[record.name] = key
+        return cached
 
     # ------------------------------------------------------------------- lifecycle
 
@@ -328,10 +377,13 @@ class SkillRegistry:
         candidates = [
             r for r in self._records.values() if r.status in (SkillStatus.TRIAL, SkillStatus.ACTIVE)
         ]
+        # Bodies are far larger than descriptions, so re-tokenizing both sides of every
+        # pair was the most expensive loop in the module.
+        body_tokens = {record.name: frozenset(tokens(record.body)) for record in candidates}
         for index, left in enumerate(candidates):
             for right in candidates[index + 1 :]:
                 scope_overlap = _scope_overlap(left, right)
-                body_overlap = jaccard(left.body, right.body)
+                body_overlap = jaccard_of(body_tokens[left.name], body_tokens[right.name])
                 if scope_overlap < OVERLAP_THRESHOLD or body_overlap < BODY_SIMILARITY_THRESHOLD:
                     continue
                 proposals.append(

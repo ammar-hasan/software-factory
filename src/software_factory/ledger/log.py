@@ -235,10 +235,64 @@ class Ledger:
             os.fsync(handle.fileno())
 
     def _tail_unlocked(self) -> tuple[int, str]:
-        last: LedgerEntry | None = None
-        for last in self._read_unlocked():  # noqa: B007 - we want the final value
-            pass
-        return (last.seq, last.hash) if last else (0, GENESIS)
+        """The last entry's ``(seq, hash)``, read from the end of the file.
+
+        Still read from the file on every append, never cached: the promise in `append` is
+        that a second process appending between our calls cannot fork the chain, and only a
+        fresh read keeps it. What changed is how much is read. Walking the whole file to
+        find its final line made every append quadratic -- 0.97s for 500 entries, 46s for
+        4000, a clean 4x per doubling -- while holding the exclusive lock. `TOOL_CALLED` and
+        `MODEL_CALLED` mean a busy factory writes thousands of entries a day, so at 100k an
+        append took minutes and blocked every other writer.
+
+        `verify()` is still a whole-file operation, which is what it is for.
+        """
+        line = self._last_complete_line()
+        if line is None:
+            return (0, GENESIS)
+        try:
+            entry = LedgerEntry.from_json(line)
+        except (ValueError, KeyError) as exc:
+            raise LedgerError(
+                f"{self.path}: the final ledger entry is malformed: {exc}",
+                remediation=(
+                    "The ledger is append-only and must not be edited. Restore it from "
+                    "backup, or `sf ledger verify` to find the first divergence."
+                ),
+            ) from exc
+        return entry.seq, entry.hash
+
+    def _last_complete_line(self, *, window: int = 65_536) -> str | None:
+        """The final complete line, read backwards from the end of the file.
+
+        The window grows rather than assuming a bound, because one entry can legitimately
+        exceed any fixed size -- a PACK_ASSEMBLED payload is not small.
+        """
+        if not self.path.exists():
+            return None
+        size = self.path.stat().st_size
+        if size == 0:
+            return None
+        # A torn final write is not an entry. `read()` skips it and so must this, or `tail`
+        # on a crashed log would raise where reading it does not.
+        ends_clean = not self.torn_tail()
+        with self.path.open("rb") as handle:
+            while True:
+                start = max(0, size - window)
+                handle.seek(start)
+                lines = handle.read(size - start).split(b"\n")
+                if start > 0:
+                    # The first element begins before the window, so it is a fragment.
+                    lines = lines[1:]
+                if not ends_clean and lines:
+                    lines = lines[:-1]
+                for raw in reversed(lines):
+                    text = raw.strip()
+                    if text:
+                        return text.decode("utf-8")
+                if start == 0:
+                    return None
+                window *= 4
 
     @contextmanager
     def _locked(self, *, shared: bool = False) -> Iterator[None]:

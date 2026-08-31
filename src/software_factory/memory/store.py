@@ -67,26 +67,28 @@ class MemoryStore:
         """
         self._memories = {}
         if self.path.exists():
-            with self._locked(shared=True):
-                raw = self.path.read_text(encoding="utf-8")
-            lines = raw.splitlines()
-            complete = raw.endswith("\n")
-            for number, line in enumerate(lines, start=1):
-                if not line.strip():
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    if number == len(lines) and not complete:
-                        break  # torn tail, not tampering
-                    raise MemoryStoreError(
-                        f"{self.path}:{number}: malformed memory record: {exc}",
-                        remediation=(
-                            "The memory log is append-only. Restore it from backup, or "
-                            "remove the corrupt line and rebuild the index."
-                        ),
-                    ) from exc
-                self._apply(record)
+            # Streamed, not `read_text().splitlines()`. That held the whole log in memory
+            # twice over -- once as a string and once as a list -- to rebuild an index of a
+            # few thousand live memories, and the log is append-only so it only grows.
+            with self._locked(shared=True), self.path.open(encoding="utf-8") as handle:
+                for number, line in enumerate(handle, start=1):
+                    complete = line.endswith("\n")
+                    text = line.strip()
+                    if not text:
+                        continue
+                    try:
+                        record = json.loads(text)
+                    except json.JSONDecodeError as exc:
+                        if not complete:
+                            break  # torn tail, not tampering
+                        raise MemoryStoreError(
+                            f"{self.path}:{number}: malformed memory record: {exc}",
+                            remediation=(
+                                "The memory log is append-only. Restore it from backup, or "
+                                "remove the corrupt line and rebuild the index."
+                            ),
+                        ) from exc
+                    self._apply(record)
         self._loaded = True
 
     def torn_tail(self) -> bool:
@@ -106,6 +108,22 @@ class MemoryStore:
         """
         op = record.get("op")
         payload = record.get("memory") or {}
+
+        if op == "use":
+            # A usage event carries counters, not a claim. Writing the whole serialised
+            # memory to increment two integers meant one run appended up to
+            # `RetrievalRequest.limit` full records -- content, provenance and all -- of
+            # pure bookkeeping, and 200 runs a day buried the claims under them.
+            target = self._memories.get(str(record.get("id", "")))
+            if target is None:
+                return
+            target.use_count += 1
+            if record.get("helped"):
+                target.helped_count += 1
+            when = record.get("at")
+            if when:
+                target.last_used_at = datetime.fromisoformat(str(when))
+            return
 
         if op == "delete":
             self._memories.pop(str(payload.get("id", "")), None)
@@ -143,6 +161,36 @@ class MemoryStore:
                 os.fsync(handle.fileno())
         self._memories[memory.id] = memory
         return memory
+
+    def note_use(self, memory_id: str, *, helped: bool, actor: str, at: datetime) -> None:
+        """Append a usage event: counters only, never a copy of the claim.
+
+        Kept out of the durable claim log's record shape on purpose. `mutations()` and
+        `erase()` both understand it, so the history stays complete and erasure stays
+        total -- a usage line names a memory id, which is exactly what erasure must remove.
+        """
+        self._ensure_loaded()
+        memory = self._memories.get(memory_id)
+        if memory is None:
+            return
+        memory.use_count += 1
+        memory.last_used_at = at
+        if helped:
+            memory.helped_count += 1
+        record = {
+            "op": "use",
+            "id": memory_id,
+            "actor": actor,
+            "helped": helped,
+            "at": at.isoformat(),
+        }
+        with self._locked():
+            if self.torn_tail():
+                self._truncate_torn_unlocked()
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
 
     def _truncate_torn_unlocked(self) -> None:
         """Drop an incomplete final line so the log can be written again."""
@@ -185,6 +233,10 @@ class MemoryStore:
                         try:
                             record = json.loads(line)
                         except json.JSONDecodeError:
+                            continue
+                        if record.get("op") == "use" and str(record.get("id")) == memory_id:
+                            # A usage line names the memory and nothing else, so erasure
+                            # removes it outright rather than redacting a body it has none of.
                             continue
                         if str(record.get("memory", {}).get("id")) == memory_id:
                             record["memory"] = {
@@ -331,15 +383,19 @@ class MemoryStore:
             if not line.strip():
                 continue
             record = json.loads(line)
-            target = str(record["memory"]["id"])
+            # A usage event carries an id at the top level and no `memory` body.
+            target = str(record.get("id") or record["memory"]["id"])
             if memory_id is not None and target != memory_id:
                 continue
+            reason = record.get("reason")
+            if reason is None and record.get("op") == "use":
+                reason = "cited in a passing run" if record.get("helped") else "cited"
             history.append(
                 Mutation(
                     memory_id=target,
                     op=str(record["op"]),
                     actor=str(record.get("actor", "")),
-                    reason=str(record.get("reason", "")),
+                    reason=str(reason or ""),
                     at=datetime.fromisoformat(record["at"]),
                     after=record.get("memory"),
                 )
