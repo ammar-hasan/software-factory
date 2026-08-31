@@ -410,6 +410,218 @@ def ledger_tail(
     raise typer.Exit(EXIT_OK)
 
 
+memory_app = typer.Typer(
+    help="Inspect the memory fabric: lanes, provenance, and what a claim rests on.",
+    no_args_is_help=True,
+)
+app.add_typer(memory_app, name="memory")
+
+
+@memory_app.command("stats")
+def memory_stats(
+    path: Annotated[Path, typer.Argument(help="Path to the memory JSONL file.")],
+    as_json: JsonOpt = False,
+) -> None:
+    """Lane counts, quarantine backlog, and size. The health check for FR-15.3."""
+    from software_factory.memory import MemoryStore
+
+    store = MemoryStore(path)
+    try:
+        store.load()
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    stats = store.stats()
+    if as_json:
+        _emit({"ok": True, "stats": stats})
+        raise typer.Exit(EXIT_OK)
+
+    table = Table(show_header=True, header_style="bold", box=None)
+    table.add_column("lane")
+    table.add_column("count", justify="right")
+    for lane in ("working", "candidate", "canon", "archive"):
+        table.add_row(lane, str(stats.get(lane, 0)))
+    console.print(table)
+    console.print(
+        f"\n[bold]{stats['total']}[/] memories, [bold]{stats['quarantined']}[/] quarantined, "
+        f"{stats['bytes']:,} bytes"
+    )
+    raise typer.Exit(EXIT_OK)
+
+
+@memory_app.command("why")
+def memory_why(
+    path: Annotated[Path, typer.Argument(help="Path to the memory JSONL file.")],
+    memory_id: Annotated[str, typer.Argument(help="The memory to explain.")],
+    as_json: JsonOpt = False,
+) -> None:
+    """Print a memory's complete provenance tree.
+
+    The subsystem's primary trust instrument: a memory a human cannot trace is a memory
+    a human should not accept.
+    """
+    from software_factory.memory import MemoryStore
+
+    store = MemoryStore(path)
+    try:
+        store.load()
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    tree = store.provenance_tree(memory_id)
+    if as_json:
+        _emit({"ok": bool(tree.get("found")), "provenance": tree})
+        raise typer.Exit(EXIT_OK if tree.get("found") else EXIT_FAILED)
+
+    if not tree.get("found"):
+        err_console.print(f"[bold red]not found[/] {memory_id}")
+        raise typer.Exit(EXIT_FAILED)
+    _render_provenance(tree, depth=0)
+    raise typer.Exit(EXIT_OK)
+
+
+def _render_provenance(node: dict[str, Any], *, depth: int) -> None:
+    indent = "  " * depth
+    console.print(
+        f"{indent}[bold]{node['id']}[/] [dim]({node['lane']}, {node['kind']}, "
+        f"trust {node['trust']}, confidence {node['confidence']:.2f})[/]"
+    )
+    console.print(f"{indent}  {node['content']}")
+    for source in node.get("sources", []):
+        console.print(f"{indent}  [dim]<- {source['kind']}:{source['ref']}[/]")
+    if node.get("promotion"):
+        console.print(f"{indent}  [dim]promoted by {node['promotion']['criterion']}[/]")
+    for parent in node.get("parents", []):
+        _render_provenance(parent, depth=depth + 1)
+
+
+@memory_app.command("blast")
+def memory_blast(
+    path: Annotated[Path, typer.Argument(help="Path to the memory JSONL file.")],
+    memory_id: Annotated[str, typer.Argument(help="The memory to assess.")],
+    as_json: JsonOpt = False,
+) -> None:
+    """What invalidating this memory would affect.
+
+    Run before accepting a high-fan-out claim: a memory hundreds of others rest on
+    deserves more scrutiny than one nothing depends on.
+    """
+    from software_factory.memory import MemoryStore, blast_radius
+
+    store = MemoryStore(path)
+    try:
+        store.load()
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    impact = blast_radius(store, memory_id)
+    if as_json:
+        _emit({"ok": True, "impact": impact})
+        raise typer.Exit(EXIT_OK)
+
+    canon_affected = impact["canon_affected"]
+    canon_count = len(canon_affected) if isinstance(canon_affected, list) else 0
+    console.print(
+        f"invalidating [bold]{memory_id}[/] would affect [bold]{impact['total']}[/] memory(ies), "
+        f"[bold]{canon_count}[/] of them in canon"
+    )
+    raise typer.Exit(EXIT_OK)
+
+
+@memory_app.command("policy")
+def memory_policy(
+    path: Annotated[Path, typer.Argument(help="Path to the memory JSONL file.")],
+    apply: Annotated[bool, typer.Option(help="Apply the pass. Default is a dry run.")] = False,
+    as_json: JsonOpt = False,
+) -> None:
+    """Run the policy pass: contradiction, expiry, consolidation."""
+    from software_factory.memory import MemoryStore, run_pass
+
+    if not apply:
+        console.print("[dim]dry run: pass --apply to write changes[/]") if not as_json else None
+
+    store = MemoryStore(path)
+    try:
+        store.load()
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    if not apply:
+        stats = store.stats()
+        if as_json:
+            _emit({"ok": True, "dryRun": True, "stats": stats})
+        else:
+            console.print(f"{stats['total']} memories would be examined")
+        raise typer.Exit(EXIT_OK)
+
+    report = run_pass(store)
+    if as_json:
+        _emit({"ok": True, "report": report.as_dict()})
+        raise typer.Exit(EXIT_OK)
+
+    console.print(
+        f"quarantined {len(report.quarantined)}, expired {len(report.expired)}, "
+        f"merged {len(report.merged)}, weakened {len(report.weakened)}"
+    )
+    raise typer.Exit(EXIT_OK)
+
+
+@app.command()
+def gates(as_json: JsonOpt = False) -> None:
+    """List the baseline gates and which stages they run at."""
+    from software_factory.evals import STAGE_GATES
+    from software_factory.evals.gates import BASELINE_GATES
+
+    by_gate: dict[str, list[str]] = {name: [] for name in BASELINE_GATES}
+    for stage, names in STAGE_GATES.items():
+        for name in names:
+            by_gate.setdefault(name, []).append(stage)
+
+    if as_json:
+        _emit({"ok": True, "gates": {k: sorted(v) for k, v in by_gate.items()}})
+        raise typer.Exit(EXIT_OK)
+
+    table = Table(show_header=True, header_style="bold", box=None)
+    table.add_column("gate")
+    table.add_column("stages", overflow="fold")
+    for name, stages in sorted(by_gate.items()):
+        table.add_row(name, ", ".join(sorted(stages)) or "[dim]not scheduled[/]")
+    console.print(table)
+    raise typer.Exit(EXIT_OK)
+
+
+@app.command()
+def stages(as_json: JsonOpt = False) -> None:
+    """Print the default stage graph and which stages cannot be skipped."""
+    from software_factory.orchestrator import DEFAULT_NON_SKIPPABLE, DEFAULT_TRANSITIONS
+
+    graph = {
+        stage.value: sorted(target.value for target in targets)
+        for stage, targets in DEFAULT_TRANSITIONS.items()
+    }
+    non_skippable = sorted(s.value for s in DEFAULT_NON_SKIPPABLE)
+
+    if as_json:
+        _emit({"ok": True, "transitions": graph, "nonSkippable": non_skippable})
+        raise typer.Exit(EXIT_OK)
+
+    table = Table(show_header=True, header_style="bold", box=None)
+    table.add_column("stage")
+    table.add_column("may move to", overflow="fold")
+    for stage, targets in graph.items():
+        marker = " [yellow]*[/]" if stage in non_skippable else ""
+        table.add_row(f"{stage}{marker}", ", ".join(targets) or "[dim]terminal[/]")
+    console.print(table)
+    console.print(
+        "\n[yellow]*[/] cannot be skipped on an agent's authority; skipping needs a human decision"
+    )
+    raise typer.Exit(EXIT_OK)
+
+
 @app.command()
 def doctor(as_json: JsonOpt = False) -> None:
     """Report what works in this environment and what does not (FR-28.1)."""

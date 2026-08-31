@@ -226,3 +226,191 @@ def test_doctor_reports_environment_checks() -> None:
 
     checks = {c["check"] for c in payload(result.output)["checks"]}
     assert {"python", "git"} <= checks
+
+
+# --------------------------------------------------------- knowledge subsystem commands
+
+
+def test_stages_marks_the_non_skippable_stage() -> None:
+    result = runner.invoke(app, ["stages", "--json"])
+
+    assert result.exit_code == 0
+    body = payload(result.output)
+    assert "REVIEW" in body["nonSkippable"]
+    assert body["transitions"]["COMPLETE"] == []
+
+
+def test_stages_shows_blocked_reachable_from_working_stages() -> None:
+    """Work can stall anywhere, so every non-terminal stage must be able to park."""
+    body = payload(runner.invoke(app, ["stages", "--json"]).output)
+
+    for stage in ("TRIAGE", "DESIGN", "BUILD", "REVIEW", "VERIFY"):
+        assert "BLOCKED" in body["transitions"][stage]
+
+
+def test_gates_lists_every_baseline_gate_with_its_stages() -> None:
+    result = runner.invoke(app, ["gates", "--json"])
+
+    assert result.exit_code == 0
+    gates = payload(result.output)["gates"]
+    assert gates["regression-proven"] == ["BUILD"]
+    assert set(gates["evidence-complete"]) == {"REVIEW", "VERIFY"}
+
+
+def test_memory_stats_reports_lane_counts(tmp_path: Path) -> None:
+    from software_factory.memory import (
+        Candidate,
+        Kind,
+        MemoryStore,
+        Scope,
+        Source,
+        SourceKind,
+        admit,
+    )
+
+    path = tmp_path / "memory.jsonl"
+    store = MemoryStore(path)
+    store.load()
+    admit(
+        Candidate(
+            kind=Kind.FACT,
+            scope=Scope.REPOSITORY,
+            scope_ref="acme/payments",
+            content="The importer parses headers before rows.",
+            provenance=(Source(kind=SourceKind.RUN, ref="run-1"),),
+        ),
+        store,
+    )
+
+    result = runner.invoke(app, ["memory", "stats", str(path), "--json"])
+
+    assert result.exit_code == 0
+    stats = payload(result.output)["stats"]
+    assert stats["candidate"] == 1
+    assert stats["total"] == 1
+
+
+def test_memory_why_reports_not_found_with_exit_one(tmp_path: Path) -> None:
+    path = tmp_path / "memory.jsonl"
+    path.write_text("", encoding="utf-8")
+
+    result = runner.invoke(app, ["memory", "why", str(path), "mem_missing", "--json"])
+
+    assert result.exit_code == 1
+    assert payload(result.output)["ok"] is False
+
+
+def test_memory_why_walks_the_provenance_tree(tmp_path: Path) -> None:
+    from software_factory.memory import (
+        Candidate,
+        Kind,
+        Memory,
+        MemoryStore,
+        Scope,
+        Source,
+        SourceKind,
+        admit,
+    )
+
+    path = tmp_path / "memory.jsonl"
+    store = MemoryStore(path)
+    store.load()
+
+    def write(content: str, parents: tuple[str, ...] = ()) -> Memory:
+        outcome = admit(
+            Candidate(
+                kind=Kind.FACT,
+                scope=Scope.REPOSITORY,
+                scope_ref="acme/payments",
+                content=content,
+                provenance=(Source(kind=SourceKind.RUN, ref=f"run-{content[:5]}"),),
+                parents=parents,
+            ),
+            store,
+        )
+        assert isinstance(outcome, Memory), outcome
+        return outcome
+
+    root = write("Deploys are gated on the staging smoke suite.")
+    child = write("Hotfixes therefore wait for staging to finish.", (root.id,))
+
+    result = runner.invoke(app, ["memory", "why", str(path), child.id, "--json"])
+
+    assert result.exit_code == 0
+    tree = payload(result.output)["provenance"]
+    assert tree["parents"][0]["id"] == root.id
+
+
+def test_memory_blast_reports_downstream_impact(tmp_path: Path) -> None:
+    from software_factory.memory import (
+        Candidate,
+        Kind,
+        Memory,
+        MemoryStore,
+        Scope,
+        Source,
+        SourceKind,
+        admit,
+    )
+
+    path = tmp_path / "memory.jsonl"
+    store = MemoryStore(path)
+    store.load()
+    root = admit(
+        Candidate(
+            kind=Kind.FACT,
+            scope=Scope.REPOSITORY,
+            scope_ref="acme/payments",
+            content="Deploys are gated on the staging smoke suite.",
+            provenance=(Source(kind=SourceKind.RUN, ref="run-1"),),
+        ),
+        store,
+    )
+    assert isinstance(root, Memory)
+
+    result = runner.invoke(app, ["memory", "blast", str(path), root.id, "--json"])
+
+    assert result.exit_code == 0
+    assert payload(result.output)["impact"]["total"] == 0
+
+
+def test_memory_policy_defaults_to_a_dry_run(tmp_path: Path) -> None:
+    """A pass that rewrites lanes should never be the default of an inspection command."""
+    from software_factory.memory import (
+        Candidate,
+        Kind,
+        MemoryStore,
+        Scope,
+        Source,
+        SourceKind,
+        admit,
+    )
+
+    path = tmp_path / "memory.jsonl"
+    store = MemoryStore(path)
+    store.load()
+    for content in (
+        "Retries are enabled for the payments webhook.",
+        "Retries are disabled for the payments webhook.",
+    ):
+        admit(
+            Candidate(
+                kind=Kind.FACT,
+                scope=Scope.REPOSITORY,
+                scope_ref="acme/payments",
+                content=content,
+                provenance=(Source(kind=SourceKind.RUN, ref=f"run-{content[:6]}"),),
+            ),
+            store,
+        )
+
+    dry = runner.invoke(app, ["memory", "policy", str(path), "--json"])
+    assert payload(dry.output)["dryRun"] is True
+
+    reloaded = MemoryStore(path)
+    reloaded.load()
+    assert not any(m.quarantined for m in reloaded.all())
+
+    applied = runner.invoke(app, ["memory", "policy", str(path), "--apply", "--json"])
+    assert applied.exit_code == 0
+    assert payload(applied.output)["report"]["quarantined"]
