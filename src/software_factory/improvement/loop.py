@@ -28,8 +28,10 @@ FR-14.1: the loop is opt-in per scorer. Enabling it on a scorer authorises inves
 from __future__ import annotations
 
 import enum
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Any
 
 from software_factory.evals.scorers import ImprovementProposal, ProposalVerdict, Scorer
 from software_factory.identity import Capability, Decision
@@ -85,6 +87,18 @@ class ProposalRecord:
     which is different from zero, and conflating them would let an unmeasured loop report
     as an ineffective one, or worse, an ineffective one as unmeasured."""
 
+    requires_second_reviewer: bool = False
+    """Whether FR-25.3's two-approver rule applies to this proposal.
+
+    `submit` read one field of the verdict it was given -- `accepted` -- and dropped this
+    and the reason, so two proposals differing on whether a change touches a scorer, a gate
+    or an eval produced records identical apart from their ids. The rule cannot be enforced
+    from a record that does not say it applies.
+    """
+
+    verdict_reason: str = ""
+    """What the verdict said, so a reviewer sees why it was routed the way it was."""
+
 
 @dataclass(frozen=True, slots=True)
 class Refused:
@@ -132,6 +146,47 @@ class LoopState:
 
     enabled: bool = True
     disabled_reason: str = ""
+
+    @classmethod
+    def from_ledger(cls, entries: Iterable[Any]) -> LoopState:
+        """Rebuild the loop's memory of itself from the ledger.
+
+        The class docstring is right that the anti-thrash rules are about *this loop's* past
+        behaviour and that a loop forgetting its proposals between invocations has no
+        anti-thrash at all. It was held explicitly and written down nowhere, so every
+        invocation of `sf improve` started with an empty memory -- which is the same thing.
+
+        Later entries for one proposal id supersede earlier ones, so a settled proposal
+        reads as settled rather than as two records.
+        """
+        from software_factory.ledger.entry import EntryType
+
+        by_id: dict[str, ProposalRecord] = {}
+        state = cls()
+        for entry in entries:
+            if entry.type is not EntryType.IMPROVEMENT_PROPOSAL:
+                continue
+            payload = entry.payload
+            status = str(payload.get("status", ""))
+            if status not in set(ProposalStatus):
+                continue
+            effect = payload.get("outcomeEffect")
+            by_id[str(entry.subject)] = ProposalRecord(
+                id=str(entry.subject),
+                target=str(payload.get("target", "")),
+                scorer=str(payload.get("scorer", "")),
+                signature=str(payload.get("signature", "")),
+                status=ProposalStatus(status),
+                opened_at=datetime.fromisoformat(
+                    str(payload.get("openedAt", entry.ts)).replace("Z", "+00:00")
+                ),
+                evidence=tuple(str(e) for e in payload.get("evidence", ())),
+                outcome_effect=None if effect is None else float(effect),
+                requires_second_reviewer=bool(payload.get("requiresSecondReviewer", False)),
+                verdict_reason=str(payload.get("verdictReason", "")),
+            )
+        state.records = sorted(by_id.values(), key=lambda r: r.opened_at)
+        return state
 
     def open_proposals(self) -> list[ProposalRecord]:
         return [r for r in self.records if r.status is ProposalStatus.OPEN]
@@ -215,13 +270,17 @@ def detect_drift(
 ) -> DriftFinding | None:
     """Report a scorer whose pass rate has outrun the outcome it is supposed to track.
 
-    Only an improving scorer can drift in the sense that matters. A scorer getting *worse*
-    while its outcome holds is a different signal -- the scorer may have got stricter, which
-    is not capture -- and reporting it here would bury the case this exists for.
+    The gap is what matters, not the scorer's direction. `scorer_delta <= 0` used to return
+    early, on the reasoning that "only an improving scorer can drift" -- but the sharpest
+    version of the failure is a scorer holding perfectly *flat* while the outcome it stands
+    for collapses. A scorer reading 0.0 against an outcome falling 40 points is a
+    measurement that has stopped tracking reality, which is the whole thing this detects.
+
+    What the old guard was reaching for is still honoured: a scorer getting stricter shows
+    as a *negative* gap (the scorer falls further than the outcome), and a negative gap is
+    below any positive tolerance, so it does not fire.
     """
     if not scorer.outcome_partner:
-        return None
-    if scorer_delta <= 0:
         return None
     if scorer_delta - outcome_delta < tolerance:
         return None
@@ -370,6 +429,7 @@ def submit(
             scorer_name=scorer_name,
             signature=signature,
             status=ProposalStatus.REJECTED,
+            verdict=verdict,
             now=now,
         )
     return _record(
@@ -379,6 +439,7 @@ def submit(
         scorer_name=scorer_name,
         signature=signature,
         status=ProposalStatus.OPEN,
+        verdict=verdict,
         now=now,
     )
 
@@ -445,7 +506,17 @@ def settle(
             opened_at=record.opened_at,
             settled_at=now or utc_now(),
             evidence=record.evidence,
-            outcome_effect=outcome_effect,
+            requires_second_reviewer=record.requires_second_reviewer,
+            verdict_reason=record.verdict_reason,
+            # Carried forward rather than defaulted to None. Reverting a harmful change is
+            # the natural operational response to it, and it was also the action that
+            # erased the evidence it was harmful: `telemetry` counts only records carrying
+            # an effect, so the loop's mean improved by dropping its worst result. FR-14.7a.4
+            # exists so a loop that does not earn its keep switches itself off, and this was
+            # the one path that hid the case where it had not.
+            outcome_effect=(
+                outcome_effect if outcome_effect is not None else record.outcome_effect
+            ),
         )
         state.records[index] = settled
         return settled
@@ -464,6 +535,7 @@ def _record(
     scorer_name: str,
     signature: str,
     status: ProposalStatus,
+    verdict: ProposalVerdict | None = None,
     now: datetime | None,
 ) -> ProposalRecord:
     record = ProposalRecord(
@@ -475,6 +547,8 @@ def _record(
         opened_at=now or utc_now(),
         settled_at=None if status is ProposalStatus.OPEN else (now or utc_now()),
         evidence=proposal.regressions_addressed,
+        requires_second_reviewer=bool(verdict and verdict.requires_second_reviewer),
+        verdict_reason=(verdict.reason if verdict else ""),
     )
     state.records.append(record)
     return record

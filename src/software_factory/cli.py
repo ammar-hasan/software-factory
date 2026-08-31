@@ -1057,6 +1057,7 @@ def improve(
     that needs two approvers when it touches a scorer, a gate, or an eval (FR-25.3).
     """
     from software_factory.improvement import Failure, cluster_failures
+    from software_factory.improvement.loop import LoopState, check_effectiveness, may_propose
 
     ledger = Ledger(path)
     try:
@@ -1082,6 +1083,26 @@ def improve(
 
     clusters = cluster_failures(failures, min_size=min_size)
 
+    # The loop's own guards, consulted rather than merely present. `may_propose`,
+    # `check_effectiveness` and `detect_drift` implement every safety property the loop
+    # claims -- cooling periods, the open-proposal bound, the anti-thrash rule, the
+    # self-switch-off -- and none of them had a caller outside tests, so a command
+    # reporting "the patterns worth diagnosing" was answering a narrower question than it
+    # sounded like: the patterns that *exist*, with nothing said about whether the loop
+    # should act on any of them.
+    state = LoopState.from_ledger(entries)
+    blocked: dict[str, Any] = {}
+    for cluster in clusters:
+        refusal = may_propose(state, cluster, target=f"cluster/{cluster.signature}")
+        if refusal is not None:
+            blocked[cluster.signature] = {
+                "code": refusal.code,
+                "message": refusal.message,
+                "remediation": refusal.remediation,
+            }
+
+    ineffective = check_effectiveness(state)
+
     if as_json:
         _emit(
             {
@@ -1095,9 +1116,14 @@ def improve(
                         "stage": c.stage,
                         "agent": c.agent,
                         "describe": c.describe(),
+                        "mayPropose": c.signature not in blocked,
+                        "refusal": blocked.get(c.signature),
                     }
                     for c in clusters
                 ],
+                "proposalsOnRecord": len(state.records),
+                "openProposals": len(state.open_proposals()),
+                "loopEffectiveness": ineffective,
             }
         )
         raise typer.Exit(EXIT_OK)
@@ -1114,16 +1140,20 @@ def improve(
         raise typer.Exit(EXIT_OK)
 
     table = Table(show_header=True, header_style="bold", box=None)
-    for column in ("signature", "failures", "work items", "pattern"):
+    for column in ("signature", "failures", "work items", "pattern", "propose?"):
         table.add_column(column, overflow="fold")
     for cluster in clusters:
+        refusal = blocked.get(cluster.signature)
         table.add_row(
             cluster.signature,
             str(cluster.size),
             str(len(cluster.work_items)),
             cluster.failures[0].describe(),
+            "[green]yes[/]" if refusal is None else f"[yellow]{refusal['code']}[/]",
         )
     console.print(table)
+    if ineffective:
+        console.print(f"\n[red]{ineffective}[/]")
     console.print(
         "\n[dim]Work items matter more than failure count: forty failures across two items "
         "is a flaky pair, six across six is a pattern.[/]"

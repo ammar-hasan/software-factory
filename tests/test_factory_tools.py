@@ -368,7 +368,17 @@ def test_tools_with_external_effects_are_marked() -> None:
 
 def test_every_published_handler_is_callable_through_its_schema() -> None:
     """A published schema whose handler does not accept it is a surface that fails on first
-    contact with the agent it was published for."""
+    contact with the agent it was published for.
+
+    This asserted only `isinstance(result, dict)` -- and every refusal is a dict, so the one
+    handler that genuinely rejected its own published schema (`factory.hand_back`, which
+    refuses without a pushed branch) was the case it exercised, and it passed. Two changes:
+    each payload is validated against the published schema first, so a payload this test
+    accepts is one an agent could actually have sent; and the result must be an *acceptance*
+    rather than merely a dict.
+    """
+    import jsonschema
+
     tools = server()
     calls: dict[str, dict[str, object]] = {
         "factory.list_work_items": {},
@@ -379,12 +389,35 @@ def test_every_published_handler_is_callable_through_its_schema() -> None:
         "factory.read_conversation": {"work_item_id": "wi-1"},
         "factory.message_conductor": {"work_item_id": "wi-1", "actor": "a", "text": "t"},
         "factory.list_notification_routes": {},
-        "factory.hand_back": {"work_item_id": "wi-1", "actor": "a", "changed": "c"},
+        "factory.hand_back": {
+            "work_item_id": "wi-1",
+            "actor": "a",
+            "changed": "c",
+            "branch": "factory/wi-1",
+        },
     }
 
     for spec in tools.specs():
         assert spec.name in calls, f"{spec.name} is published and untested"
-        assert isinstance(spec.handler(**calls[spec.name]), dict)
+        payload = calls[spec.name]
+        jsonschema.validate(payload, spec.input_schema)
+        result = spec.handler(**payload)
+        assert isinstance(result, dict)
+        assert "error" not in result, (spec.name, result)
+        assert result.get("accepted", True) is True, (spec.name, result)
+
+
+def test_a_payload_the_handoff_schema_rejects_is_one_the_handler_rejects() -> None:
+    """The two must agree in both directions, or the schema is decoration."""
+    import jsonschema
+
+    tools = server()
+    spec = next(s for s in tools.specs() if s.name == "factory.hand_back")
+    unpushed = {"work_item_id": "wi-1", "actor": "a", "changed": "c"}
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(unpushed, spec.input_schema)
+    assert spec.handler(**unpushed)["accepted"] is False
 
 
 @pytest.mark.parametrize(

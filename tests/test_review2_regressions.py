@@ -8,6 +8,7 @@ keystone gate has not built the gate, it has described one.
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from pathlib import Path
 
@@ -1701,3 +1702,217 @@ def test_i12_overhead_says_which_causes_it_could_actually_see() -> None:
 
     assert report.overhead_fraction == pytest.approx(1 / 3)
     assert set(report.as_dict()["observedCauses"]) == {"primary", "repair"}
+
+
+# ------------------------------------------------------------ N12, N13, N15, N16
+
+
+def drift_scorer():
+    from software_factory.evals.scorers import Label, Scorer
+
+    return Scorer(
+        name="tests-actually-run",
+        labels=(Label(value="pass", score=1.0), Label(value="fail", score=0.0)),
+        passing_score=0.9,
+        outcome_partner="defect-escape-rate",
+    )
+
+
+def proposal_record(**kwargs):
+    from software_factory.improvement.loop import ProposalRecord, ProposalStatus
+
+    base = {
+        "id": "p0",
+        "target": "scorers/tests-actually-run",
+        "scorer": "tests-actually-run",
+        "signature": "sig",
+        "status": ProposalStatus.ADOPTED,
+        "outcome_effect": -0.4,
+    }
+    base.update(kwargs)
+    return ProposalRecord(**base)
+
+
+def test_n12_reverting_a_harmful_change_keeps_its_measurement() -> None:
+    """The natural operational response to a bad adopted change -- revert it -- was also the
+    action that erased the evidence it was bad.
+
+    `settle` rebuilt the record with `outcome_effect=None` by default, and `telemetry`
+    counts only records carrying an effect, so the mean improved by dropping the worst
+    result. FR-14.7a.4 exists so a loop that does not earn its keep switches itself off, and
+    this is the one path that hides the case where it did not.
+    """
+    from software_factory.identity import Capability, Decision
+    from software_factory.improvement.loop import LoopState, ProposalStatus, settle
+
+    state = LoopState(records=[proposal_record()])
+    decision = Decision(
+        principal_id="amaya",
+        capability=Capability.ADOPT_DEFINITION_CHANGE,
+        subject="p0",
+        rationale="it made things worse",
+    )
+
+    reverted = settle(state, "p0", ProposalStatus.REVERTED, decision=decision)
+
+    assert not isinstance(reverted, Refused)
+    assert reverted.outcome_effect == -0.4, "the measurement was wiped by the revert"
+
+
+def test_n13_a_flat_scorer_over_a_collapsing_outcome_is_drift() -> None:
+    """`if scorer_delta <= 0: return None` dropped every case where the scorer's pass rate
+    was flat or falling -- which is the shape of the failure the detector exists for: the
+    measurement stops moving while the thing it measures gets worse."""
+    from software_factory.improvement.loop import detect_drift
+
+    scorer = drift_scorer()
+    assert detect_drift(scorer, scorer_delta=0.0, outcome_delta=-0.4) is not None
+    assert detect_drift(scorer, scorer_delta=-0.001, outcome_delta=-0.9) is not None
+
+
+def test_n13_agreement_between_scorer_and_outcome_is_not_drift() -> None:
+    """The detector must not fire when the two move together."""
+    from software_factory.improvement.loop import detect_drift
+
+    scorer = drift_scorer()
+    assert detect_drift(scorer, scorer_delta=0.05, outcome_delta=0.05) is None
+    # A scorer getting *stricter* shows as a negative gap and must not fire: it may have
+    # been tightened deliberately, which is the opposite of capture.
+    assert detect_drift(scorer, scorer_delta=-0.4, outcome_delta=0.0) is None
+
+
+def test_n15_a_proposal_needing_a_second_reviewer_records_that_it_does() -> None:
+    """`submit` read one field of the verdict and dropped `requires_second_reviewer` and
+    `reason`, so two proposals differing on whether FR-25.3's two-approver rule applies
+    produced identical records."""
+    from software_factory.evals.scorers import ImprovementProposal, ProposalVerdict
+    from software_factory.improvement.loop import LoopState, submit
+
+    proposal = ImprovementProposal(
+        target="scorers/tests-actually-run",
+        kind="scorer",
+        rationale="the scorer passes runs with no test command",
+        regressions_addressed=("run-1",),
+        metric_delta=0.1,
+    )
+
+    needs_two = submit(
+        LoopState(),
+        proposal,
+        ProposalVerdict(accepted=True, reason="touches a scorer", requires_second_reviewer=True),
+        proposal_id="p1",
+        scorer_name="tests-actually-run",
+        signature="sig",
+    )
+    needs_one = submit(
+        LoopState(),
+        proposal,
+        ProposalVerdict(accepted=True, reason="ordinary change", requires_second_reviewer=False),
+        proposal_id="p2",
+        scorer_name="tests-actually-run",
+        signature="sig",
+    )
+
+    assert needs_two.requires_second_reviewer is True
+    assert needs_one.requires_second_reviewer is False
+    assert "touches a scorer" in needs_two.verdict_reason
+
+
+def test_n16_the_published_handoff_schema_matches_what_the_handler_accepts() -> None:
+    """A schema-complete payload was refused every time.
+
+    FR-19.9 publishes the surface so an agent can work without an operator explaining it.
+    The real requirement -- push first -- appeared only in the guidance prose, and guidance
+    is not schema.
+    """
+    from software_factory.factory_tools import FactoryToolServer
+    from software_factory.orchestrator.workitem import SourceContext, WorkItem
+
+    server = FactoryToolServer(
+        factory_name="payments",
+        work_items={
+            "wi-1": WorkItem(
+                id="wi-1",
+                factory="payments",
+                title="t",
+                request="r",
+                source=SourceContext(provider="cli", kind="direct", ref="local"),
+            )
+        },
+    )
+    spec = next(s for s in server.specs() if s.name == "factory.hand_back")
+
+    # The schema must express the requirement, not merely mention it in prose.
+    alternatives = spec.input_schema["anyOf"]
+    assert {frozenset(a["required"]) for a in alternatives} == {
+        frozenset({"branch"}),
+        frozenset({"change_ref"}),
+    }
+
+    # And a payload satisfying the published schema must actually be accepted.
+    import jsonschema
+
+    body = {"work_item_id": "wi-1", "actor": "amaya", "changed": "fixed it", "branch": "f/wi-1"}
+    jsonschema.validate(body, spec.input_schema)
+    assert spec.handler(**body).get("accepted") is True
+
+
+# ------------------------------------------------------------------------ N4
+
+
+def test_n4_the_loops_own_guards_are_consulted_by_sf_improve(tmp_path) -> None:
+    """`may_propose`, `check_effectiveness`, `detect_drift`, `submit`, `settle` and
+    `disable` had no caller outside tests, so every safety property the improvement loop
+    claims -- cooling periods, the open-proposal bound, the anti-thrash rule, the
+    self-switch-off -- was unenforced.
+
+    `sf improve` reported "the patterns worth diagnosing", which is a narrower question
+    than it sounds like when nothing says whether the loop should act on any of them.
+    """
+    from typer.testing import CliRunner
+
+    from software_factory.cli import app
+    from software_factory.improvement.loop import ProposalStatus
+    from software_factory.ledger import EntryType, Ledger
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    for index in range(4):
+        ledger.append(
+            EntryType.GATE_EVALUATED,
+            actor="builder",
+            subject=f"wi-{index}",
+            payload={
+                "gate": "tests-pass",
+                "outcome": "fail",
+                "stage": "BUILD",
+                "detail": "unicode decode error in the csv importer",
+                "run": f"run-{index}",
+                "workItem": f"wi-{index}",
+            },
+        )
+
+    body = json.loads(CliRunner().invoke(app, ["improve", str(ledger.path), "--json"]).output)
+
+    assert body["clusters"], "no cluster to ask about"
+    assert "mayPropose" in body["clusters"][0]
+    assert body["proposalsOnRecord"] == 0
+
+    # And a disabling record on the ledger must actually stop it.
+    ledger.append(
+        EntryType.IMPROVEMENT_PROPOSAL,
+        actor="loop",
+        subject="p-old",
+        payload={
+            "status": ProposalStatus.OPEN.value,
+            "target": f"cluster/{body['clusters'][0]['signature']}",
+            "signature": body["clusters"][0]["signature"],
+            "openedAt": utc_now().isoformat(),
+        },
+    )
+
+    after = json.loads(CliRunner().invoke(app, ["improve", str(ledger.path), "--json"]).output)
+
+    assert after["proposalsOnRecord"] == 1
+    assert after["openProposals"] == 1
+    assert after["clusters"][0]["mayPropose"] is False
+    assert after["clusters"][0]["refusal"]["code"] == "loop.cooling"

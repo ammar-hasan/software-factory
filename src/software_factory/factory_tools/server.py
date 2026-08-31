@@ -438,13 +438,25 @@ class FactoryToolServer:
                     "properties": {
                         "work_item_id": {"type": "string"},
                         "actor": {"type": "string"},
-                        "branch": {"type": "string"},
-                        "change_ref": {"type": "string"},
+                        "branch": {"type": "string", "minLength": 1},
+                        "change_ref": {"type": "string", "minLength": 1},
                         "changed": {"type": "string"},
                         "validated": {"type": "string"},
                         "remaining": {"type": "string"},
+                        "amends": {"type": "boolean"},
+                        "lease_token": {"type": "string"},
                     },
                     "required": ["work_item_id", "actor", "changed"],
+                    # The handler refuses without one of these, and the schema said they
+                    # were ordinary optional strings -- so an agent that satisfied the
+                    # published contract was refused every time. FR-19.9 publishes this
+                    # surface precisely so an agent can work without an operator explaining
+                    # it; the real requirement lived only in the guidance prose, and
+                    # guidance is not schema.
+                    "anyOf": [
+                        {"required": ["branch"]},
+                        {"required": ["change_ref"]},
+                    ],
                 },
                 handler=self.hand_back,
                 external=True,
