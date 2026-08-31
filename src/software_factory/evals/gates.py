@@ -220,6 +220,11 @@ def secret_clean(ctx: GateContext) -> GateResult:
 
 
 def build_green(ctx: GateContext) -> GateResult:
+    """The change compiles. A build that was not run is an error, not a pass.
+
+    The distinction matters more than the check: "we did not build it" reading as green is
+    how a change reaches review having never been compiled.
+    """
     if ctx.build_ok is None:
         return GateResult("build-green", GateOutcome.ERROR, detail="build was not run")
     if not ctx.build_ok:
@@ -382,6 +387,11 @@ def regression_proven(ctx: GateContext) -> GateResult:
 
 
 def spec_agreement(ctx: GateContext) -> GateResult:
+    """No spec unit is contradicted by this change.
+
+    Only a contradiction blocks. Drift is a re-anchor proposal and orphaning is a different
+    problem -- treating all three as failures is how a spec gate gets switched off.
+    """
     contradicted = [a for a in ctx.agreements if a.blocks_build]
     if contradicted:
         return GateResult(
@@ -402,6 +412,12 @@ def spec_agreement(ctx: GateContext) -> GateResult:
 
 
 def delta_present(ctx: GateContext) -> GateResult:
+    """A change to behaviour carries an approved Spec Delta.
+
+    The delta is the only write path into the spec (FR-5.6), so behaviour changing without
+    one is the spec falling behind the code -- which is the rot this whole subsystem exists
+    to prevent.
+    """
     if ctx.behaviour_changed and not ctx.delta_approved:
         return GateResult(
             "delta-present",
@@ -467,6 +483,12 @@ def evidence_complete(ctx: GateContext) -> GateResult:
 
 
 def no_unreviewed_external(ctx: GateContext) -> GateResult:
+    """Every externally visible action was one the run was permitted to take.
+
+    External actions do not un-happen. A comment posted, a tracker moved, or a change opened
+    is visible to people outside the factory before any gate could catch it, so the
+    permission has to be checked rather than the outcome reviewed.
+    """
     unpermitted = [a for a in ctx.external_actions if a not in ctx.permitted_external]
     if unpermitted:
         return GateResult(

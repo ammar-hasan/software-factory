@@ -761,3 +761,33 @@ def test_audit_egress_reports_what_it_cannot_determine(tmp_path: Path) -> None:
 
     assert body["egress"]["offlineCapable"] is False
     assert any(d["certainty"] == "indeterminate" for d in body["egress"]["destinations"])
+
+
+def test_the_generated_reference_matches_the_definitions() -> None:
+    """NFR-4.3, FR-30.4. Documentation written alongside the code drifts, and the drift is
+    invisible: a doc describing a renamed gate reads perfectly and sends every reader to a
+    name that does not exist. Generating it from the definitions makes the drift a test
+    failure instead."""
+    import subprocess
+    import sys
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "generate_reference.py"), "--check"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=root,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_every_gate_explains_what_it_establishes() -> None:
+    """A gate whose reference entry is blank is a gate a reader has to read the source to
+    understand -- and the generator surfacing the blank is how that gets noticed."""
+    from software_factory.evals.gates import BASELINE_GATES
+
+    for name, gate in BASELINE_GATES.items():
+        assert gate.__doc__ and gate.__doc__.strip(), f"{name} has no docstring"

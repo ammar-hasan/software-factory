@@ -122,6 +122,12 @@ jobs:
           done
       - name: sf doctor reports the environment
         run: sf doctor --json
+      - name: The generated reference matches the definitions
+        # NFR-4.3: the reference is produced *from* the definitions the validator uses, not
+        # written alongside them. Documentation written alongside drifts, and the drift is
+        # invisible -- a doc describing a renamed gate reads perfectly and sends every reader
+        # to a name that does not exist. This job is what makes the drift visible.
+        run: python scripts/generate_reference.py --check
 
   offline:
     name: Offline operation
@@ -139,6 +145,33 @@ jobs:
         # guard blocks connection and name resolution rather than replacing socket.socket,
         # which ssl subclasses.
         run: python scripts/run_offline_tests.py
+
+  parity:
+    name: Executor parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: python -m pip install -e ".[dev]"
+      - name: The same definition must behave the same on every executor
+        # FR-20.5 makes divergence a release blocker, and FR-20.8's promotion path -- a
+        # local factory becomes a shared one by changing executor settings only -- is a lie
+        # if the executors disagree. The runner has a working docker daemon, so the
+        # behavioural half actually runs here rather than skipping as it does locally.
+        run: |
+          set -euo pipefail
+          docker info > /dev/null
+          docker pull python:3.12-slim
+          pytest tests/test_parity.py -v -rs
+      - name: Report what the suite could not verify
+        # A green tick that implies more than it means is the failure this whole project
+        # keeps finding. If an executor was skipped, say so in the log.
+        if: always()
+        run: pytest tests/test_parity.py -q -rs 2>&1 | grep -E "SKIPPED|passed" || true
 
   security:
     name: Security
