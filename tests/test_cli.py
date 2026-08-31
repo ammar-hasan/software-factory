@@ -414,3 +414,83 @@ def test_memory_policy_defaults_to_a_dry_run(tmp_path: Path) -> None:
     applied = runner.invoke(app, ["memory", "policy", str(path), "--apply", "--json"])
     assert applied.exit_code == 0
     assert payload(applied.output)["report"]["quarantined"]
+
+
+# --------------------------------------------------------------------------- sf work
+
+
+def test_work_dry_run_plans_stages_without_executing(scaffold: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "work",
+            "Add semicolon delimiter support",
+            "--factory",
+            str(scaffold),
+            "--dry-run",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    body = payload(result.output)
+    assert body["plannedStages"][0] == "TRIAGE"
+    assert "REVIEW" in body["plannedStages"]
+    assert "nothing was executed" in body["note"]
+
+
+def test_work_dry_run_classifies_the_request(scaffold: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "work",
+            "The importer crashes on BOM headers",
+            "--factory",
+            str(scaffold),
+            "--dry-run",
+            "--json",
+        ],
+    )
+
+    assert payload(result.output)["workItem"]["workClass"] == "defect"
+
+
+def test_work_honours_an_explicit_work_class(scaffold: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "work",
+            "Tidy the docstrings",
+            "--factory",
+            str(scaffold),
+            "--class",
+            "chore",
+            "--dry-run",
+            "--json",
+        ],
+    )
+
+    assert payload(result.output)["workItem"]["workClass"] == "chore"
+
+
+def test_work_without_a_provider_refuses_rather_than_pretending(
+    scaffold: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A factory that cannot reach inference must say so, not produce unverified output."""
+    monkeypatch.delenv("SF_PROVIDER_ENDPOINT", raising=False)
+
+    result = runner.invoke(app, ["work", "do something", "--factory", str(scaffold), "--json"])
+
+    assert result.exit_code == 2
+    body = payload(result.output)
+    assert body["ok"] is False
+    assert "--dry-run" in body["error"]["remediation"]
+
+
+def test_work_on_a_missing_factory_is_actionable(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app, ["work", "do something", "--factory", str(tmp_path), "--dry-run", "--json"]
+    )
+
+    assert result.exit_code == 2
+    assert payload(result.output)["error"]["remediation"]

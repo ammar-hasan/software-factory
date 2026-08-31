@@ -30,6 +30,7 @@ from software_factory.definition.validate import lint as run_lint
 from software_factory.definition.validate import validate as run_validate
 from software_factory.errors import FactoryError, Severity, ValidationReport
 from software_factory.ledger import Ledger
+from software_factory.providers.base import Provider
 
 app = typer.Typer(
     name="sf",
@@ -408,6 +409,143 @@ def ledger_tail(
         table.add_row(str(entry.seq), entry.ts, entry.type.value, entry.actor, entry.subject)
     console.print(table)
     raise typer.Exit(EXIT_OK)
+
+
+@app.command()
+def work(
+    request: Annotated[str, typer.Argument(help="What you want done, in your own words.")],
+    root: Annotated[
+        Path, typer.Option("--factory", help="The factory definition directory.")
+    ] = Path(),
+    repo: Annotated[Path, typer.Option("--repo", help="The repository to work in.")] = Path(),
+    title: Annotated[str, typer.Option(help="Short title for the work item.")] = "",
+    work_class: Annotated[
+        str, typer.Option("--class", help="defect | feature | refactor | chore | investigation")
+    ] = "",
+    state: Annotated[Path, typer.Option(help="Where run state and the ledger live.")] = Path(
+        ".factory"
+    ),
+    allow_unsandboxed: Annotated[
+        bool,
+        typer.Option(help="Run without OS sandboxing. Only when no sandbox is available."),
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Plan the stages without running anything.")
+    ] = False,
+    as_json: JsonOpt = False,
+) -> None:
+    """Run one work item end to end, locally.
+
+    Needs a model provider to do real work. Without one configured it plans the stages
+    and stops, rather than pretending -- a factory that cannot reach inference should say
+    so, not produce unverified output (PR-9).
+    """
+    from software_factory.orchestrator import SourceContext, WorkClass, WorkItem, new_id
+    from software_factory.orchestrator.coordinator import Coordinator
+    from software_factory.orchestrator.workitem import classify_request
+
+    try:
+        definition = load_strict(root)
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    resolved_class = WorkClass(work_class) if work_class else classify_request(request)
+    item = WorkItem(
+        id=new_id(),
+        factory=definition.factory.name,
+        title=title or request[:72],
+        request=request,
+        source=SourceContext(provider="cli", kind="direct", ref="local"),
+        work_class=resolved_class,
+    )
+
+    if dry_run:
+        coordinator = Coordinator.__new__(Coordinator)  # planning needs no runtime
+        planned = [
+            stage.value
+            # Planning is a pure function of the work item, so it needs no runtime.
+            for stage in Coordinator._default_path(coordinator, item)
+        ]
+        if as_json:
+            _emit(
+                {
+                    "ok": True,
+                    "workItem": item.as_dict(),
+                    "plannedStages": planned,
+                    "note": "dry run: nothing was executed",
+                }
+            )
+            raise typer.Exit(EXIT_OK)
+        console.print(f"[bold]{item.title}[/] [dim]({resolved_class.value})[/]")
+        console.print(f"  planned stages: {' → '.join(planned)}")
+        console.print("\n[dim]dry run: nothing was executed[/]")
+        raise typer.Exit(EXIT_OK)
+
+    provider = _resolve_provider()
+    if provider is None:
+        message = "no model provider is configured, so this run would produce nothing verifiable"
+        remediation = (
+            "Set SF_PROVIDER_ENDPOINT to a local model endpoint, or use --dry-run to see "
+            "the planned stages."
+        )
+        if as_json:
+            _emit({"ok": False, "error": {"message": message, "remediation": remediation}})
+        else:
+            err_console.print(f"[bold red]cannot run[/] {message}")
+            err_console.print(f"[dim]{remediation}[/]")
+        raise typer.Exit(EXIT_UNUSABLE)
+
+    from software_factory.orchestrator.coordinator import local_coordinator
+
+    coordinator = local_coordinator(
+        definition,
+        repo=repo,
+        state_dir=state,
+        provider=provider,
+        allow_unsandboxed=allow_unsandboxed,
+    )
+    try:
+        outcome = coordinator.run(item)
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    if as_json:
+        _emit({"ok": item.stage.value != "BLOCKED", "outcome": outcome.as_dict()})
+        raise typer.Exit(EXIT_OK if item.stage.value != "BLOCKED" else EXIT_FAILED)
+
+    for stage in outcome.stages:
+        mark = "[green]ok  [/]" if stage.advanced else "[red]stop[/]"
+        console.print(f"  {mark} {stage.stage.value:<8} [dim]{stage.agent}[/]")
+        for finding in stage.gates.findings:
+            console.print(f"       [yellow]·[/] {finding.render()}")
+    if item.blocker:
+        console.print(f"\n[yellow]blocked[/] ({item.blocker.value}): {item.blocker_action}")
+        raise typer.Exit(EXIT_FAILED)
+    console.print(f"\n[green]{item.stage.value}[/] — {len(outcome.changed_paths)} file(s) changed")
+    raise typer.Exit(EXIT_OK)
+
+
+def _resolve_provider() -> Provider | None:
+    """Find a configured provider, or ``None``.
+
+    Deliberately explicit: a factory with no reachable inference must say so rather than
+    silently doing less. There is no default that quietly points somewhere.
+    """
+    import os
+
+    endpoint = os.environ.get("SF_PROVIDER_ENDPOINT")
+    if not endpoint:
+        return None
+    raise FactoryError(
+        f"provider endpoint {endpoint!r} is configured but no HTTP provider is built yet",
+        remediation=(
+            "The HTTP provider lands with the integrations milestone. Until then, use "
+            "--dry-run, or drive the coordinator directly from Python with your own "
+            "Provider implementation."
+        ),
+    )
 
 
 memory_app = typer.Typer(
