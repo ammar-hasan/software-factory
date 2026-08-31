@@ -168,6 +168,12 @@ class SpendReport:
     limit: float
     state: CapState
     by_cause: dict[str, float] = field(default_factory=dict)
+    """Spend per `Cause`, over the causes actually present.
+
+    Read `observed_causes` before drawing a conclusion from `overhead_fraction`: only the
+    causes something emits can appear, and for a long time that was two of seven.
+    """
+
     by_agent: dict[str, float] = field(default_factory=dict)
     by_stage: dict[str, float] = field(default_factory=dict)
     by_work_item: dict[str, float] = field(default_factory=dict)
@@ -177,6 +183,20 @@ class SpendReport:
         return self.spent / self.limit if self.limit else 0.0
 
     @property
+    def observed_causes(self) -> tuple[str, ...]:
+        """Which causes actually appear in this window.
+
+        `overhead_fraction` is a share of a denominator, and the denominator is only as
+        good as the categories something emits. For a long time exactly two of the seven
+        `Cause` values were ever written, by one call site, which attributed a run's
+        *entire* spend to `repair` if it repaired at all -- so the number meant "the share
+        belonging to runs that repaired at least once", over-counting a repaired run's
+        primary work and booking all scoring and benchmarking as primary. Reporting which
+        causes were seen is what lets a reader tell the two readings apart.
+        """
+        return tuple(sorted(self.by_cause))
+
+    @property
     def overhead_fraction(self) -> float:
         """The share not spent on primary work.
 
@@ -184,6 +204,9 @@ class SpendReport:
         actually asks for, and because "overhead" needs one definition: retries, repairs,
         scoring, benchmarking and improvement are all real costs of running a factory, and
         a factory spending most of its money on them is a factory doing something wrong.
+
+        Qualified by `observed_causes`: a share over categories nothing emits is a share of
+        nothing, however confident the number looks.
         """
         if not self.spent:
             return 0.0
@@ -199,6 +222,10 @@ class SpendReport:
             "fraction": round(self.fraction, 4),
             "state": self.state.value,
             "overheadFraction": round(self.overhead_fraction, 4),
+            # Emitted beside the fraction rather than left for a reader to infer: a share
+            # computed over two of seven categories reads exactly like one computed over
+            # all of them, and only this line distinguishes them.
+            "observedCauses": list(self.observed_causes),
             "byCause": {k: round(v, 4) for k, v in sorted(self.by_cause.items())},
             "byAgent": {k: round(v, 4) for k, v in sorted(self.by_agent.items())},
             "byStage": {k: round(v, 4) for k, v in sorted(self.by_stage.items())},
@@ -221,7 +248,10 @@ class Ledgerless:
     def report(self, charges: Iterable[Charge], *, now: datetime | None = None) -> SpendReport:
         now = now or utc_now()
         start = now - self.cap.period
-        window = [c for c in charges if c.at >= start]
+        # Bounded at both ends. With no upper bound a charge dated in the future counted
+        # against today's cap, so a clock skew on one worker -- or a charge someone
+        # backdated forwards -- could halt a factory that had spent nothing.
+        window = [c for c in charges if start <= c.at <= now]
 
         by_cause: dict[str, float] = {}
         by_agent: dict[str, float] = {}

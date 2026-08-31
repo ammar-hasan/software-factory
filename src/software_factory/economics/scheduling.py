@@ -47,6 +47,15 @@ class Priority(enum.IntEnum):
 #: reordering. A gradient is legible -- an item that has waited longer is a bit more urgent.
 AGEING_PER_HOUR = 0.25
 
+MAX_AGEING_BANDS = 1.0
+"""How far ageing may lift an item: one band, never more.
+
+`Priority` bands are one apart, so this keeps an aged item ahead of its equally-declared
+peers and behind anything declared two bands above it. Starvation is a real problem and
+this still solves it; inverting an operator's declared order is a different problem and
+this no longer causes it.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class Queued:
@@ -59,9 +68,23 @@ class Queued:
     queued_at: datetime = field(default_factory=utc_now)
 
     def effective_priority(self, now: datetime | None = None) -> float:
-        """Declared priority, improved by how long this has waited."""
+        """Declared priority, improved by how long this has waited -- by at most one band.
+
+        Unbounded, the gradient crossed bands: `LOW` is 3 and `URGENT` is 0, so a LOW item
+        that had waited thirteen hours outranked an incident filed that minute. Overnight is
+        longer than thirteen hours, so any factory with a routine backlog started each
+        morning with every aged chore above a fresh incident, and a hundred aged items
+        delayed it by a hundred slots.
+
+        The comment defending the gradient says a timeout would show "an inexplicable
+        reordering" to an operator watching the queue. An urgent incident sorted below
+        yesterday's chores is precisely that, so the fix keeps the gradient and caps its
+        reach: an item is lifted within its band and never past the one above, which
+        prevents starvation without inverting the order the operator declared.
+        """
         waited_hours = ((now or utc_now()) - self.queued_at).total_seconds() / 3600
-        return float(self.priority) - waited_hours * AGEING_PER_HOUR
+        aged = float(self.priority) - waited_hours * AGEING_PER_HOUR
+        return max(aged, float(self.priority) - MAX_AGEING_BANDS)
 
 
 def fingerprint_of(*parts: str) -> str:

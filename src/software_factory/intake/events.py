@@ -28,6 +28,7 @@ from datetime import datetime
 from typing import Any
 
 from software_factory.digests import digest_parts
+from software_factory.economics.scheduling import fingerprint_of
 from software_factory.errors import FactoryError
 from software_factory.memory.records import utc_now
 
@@ -107,9 +108,36 @@ class FactoryEvent:
     attributes: dict[str, Any] = field(default_factory=dict)
     fingerprint: str = ""
     """For sources that repeat -- monitoring, error tracking. A recurring alert extends one
-    work item rather than opening a thousand (FR-18.14)."""
+    work item rather than opening a thousand (FR-18.14).
+
+    Derived when an adapter does not supply one, rather than left empty. It was always
+    empty: `fingerprint_of` had no caller outside tests, `Backpressure.admit` gates its
+    dedupe on `if item.fingerprint:`, and so the whole FR-26.3 deduplication branch never
+    once executed. What stood between a signal storm and spend was the rate limiter alone,
+    whose answer to a storm is to trip the breaker and park the source -- the outcome the
+    ordering comment says explicitly must be avoided.
+
+    An adapter that knows better (an alerting provider with its own dedup key) sets it and
+    this leaves it alone.
+    """
 
     received_at: datetime = field(default_factory=utc_now)
+
+    def __post_init__(self) -> None:
+        if not self.fingerprint:
+            # `object.__setattr__` because the class is frozen: this is a derived field, and
+            # deriving it here rather than in every adapter is what makes the dedupe branch
+            # reachable at all.
+            object.__setattr__(self, "fingerprint", self._derived_fingerprint())
+
+    def _derived_fingerprint(self) -> str:
+        """What makes two events the same *problem*, when the provider gives no key.
+
+        The event name, the coarse source, and the title -- not the id, and not the ref: a
+        provider that assigns a new id per delivery would make deduplication by id
+        deduplicate nothing, which is exactly the storm case.
+        """
+        return fingerprint_of(self.event, self.origin.source_key, self.title)
 
     def attribute(self, key: str) -> Any:
         return self.attributes.get(key)

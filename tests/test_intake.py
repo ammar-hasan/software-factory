@@ -357,14 +357,36 @@ def test_an_unavailable_provider_parks_rather_than_dropping() -> None:
 
 def test_backpressure_applies_after_deduplication() -> None:
     """A storm of identical alerts must not consume rate-limit slots, or it parks a source
-    over work that was never real."""
+    over work that was never real.
+
+    This could not observe the ordering it named. Both events carried the default empty
+    fingerprint -- nothing in the source tree ever set one -- so the dedupe branch was
+    never consulted, and what it actually asserted was the rate limiter firing on the
+    second of two events that happened to have different ids. With fingerprints derived,
+    two *identical* alerts now deduplicate, and it takes a genuinely different event to
+    reach the rate limit.
+    """
     pipeline = Pipeline(
         automations=[automation()],
         backpressure=Backpressure(SourceLimits(max_per_window=1, window=timedelta(minutes=10))),
     )
     pipeline.receive(event(id="evt-1"))
 
-    limited = pipeline.receive(event(id="evt-2"))[0]
+    duplicate = pipeline.receive(event(id="evt-2"))[0]
+
+    assert isinstance(duplicate, Refused)
+    assert duplicate.code == "intake.duplicate", "a repeated alert spent a rate-limit slot"
+
+
+def test_a_genuinely_different_event_still_reaches_the_rate_limit() -> None:
+    """Deduplication must not become a way past the limiter."""
+    pipeline = Pipeline(
+        automations=[automation()],
+        backpressure=Backpressure(SourceLimits(max_per_window=1, window=timedelta(minutes=10))),
+    )
+    pipeline.receive(event(id="evt-1"))
+
+    limited = pipeline.receive(event(id="evt-2", title="a completely different problem"))[0]
 
     assert isinstance(limited, Refused)
     assert limited.code == "intake.rate_limited"

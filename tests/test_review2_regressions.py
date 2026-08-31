@@ -1538,3 +1538,166 @@ def test_n11_the_holder_can_renew_with_its_own_token(tmp_path) -> None:
 
     assert isinstance(renewed, Lease)
     assert renewed.token == first.token
+
+
+# ------------------------------------------------------------------ I10, I11, I12
+
+
+def test_i10_an_event_carries_a_fingerprint_so_dedupe_can_fire() -> None:
+    """`Backpressure.admit` gates dedupe on `if item.fingerprint:` and nothing in `src/`
+    ever set one, so the branch never executed.
+
+    The module docstring names the failure it defends against: "a failing deploy emits
+    thousands of alerts; each one looks like a legitimate work item". Without the
+    fingerprint the only thing between a signal storm and spend is the rate limiter, whose
+    response to a storm is to trip the breaker and park the source -- the outcome the
+    ordering comment says explicitly must be avoided.
+    """
+    from software_factory.intake import FactoryEvent, Origin, Provider
+
+    first = FactoryEvent(
+        id="e1",
+        provider=Provider.SIGNAL,
+        event="alert.firing",
+        origin=Origin(provider=Provider.SIGNAL, ref="alerts#1", source="payments"),
+        title="deploy failed",
+        attributes={"service": "payments"},
+    )
+    second = FactoryEvent(
+        id="e2",
+        provider=Provider.SIGNAL,
+        event="alert.firing",
+        origin=Origin(provider=Provider.SIGNAL, ref="alerts#2", source="payments"),
+        title="deploy failed",
+        attributes={"service": "payments"},
+    )
+
+    assert first.fingerprint
+    assert first.fingerprint == second.fingerprint
+
+
+def test_i10_a_storm_of_identical_alerts_dedupes_rather_than_parking_the_source() -> None:
+    """The whole point: a duplicate is not evidence of load."""
+    from software_factory.intake import Provider, Refused
+    from software_factory.intake.pipeline import Automation, Pipeline
+
+    pipeline = Pipeline(
+        automations=[
+            Automation(
+                name="incident",
+                agent="conductor",
+                prompt="look at it",
+                provider=Provider.SIGNAL,
+                event="alert.firing",
+                require_known_author=False,
+            )
+        ]
+    )
+    from software_factory.intake import FactoryEvent, Origin
+
+    outcomes = []
+    for n in range(50):
+        event = FactoryEvent(
+            id=f"alert-{n}",
+            provider=Provider.SIGNAL,
+            event="alert.firing",
+            origin=Origin(provider=Provider.SIGNAL, ref=f"alerts#{n}", source="payments"),
+            title="deploy failed",
+            attributes={"service": "payments"},
+        )
+        outcomes.append(pipeline.receive(event)[0])
+
+    codes = {o.code for o in outcomes if isinstance(o, Refused)}
+    assert "intake.duplicate" in codes
+    assert "intake.breaker_tripped" not in codes, "a storm of duplicates parked the source"
+
+
+def test_i11_an_aged_routine_item_does_not_outrank_a_fresh_incident() -> None:
+    """Ageing was unbounded, so a 13-hour-old LOW item beat a brand-new URGENT one.
+
+    Overnight is longer than thirteen hours, so any factory with a routine backlog started
+    each morning with every aged chore ranked above an incident filed that minute -- and a
+    hundred aged items delayed it by a hundred slots. The comment defends the gradient as
+    avoiding "an inexplicable reordering"; an incident sorted below yesterday's chores is
+    exactly that.
+    """
+    from datetime import timedelta
+
+    from software_factory.economics import Priority, Queued, Scheduler
+    from software_factory.memory.records import utc_now
+
+    now = utc_now()
+    scheduler = Scheduler()
+    for index in range(5):
+        scheduler.enqueue(
+            Queued(
+                id=f"routine-{index}",
+                source="tracker",
+                priority=Priority.LOW,
+                queued_at=now - timedelta(hours=48),
+            )
+        )
+    scheduler.enqueue(
+        Queued(id="INCIDENT", source="tracker", priority=Priority.URGENT, queued_at=now)
+    )
+
+    assert scheduler.drain(6, now=now)[0].id == "INCIDENT"
+
+
+def test_i11_ageing_still_lifts_a_starved_item_within_its_band() -> None:
+    """The gradient must survive: starvation is the problem it was added for."""
+    from datetime import timedelta
+
+    from software_factory.economics import Priority, Queued
+    from software_factory.memory.records import utc_now
+
+    now = utc_now()
+    aged = Queued(id="a", source="t", priority=Priority.LOW, queued_at=now - timedelta(hours=48))
+    fresh = Queued(id="b", source="t", priority=Priority.LOW, queued_at=now)
+
+    assert aged.effective_priority(now) < fresh.effective_priority(now)
+
+
+def test_i12_a_charge_dated_in_the_future_is_not_current_spend() -> None:
+    """The window had no upper bound, so a future-dated charge counted against today."""
+    from datetime import timedelta
+
+    from software_factory.economics import Cause, Charge, Ledgerless, SpendCap
+    from software_factory.memory.records import utc_now
+
+    now = utc_now()
+    report = Ledgerless(SpendCap(scope="f", limit_units=100, period=timedelta(days=1))).report(
+        [
+            Charge(
+                units=90,
+                work_item_id="wi",
+                agent="a",
+                stage="s",
+                cause=Cause.PRIMARY,
+                at=now + timedelta(days=30),
+            )
+        ],
+        now=now,
+    )
+
+    assert report.spent == 0.0
+
+
+def test_i12_overhead_says_which_causes_it_could_actually_see() -> None:
+    """Two of the seven `Cause` values are ever emitted, so `overheadFraction` did not mean
+    "the share not spent on primary work" -- it meant "the share belonging to runs that
+    repaired at least once", which over-counts a repaired run's primary work and
+    under-counts all scoring and benchmarking as primary."""
+    from datetime import timedelta
+
+    from software_factory.economics import Cause, Charge, Ledgerless, SpendCap
+
+    report = Ledgerless(SpendCap(scope="f", limit_units=100, period=timedelta(days=1))).report(
+        [
+            Charge(units=10, work_item_id="wi", agent="a", stage="s", cause=Cause.PRIMARY),
+            Charge(units=5, work_item_id="wi", agent="a", stage="s", cause=Cause.REPAIR),
+        ]
+    )
+
+    assert report.overhead_fraction == pytest.approx(1 / 3)
+    assert set(report.as_dict()["observedCauses"]) == {"primary", "repair"}
