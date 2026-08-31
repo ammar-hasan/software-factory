@@ -83,11 +83,22 @@ def starting_tier(ladder: Ladder, *, required: frozenset[str] = frozenset()) -> 
 
     Starting high is an explicit, justified choice recorded in the definition; the
     default is to start low and make the run earn its way up.
+
+    `defaultTier` is where that choice is recorded, so the search starts there rather than
+    at the bottom. It used to be a fallback after the loop -- and `required` defaults to the
+    empty set, which is a subset of everything, so the loop always returned on its first
+    iteration and the fallback was unreachable. A factory that configured `defaultTier: mid`
+    silently started every run on the cheapest rung, which is the opposite of what it asked
+    for and invisible from the outside.
     """
-    for tier in ladder.tiers:
+    start = ladder.index_of(ladder.default_tier) if ladder.default_tier else 0
+    for tier in ladder.tiers[start:]:
         if required <= set(tier.capabilities):
             return tier.name
-    return ladder.default_tier or ladder.tiers[0].name
+    # Nothing at or above the default covers the requirement. The top rung is the closest
+    # the ladder can come; the caller sees a run that will escalate or fail on capability
+    # rather than one silently started somewhere it cannot succeed.
+    return ladder.tiers[-1].name
 
 
 def may_escalate(

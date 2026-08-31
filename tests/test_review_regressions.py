@@ -1881,3 +1881,349 @@ def test_m10_reformatting_still_produces_no_drift(left: str, right: str) -> None
     from software_factory.spec.units import digest_text
 
     assert digest_text(left) == digest_text(right)
+
+
+# --------------------------------------------------------------------------------- M11
+# `defaultTier` was unreachable, so a factory that asked to start high started cheapest.
+
+
+def _tiered_ladder() -> object:
+    from software_factory.harness.routing import Ladder
+
+    return Ladder.model_validate(
+        {
+            "tiers": [
+                {
+                    "name": "cheap",
+                    "provider": "local",
+                    "model": "small",
+                    "contextWindow": 32000,
+                    "workingSetCeiling": 20000,
+                    "local": True,
+                },
+                {
+                    "name": "mid",
+                    "provider": "local",
+                    "model": "mid",
+                    "contextWindow": 128000,
+                    "workingSetCeiling": 90000,
+                },
+                {
+                    "name": "top",
+                    "provider": "remote",
+                    "model": "large",
+                    "contextWindow": 200000,
+                    "workingSetCeiling": 150000,
+                },
+            ],
+            "defaultTier": "mid",
+            "ceilingTier": "top",
+            "maxEscalations": 2,
+        }
+    )
+
+
+def test_m11_a_configured_default_tier_is_where_a_run_starts() -> None:
+    """`required` defaults to the empty set, which is a subset of everything, so the loop
+    returned tiers[0] on its first iteration and the `default_tier` fallback after it was
+    unreachable. A factory writing `defaultTier: mid` -- the documented way to record that
+    starting high is a justified choice -- silently started every run on the cheapest rung.
+    """
+    from software_factory.harness.routing import starting_tier
+
+    assert starting_tier(_tiered_ladder()) == "mid"
+
+
+def test_m11_the_search_still_climbs_for_a_capability_the_default_lacks() -> None:
+    """The default is a floor, not a pin."""
+    from software_factory.harness.routing import Ladder, starting_tier
+
+    ladder = Ladder.model_validate(
+        {
+            "tiers": [
+                {
+                    "name": "cheap",
+                    "provider": "local",
+                    "model": "small",
+                    "contextWindow": 32000,
+                    "workingSetCeiling": 20000,
+                    "local": True,
+                    "capabilities": ["vision"],
+                },
+                {
+                    "name": "mid",
+                    "provider": "local",
+                    "model": "mid",
+                    "contextWindow": 128000,
+                    "workingSetCeiling": 90000,
+                },
+                {
+                    "name": "top",
+                    "provider": "remote",
+                    "model": "large",
+                    "contextWindow": 200000,
+                    "workingSetCeiling": 150000,
+                    "capabilities": ["vision"],
+                },
+            ],
+            "defaultTier": "mid",
+        }
+    )
+
+    # `cheap` also has vision, but it is below the declared default and must not be chosen.
+    assert starting_tier(ladder, required=frozenset({"vision"})) == "top"
+
+
+# --------------------------------------------------------------------------------- M13
+# "Wall clock" measured only how long the provider took to answer.
+
+
+def test_m13_time_spent_in_tools_counts_against_the_wall_clock() -> None:
+    """`Spend.elapsed_s` accumulated `usage.latency_s` and nothing else, so the bound
+    documented as a hard run limit ignored where runs actually spend time -- the executor
+    running test suites and builds. A run whose tools took four hours never tripped a
+    thirty-minute bound.
+    """
+    from software_factory.harness import BlastRadius, Grants, RoutingState
+    from software_factory.harness.loop import Budget, RunStatus, TurnLoop
+    from software_factory.harness.tools import Example, Tool, ToolRegistry, ToolSuccess
+    from software_factory.providers import StubProvider, calls
+
+    def slow(_args: dict[str, object]) -> ToolSuccess:
+        time.sleep(0.05)
+        return ToolSuccess(value="done")
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="proc.run",
+            description="Run a command.",
+            effect=Effect.EXEC,
+            input_schema={"type": "object", "properties": {}},
+            output_schema={"type": "string"},
+            handler=slow,
+            examples=(Example(inputs={}, output="done"),),
+        )
+    )
+    provider = StubProvider([calls("proc.run", {}, call_id=f"c{i}") for i in range(40)])
+    turn_loop = TurnLoop(
+        provider=provider,
+        registry=registry,
+        grants=Grants(tools=frozenset({"proc.run"}), effects=frozenset({Effect.EXEC})),
+        pack=_minimal_pack(),
+        contract=BlastRadius(writable_paths=("workspace/",)),
+        # The provider reports zero latency, so under the old accounting elapsed_s stayed
+        # at 0.0 for the whole run and this bound could never bind.
+        budget=Budget(wall_clock_s=0.15, tool_calls=10_000, turns=1000),
+        routing=RoutingState(ladder=_minimal_ladder(), current="local-small"),
+        role_prompt="You make the change and prove it.",
+        task="Run the suite.",
+    )
+
+    result = turn_loop.run()
+
+    assert result.status is RunStatus.BUDGET_EXCEEDED
+    assert "wall clock" in (result.reason or "")
+    assert result.spend.elapsed_s >= 0.15
+    assert result.spend.provider_latency_s == 0.0
+
+
+# --------------------------------------------------------------------------------- M14
+# The budget was checked once per turn, so one completion could overrun it wholesale.
+
+
+def test_m14_the_tool_budget_binds_inside_a_single_batch() -> None:
+    """`_dispatch` iterated `completion.tool_calls` to exhaustion, incrementing the counter
+    and never re-reading the bound. One completion asking for 500 calls executed all 500 --
+    including 500 EXEC-effect commands -- against a bound of 200. The bound exists to cap
+    side effects, not only cost.
+    """
+    from software_factory.harness import BlastRadius, Grants, RoutingState
+    from software_factory.harness.loop import Budget, TurnLoop
+    from software_factory.harness.tools import Example, Tool, ToolRegistry, ToolSuccess
+    from software_factory.providers import Completion, StopReason, StubProvider, ToolCall, Usage
+
+    executed: list[str] = []
+
+    def record(args: dict[str, object]) -> ToolSuccess:
+        executed.append(str(args.get("id")))
+        return ToolSuccess(value="ok")
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="proc.run",
+            description="Run a command.",
+            effect=Effect.EXEC,
+            input_schema={"type": "object", "properties": {"id": {"type": "string"}}},
+            output_schema={"type": "string"},
+            handler=record,
+            examples=(Example(inputs={"id": "a"}, output="ok"),),
+        )
+    )
+    # One completion, fifty tool calls, against a bound of five.
+    batch = Completion(
+        text="working",
+        tool_calls=tuple(
+            ToolCall(id=f"c{i}", name="proc.run", arguments={"id": str(i)}) for i in range(50)
+        ),
+        stop_reason=StopReason.TOOL_CALL,
+        usage=Usage(input_tokens=10, output_tokens=10),
+    )
+    turn_loop = TurnLoop(
+        provider=StubProvider([batch]),
+        registry=registry,
+        grants=Grants(tools=frozenset({"proc.run"}), effects=frozenset({Effect.EXEC})),
+        pack=_minimal_pack(),
+        contract=BlastRadius(writable_paths=("workspace/",)),
+        budget=Budget(tool_calls=5, turns=100),
+        routing=RoutingState(ladder=_minimal_ladder(), current="local-small"),
+        role_prompt="You make the change and prove it.",
+        task="Run the suite.",
+    )
+
+    turn_loop.run()
+
+    assert len(executed) <= 5, f"{len(executed)} EXEC calls ran against a bound of 5"
+
+
+# --------------------------------------------------------------------------------- M15
+# "Schema-validated output" only checked that required keys were present.
+
+
+def test_m15_a_wrongly_typed_field_does_not_validate() -> None:
+    """`properties`, `type`, `enum`, nested objects and array items were all ignored, so
+    an output whose fields were the wrong type validated and completed -- and
+    `_extract_calibration` then called `.get` on a string, raising AttributeError out of
+    `run()` on the path the docstring calls validated. jsonschema is already a dependency.
+    """
+    from software_factory.harness.loop import _parse_output
+
+    schema = {
+        "type": "object",
+        "required": ["summary", "calibration"],
+        "properties": {
+            "summary": {"type": "string"},
+            "calibration": {"type": "object"},
+        },
+    }
+
+    parsed, error = _parse_output('{"summary": 42, "calibration": "nope"}', schema)
+
+    assert parsed is None
+    assert error is not None
+    assert "summary" in error
+
+
+def test_m15_a_wrongly_typed_field_no_longer_crashes_the_run() -> None:
+    """The consequence, end to end: the run must fail as a run, never as a traceback."""
+    from software_factory.harness import BlastRadius, Grants, RoutingState
+    from software_factory.harness.loop import Budget, RunStatus, TurnLoop
+    from software_factory.harness.tools import ToolRegistry
+    from software_factory.providers import StubProvider, says
+
+    schema = {
+        "type": "object",
+        "required": ["summary", "calibration"],
+        "properties": {"summary": {"type": "string"}, "calibration": {"type": "object"}},
+    }
+    turn_loop = TurnLoop(
+        provider=StubProvider([says('{"summary": 42, "calibration": "nope"}')] * 8),
+        registry=ToolRegistry(),
+        grants=Grants(tools=frozenset(), effects=frozenset()),
+        pack=_minimal_pack(),
+        contract=BlastRadius(writable_paths=("workspace/",)),
+        budget=Budget(turns=8),
+        routing=RoutingState(ladder=_minimal_ladder(), current="local-small"),
+        role_prompt="You make the change and prove it.",
+        task="Summarise.",
+        output_schema=schema,
+        repair_budget=2,
+    )
+
+    result = turn_loop.run()
+
+    assert result.status is not RunStatus.COMPLETED
+    assert result.repair_attempts > 0
+
+
+def test_m15_a_valid_output_still_validates() -> None:
+    from software_factory.harness.loop import _parse_output
+
+    schema = {
+        "type": "object",
+        "required": ["summary"],
+        "properties": {"summary": {"type": "string"}},
+    }
+
+    parsed, error = _parse_output('```json\n{"summary": "done"}\n```', schema)
+
+    assert error is None
+    assert parsed == {"summary": "done"}
+
+
+# --------------------------------------------------------------------------------- M19
+# `unused_effects` returned every granted effect, having never read the granted tools.
+
+
+def test_m19_an_effect_no_granted_tool_needs_is_reported_unused() -> None:
+    """The body returned `execution.effects` unchanged. Reporting every effect as unused is
+    the same as reporting none, so the least-privilege audit produced noise both ways."""
+    from software_factory.definition.models import ExecutionDefaults
+    from software_factory.definition.validate import unused_effects
+    from software_factory.runtime.tools import BUILTIN_TOOL_EFFECTS
+
+    execution = ExecutionDefaults.model_validate(
+        {"tools": ["repo.read"], "effects": ["read", "exec"]}
+    )
+
+    assert unused_effects(execution, BUILTIN_TOOL_EFFECTS) == (Effect.EXEC,)
+
+
+def test_m19_an_effect_a_granted_tool_needs_is_not_reported_unused() -> None:
+    from software_factory.definition.models import ExecutionDefaults
+    from software_factory.definition.validate import unused_effects
+    from software_factory.runtime.tools import BUILTIN_TOOL_EFFECTS
+
+    execution = ExecutionDefaults.model_validate(
+        {"tools": ["repo.read", "proc.run"], "effects": ["read", "exec"]}
+    )
+
+    assert unused_effects(execution, BUILTIN_TOOL_EFFECTS) == ()
+
+
+def test_m19_an_unrecognised_tool_makes_the_audit_silent_not_confident() -> None:
+    """A tool whose effect is unknowable here could need any of them. Claiming an effect
+    unused on that basis would be a guess, and a security audit that guesses is worse than
+    one that says nothing."""
+    from software_factory.definition.models import ExecutionDefaults
+    from software_factory.definition.validate import unused_effects
+    from software_factory.runtime.tools import BUILTIN_TOOL_EFFECTS
+
+    execution = ExecutionDefaults.model_validate(
+        {"tools": ["custom.deploy"], "effects": ["read", "exec"]}
+    )
+
+    assert unused_effects(execution, BUILTIN_TOOL_EFFECTS) == ()
+
+
+def test_m19_the_effect_table_matches_the_registry_it_describes(tmp_path: Path) -> None:
+    """A static audit answered from a hand-maintained list would drift from the registry.
+    The table is the registry's own source, so this asserts they cannot disagree."""
+    from software_factory.runtime.executor import LocalExecutor, SandboxLevel, SandboxPolicy
+    from software_factory.runtime.tools import BUILTIN_TOOL_EFFECTS, build_registry
+    from software_factory.runtime.workspace import Workspace
+
+    workspace = Workspace(root=tmp_path, run_id="run-1", base_commit="deadbeef")
+    registry = build_registry(
+        workspace,
+        LocalExecutor(SandboxPolicy(workspace=tmp_path), level=SandboxLevel.PROCESS),
+    )
+
+    registered = {
+        name: tool.effect
+        for name in BUILTIN_TOOL_EFFECTS
+        if (tool := registry.get(name)) is not None
+    }
+
+    assert registered == BUILTIN_TOOL_EFFECTS

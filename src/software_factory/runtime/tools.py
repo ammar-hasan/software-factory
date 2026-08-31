@@ -41,6 +41,21 @@ MAX_READ_BYTES = 200_000
 #: Files a search should never surface: they are large, generated, or not source.
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".factory"}
 
+#: The effect class each built-in tool needs, declared once. `build_registry` reads it, so a
+#: static audit and the running registry cannot disagree -- a least-privilege report answered
+#: from a separately maintained list is exactly the kind of claim this codebase exists to
+#: avoid making.
+BUILTIN_TOOL_EFFECTS: dict[str, Effect] = {
+    "repo.read": Effect.READ,
+    "repo.search": Effect.READ,
+    "repo.tree": Effect.READ,
+    "file.write": Effect.WRITE,
+    "test.run": Effect.EXEC,
+    "proc.run": Effect.EXEC,
+    "checkpoint.create": Effect.WRITE,
+    "checkpoint.restore": Effect.WRITE,
+}
+
 
 def _relative(workspace: Workspace, path: Path) -> str:
     return str(path.relative_to(workspace.root))
@@ -122,7 +137,7 @@ def build_registry(
         Tool(
             name="repo.read",
             description="Read a file, optionally a line range. Returns content with line bounds.",
-            effect=Effect.READ,
+            effect=BUILTIN_TOOL_EFFECTS["repo.read"],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -174,7 +189,7 @@ def build_registry(
         Tool(
             name="repo.search",
             description="Search the repository by regular expression. Returns located hits.",
-            effect=Effect.READ,
+            effect=BUILTIN_TOOL_EFFECTS["repo.search"],
             input_schema={
                 "type": "object",
                 "properties": {"pattern": {"type": "string"}, "glob": {"type": "string"}},
@@ -203,7 +218,7 @@ def build_registry(
         Tool(
             name="repo.tree",
             description="List the repository's files, optionally under a prefix.",
-            effect=Effect.READ,
+            effect=BUILTIN_TOOL_EFFECTS["repo.tree"],
             input_schema={
                 "type": "object",
                 "properties": {"prefix": {"type": "string"}},
@@ -238,7 +253,7 @@ def build_registry(
         Tool(
             name="file.write",
             description="Write a file in the workspace, creating parent directories.",
-            effect=Effect.WRITE,
+            effect=BUILTIN_TOOL_EFFECTS["file.write"],
             input_schema={
                 "type": "object",
                 "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
@@ -276,7 +291,7 @@ def build_registry(
                 "Run the repository's tests, optionally filtered. Returns per-test outcomes "
                 "and failure classes, not a summary."
             ),
-            effect=Effect.EXEC,
+            effect=BUILTIN_TOOL_EFFECTS["test.run"],
             input_schema={
                 "type": "object",
                 "properties": {"selector": {"type": "string"}},
@@ -320,7 +335,7 @@ def build_registry(
         Tool(
             name="proc.run",
             description="Run a command in the workspace under the run's policy.",
-            effect=Effect.EXEC,
+            effect=BUILTIN_TOOL_EFFECTS["proc.run"],
             input_schema={
                 "type": "object",
                 "properties": {"command": {"type": "array", "items": {"type": "string"}}},
@@ -353,7 +368,7 @@ def build_registry(
                 "Record the workspace exactly as it is, so you can return to it. Free, and "
                 "using it is a normal move."
             ),
-            effect=Effect.WRITE,
+            effect=BUILTIN_TOOL_EFFECTS["checkpoint.create"],
             input_schema={
                 "type": "object",
                 "properties": {"label": {"type": "string"}},
@@ -387,7 +402,7 @@ def build_registry(
                 "Return the workspace exactly to a checkpoint. Costs nothing and counts "
                 "against no quality measure."
             ),
-            effect=Effect.WRITE,
+            effect=BUILTIN_TOOL_EFFECTS["checkpoint.restore"],
             input_schema={
                 "type": "object",
                 "properties": {"id": {"type": "string"}},

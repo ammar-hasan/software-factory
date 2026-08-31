@@ -12,8 +12,11 @@ from __future__ import annotations
 import enum
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
+
+import jsonschema
 
 from software_factory.harness.awareness import AwarenessPack, estimate_tokens
 from software_factory.harness.routing import RoutingState, Trigger, may_escalate
@@ -113,6 +116,17 @@ class Budget:
 @dataclass(slots=True)
 class Spend:
     elapsed_s: float = 0.0
+    """Wall clock since the run began, in seconds.
+
+    Set from a monotonic clock, not accumulated from provider latency. Summing latency made
+    the "wall clock" bound measure only time spent waiting on the model -- and a run spends
+    most of its time in tools, because that is where the test suites and builds run. A run
+    whose commands took four hours never tripped the thirty-minute bound.
+    """
+
+    provider_latency_s: float = 0.0
+    """Time spent inside provider calls. Reported, never used as the wall-clock bound."""
+
     tool_calls: int = 0
     tokens: int = 0
     cost_units: float = 0.0
@@ -121,7 +135,7 @@ class Spend:
     def add_usage(self, usage: Usage, *, per_mtok_in: float, per_mtok_out: float) -> None:
         self.tokens += usage.input_tokens + usage.output_tokens
         self.cost_units += usage.cost(per_mtok_in=per_mtok_in, per_mtok_out=per_mtok_out)
-        self.elapsed_s += usage.latency_s
+        self.provider_latency_s += usage.latency_s
 
 
 @dataclass(slots=True)
@@ -193,6 +207,7 @@ class TurnLoop:
         messages = self._compose()
         result = RunResult(status=RunStatus.COMPLETED, transcript=messages)
         warned = False
+        started = time.monotonic()
         # Registries are shared between runs and their violation list is cumulative, so
         # this run only ever considers violations recorded after it started.
         self._violation_mark = self.registry.violation_mark()
@@ -201,6 +216,7 @@ class TurnLoop:
         # it, so the turn bound is enforced by the same check as the other four rather than
         # by a separate `range` whose exhaustion had to be reported as something else.
         while True:
+            result.spend.elapsed_s = time.monotonic() - started
             breach = self.budget.exceeded(result.spend)
             if breach:
                 return self._end(result, RunStatus.BUDGET_EXCEEDED, breach)
@@ -241,6 +257,7 @@ class TurnLoop:
             # on a call that produced final output is recorded and the result kept --
             # discarding a finished answer to honour a bound it already crossed helps
             # nobody. An overrun on a call that wants to continue stops the run.
+            result.spend.elapsed_s = time.monotonic() - started
             breach = self.budget.exceeded(result.spend)
             if breach and completion.wants_tools:
                 return self._end(result, RunStatus.BUDGET_EXCEEDED, breach)
@@ -254,7 +271,7 @@ class TurnLoop:
 
             if completion.wants_tools:
                 messages.append(Message(role=Role.ASSISTANT, content=completion.text))
-                if self._dispatch(completion, messages, result) is False:
+                if self._dispatch(completion, messages, result, started=started) is False:
                     return self._end(
                         result,
                         RunStatus.CONTRACT_VIOLATION,
@@ -301,9 +318,35 @@ class TurnLoop:
 
     # ---------------------------------------------------------------------- dispatch
 
-    def _dispatch(self, completion: Completion, messages: list[Message], result: RunResult) -> bool:
+    def _dispatch(
+        self,
+        completion: Completion,
+        messages: list[Message],
+        result: RunResult,
+        *,
+        started: float,
+    ) -> bool:
         """Run the requested tools. Returns False on an escalating violation."""
         for call in completion.tool_calls:
+            # Per call, not per turn. One completion can ask for five hundred tools, and
+            # the loop only re-checked between turns -- so a bound of two hundred permitted
+            # a 2.5x overrun of `EXEC`-effect commands before anything noticed. This bound
+            # exists to cap side effects, not only cost, so it has to hold inside the batch.
+            result.spend.elapsed_s = time.monotonic() - started
+            breach = self.budget.exceeded(result.spend)
+            if breach:
+                result.budget_overrun = breach
+                messages.append(
+                    Message(
+                        role=Role.USER,
+                        content=(
+                            f"<harness>Budget reached ({breach}). The remaining tool calls "
+                            "in this batch were not run.</harness>"
+                        ),
+                    )
+                )
+                break
+
             outcome = self.registry.call(call.name, call.arguments, grants=self.grants)
             result.spend.tool_calls += 1
             result.tool_calls.append((call.name, isinstance(outcome, ToolSuccess)))
@@ -427,9 +470,20 @@ def _parse_output(text: str, schema: dict[str, Any]) -> tuple[dict[str, Any] | N
     if not isinstance(parsed, dict):
         return None, f"expected a JSON object, got {type(parsed).__name__}"
 
-    missing = [key for key in schema.get("required", []) if key not in parsed]
-    if missing:
-        return None, f"missing required field(s): {', '.join(missing)}"
+    # The real validator, not a required-key check. `properties`, `type`, `enum`, nested
+    # objects and array items were all ignored, so `{"summary": 42, "calibration": "nope"}`
+    # validated against a schema demanding strings -- and `_extract_calibration` then called
+    # `.get` on the string and raised AttributeError straight out of `run()`, on the path
+    # the docstring calls validated. jsonschema is already a hard dependency.
+    try:
+        jsonschema.validate(parsed, schema)
+    except jsonschema.ValidationError as exc:
+        where = "/".join(str(part) for part in exc.absolute_path) or "<root>"
+        return None, f"{where}: {exc.message}"
+    except jsonschema.SchemaError as exc:
+        # The schema itself is wrong. That is the factory's bug, not the model's, and no
+        # amount of repair will fix it -- say so rather than sending the agent in circles.
+        return None, f"the output schema is invalid and cannot validate anything: {exc.message}"
 
     return parsed, None
 

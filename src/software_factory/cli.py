@@ -27,10 +27,12 @@ from software_factory.definition.loader import Definition
 from software_factory.definition.resolve import explain_execution
 from software_factory.definition.schema import export_schema, schema_kinds
 from software_factory.definition.validate import lint as run_lint
+from software_factory.definition.validate import unused_effects
 from software_factory.definition.validate import validate as run_validate
 from software_factory.errors import FactoryError, Severity, ValidationReport
 from software_factory.ledger import Ledger
 from software_factory.providers.base import Provider
+from software_factory.runtime.tools import BUILTIN_TOOL_EFFECTS
 
 app = typer.Typer(
     name="sf",
@@ -291,6 +293,9 @@ def audit(root: RootArg = Path(), as_json: JsonOpt = False) -> None:
                 f"{agent.name}: runner {runner.name!r} runs {len(runner.definition.setup_commands)} "
                 "setup command(s); their egress cannot be determined statically"
             )
+        # Least privilege is only auditable if over-grant is visible. An effect granted
+        # that no granted tool can use is a widened blast radius nobody asked for.
+        surplus = unused_effects(resolved, BUILTIN_TOOL_EFFECTS)
         rows.append(
             {
                 "agent": agent.name,
@@ -299,6 +304,7 @@ def audit(root: RootArg = Path(), as_json: JsonOpt = False) -> None:
                 "mcpServers": sorted(resolved.mcp_servers or {}),
                 "tools": list(resolved.tools or ()),
                 "effects": [e.value for e in (resolved.effects or ())],
+                "unusedEffects": [e.value for e in surplus],
                 "runner": resolved.runner,
                 "network": network,
                 "networkAllowlist": allowlist,

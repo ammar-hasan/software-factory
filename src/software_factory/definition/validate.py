@@ -12,7 +12,7 @@ skill is undated is a factory nobody adopts.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from software_factory.definition.loader import Definition, LoadedScorer, LoadedSkill
@@ -620,6 +620,33 @@ def _lint_policy_claims(definition: Definition, report: ValidationReport) -> Non
             )
 
 
-def unused_effects(execution: ExecutionDefaults) -> tuple[Effect, ...]:
-    """Effect classes granted but not needed by any granted tool. Used by `sf audit`."""
-    return tuple(execution.effects or ())
+def unused_effects(
+    execution: ExecutionDefaults, tool_effects: Mapping[str, Effect] | None = None
+) -> tuple[Effect, ...]:
+    """Effect classes granted but not needed by any granted tool (`sf audit`).
+
+    It used to return `execution.effects` unchanged, having never looked at
+    `execution.tools`. Reporting every effect as unused is the same as reporting none: the
+    least-privilege audit this exists for produced noise in both directions, and the
+    docstring made a claim the body could not support.
+
+    `tool_effects` maps tool name to the effect it needs; without one there is nothing to
+    compare against and the answer is honestly empty rather than confidently wrong. A tool
+    the map does not know is not evidence that its effect is unused, so it is skipped and
+    the effects it might need stay unreported.
+    """
+    granted = tuple(dict.fromkeys(execution.effects or ()))
+    if not granted:
+        return ()
+    if tool_effects is None:
+        return ()
+
+    names = tuple(execution.tools or ())
+    unknown = [name for name in names if name not in tool_effects]
+    if unknown:
+        # Some granted tool's effect is unknowable here, so any effect could be the one it
+        # needs. Claiming an effect is unused on that basis would be a guess.
+        return ()
+
+    needed = {tool_effects[name] for name in names}
+    return tuple(effect for effect in granted if effect not in needed)
