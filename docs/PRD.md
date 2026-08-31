@@ -2278,10 +2278,43 @@ question from the one asked is how a review record stops meaning anything.
 | M38 | A graph declaring `non_skippable={TRIAGE}` with a legal `INTAKE → BUILD → REVIEW → HANDOFF` path validates clean while enforcing nothing. | That path is refused at runtime: skipping is measured against the declared *order*, and `TRIAGE` lies between `INTAKE` and `BUILD` in it. But the check `validate_graph` performed really was weaker than the message it printed. The hole it does leave is the one C1 exposed — a declared order placing `HANDOFF` *before* the non-skippable stage leaves an edge that skips nothing, passes the skip rule, and reaches a human unverified. The fix checks reachability through edges the skip rule would permit, not through the transition table alone. |
 | M39 | `load()` returns a partial tree, so cross-reference checks run against a tree missing the files that failed. | True, and the partiality is deliberate: `sf validate` exists to report every problem at once, and raising on the first unparseable file would report one. The defect was that nothing marked the tree as partial, so the checks invented phantoms. `Definition.unloaded` now names what failed and `validate()` drops the findings that merely follow from it. |
 
-### D.4 The general lesson
+### D.4 Disposition
+
+All 88 findings are fixed: 11 critical, 45 major, 26 minor, and the 12 test-quality items.
+Each behavioural fix carries a regression test in
+[`tests/test_review_regressions.py`](../tests/test_review_regressions.py), and each of those
+was run against the unfixed code first and confirmed to fail on its own assertion — the
+same `regression-proven` discipline FR-13.3a imposes on work the factory does.
+
+Four findings changed a requirement rather than only the code:
+
+| Finding | Requirement change |
+| --- | --- |
+| M18 | **FR-2.10a**: factory-wide secrets and MCP servers are defaults an agent may replace, not floors it inherits. Always-apply defeated the narrowing the field exists to express. |
+| M35 | **FR-3.11a**: turns are the fifth budget dimension. Exhausting them is a budget outcome, not a verdict on the work, and must not feed the repair ladder. |
+| N11 | **FR-11.3**: `scaffoldBelow` is `scaffoldAtOrBelow`. The threshold was always inclusive and the name read as exclusive, and the two readings disagree exactly where it matters — the lowest tier is the one that needs scaffolding, which is the whole premise in §2.3. |
+| M37 | **FR-13.3a** gains a companion clause: an assertion whose subject is a name's existence is not a behavioural failure. |
+
+### D.5 The general lesson
 
 Nine of the eleven critical findings were **a control that existed and was not wired in**,
 not a control nobody thought of. The document was right and the code did not implement it.
-That is an argument for the conformance suites in §11.3 being executable tests rather than
-prose, and it is why every one of these now has a regression test that reproduces the
-original exploit.
+The pattern holds down the severity scale: `redact()` called from nowhere (C3), a network
+policy reported by `sf audit` and enforced nowhere (C9), `unused_effects` returning its
+input unchanged (M19), a proxy strip that could not strip anything (T4). A control that is
+present, documented, and inert is worse than an absent one, because a reader of `sf audit`
+or of this document believes a guarantee that does not exist.
+
+Two consequences for how this project works:
+
+1. The conformance suites in §11.3 are executable tests, not prose. A prose conformance
+   statement is exactly the artifact that let these findings survive.
+2. The review record keeps what it declined and what it got wrong. §D.3 records two
+   findings whose stated trigger did not reproduce; the reports in
+   [`reviews/`](reviews/) are unedited, including the findings not acted on. A record that
+   preserves only the accepted findings is not a record.
+
+The second lesson is narrower and sharper: **six of these bugs were held in place by a
+test that asserted them** (T1, T2, T3, T4, T7, T9). A test can encode a defect as
+confidently as code can, and a suite of 500 green tests is not evidence that 500 properties
+hold — it is evidence that 500 assertions match the code, which is a different claim.
