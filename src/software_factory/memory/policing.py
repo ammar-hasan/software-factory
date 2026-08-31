@@ -1,0 +1,389 @@
+"""The policy pass: contradiction, staleness, consolidation, and poisoning containment.
+
+Implements PRD FR-6.5, FR-6.6, FR-6.8, FR-6.12 and docs/harness/memory.md §5, §8.
+
+The pass is deterministic and idempotent: running it twice on an unchanged store must
+produce the same actions the second time as none at all. Every action it takes is
+recorded with a reason, so an operator can always answer "why did this memory move?".
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from software_factory.memory.promotion import demote
+from software_factory.memory.records import (
+    Lane,
+    Memory,
+    Source,
+    SourceKind,
+    utc_now,
+)
+from software_factory.memory.similarity import containment, jaccard, negates
+from software_factory.memory.store import MemoryStore
+
+DUPLICATE_MERGE_THRESHOLD = 0.8
+CONSOLIDATION_CONTAINMENT = 0.9
+COLLAPSE_PENALTY = 0.5
+CANON_FLOOR = 0.35
+STALE_PENALTY = 0.6
+
+
+@dataclass(slots=True)
+class PolicyReport:
+    """What one pass did. Empty is the healthy steady state."""
+
+    quarantined: list[str] = field(default_factory=list)
+    contradictions: list[tuple[str, str]] = field(default_factory=list)
+    expired: list[str] = field(default_factory=list)
+    stale: list[str] = field(default_factory=list)
+    merged: list[tuple[tuple[str, ...], str]] = field(default_factory=list)
+    invalidated: list[str] = field(default_factory=list)
+    weakened: list[str] = field(default_factory=list)
+    evicted: list[str] = field(default_factory=list)
+
+    @property
+    def acted(self) -> bool:
+        return any(
+            (
+                self.quarantined,
+                self.expired,
+                self.stale,
+                self.merged,
+                self.invalidated,
+                self.weakened,
+                self.evicted,
+            )
+        )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "quarantined": self.quarantined,
+            "contradictions": [list(pair) for pair in self.contradictions],
+            "expired": self.expired,
+            "stale": self.stale,
+            "merged": [{"from": list(sources), "into": target} for sources, target in self.merged],
+            "invalidated": self.invalidated,
+            "weakened": self.weakened,
+            "evicted": self.evicted,
+        }
+
+
+def detect_contradictions(store: MemoryStore) -> PolicyReport:
+    """Quarantine *both* sides of a contradiction (memory.md M-9).
+
+    Not the newer one. When code is reverted, the older memory is frequently the correct
+    one, and a system that assumes recency implies correctness will confidently keep the
+    wrong claim.
+    """
+    report = PolicyReport()
+    live = [m for m in store.all() if m.lane in (Lane.CANDIDATE, Lane.CANON)]
+
+    for index, left in enumerate(live):
+        for right in live[index + 1 :]:
+            if left.scope is not right.scope or left.scope_ref != right.scope_ref:
+                continue
+            if left.quarantined and right.quarantined:
+                continue
+            if not negates(left.content, right.content):
+                continue
+
+            report.contradictions.append((left.id, right.id))
+            for memory, other in ((left, right), (right, left)):
+                if memory.quarantined and other.id in memory.contradicts:
+                    continue
+                memory.quarantined = True
+                memory.contradicts = tuple(sorted({*memory.contradicts, other.id}))
+                store.put(
+                    memory,
+                    op="quarantine",
+                    actor="policy",
+                    reason=f"contradicts {other.id}; both sides held pending resolution",
+                )
+                report.quarantined.append(memory.id)
+    return report
+
+
+def expire_and_decay(store: MemoryStore, *, now: datetime | None = None) -> PolicyReport:
+    """Archive what has expired; weaken what no longer resolves."""
+    now = now or utc_now()
+    report = PolicyReport()
+
+    for memory in store.all():
+        if memory.lane is Lane.ARCHIVE:
+            continue
+        if memory.is_expired(now):
+            demote(memory, store, reason="ttl expired without revalidation")
+            report.expired.append(memory.id)
+
+    return report
+
+
+def revalidate_anchors(store: MemoryStore, *, resolve: object) -> PolicyReport:
+    """Re-resolve anchor memories against current code (memory.md §5.2).
+
+    Staleness is checked by digest, never by asking a model whether something is still
+    true -- a model asked that question will usually say yes.
+    """
+    from software_factory.spec.units import digest_text
+
+    report = PolicyReport()
+    resolver = resolve if callable(resolve) else (lambda _locator: None)
+
+    for memory in store.all():
+        if memory.lane is Lane.ARCHIVE or memory.kind.value != "anchor":
+            continue
+        for source in memory.provenance:
+            if not source.locator:
+                continue
+            current = resolver(source.locator)
+            if current is None:
+                demote(memory, store, reason=f"anchor {source.locator} no longer resolves")
+                report.stale.append(memory.id)
+                break
+            if source.excerpt_digest and digest_text(current) != source.excerpt_digest:
+                memory.confidence *= STALE_PENALTY
+                store.put(
+                    memory,
+                    op="weaken",
+                    actor="policy",
+                    reason=f"anchor {source.locator} changed under this memory",
+                )
+                report.weakened.append(memory.id)
+                break
+    return report
+
+
+def consolidate(store: MemoryStore) -> PolicyReport:
+    """Merge near-duplicates, preserving the union of provenance (memory.md M-13).
+
+    A merged memory is better-sourced than any of its inputs, never worse. That property
+    is what makes consolidation safe to run automatically.
+    """
+    report = PolicyReport()
+    by_scope: dict[tuple[str, str], list[Memory]] = {}
+    for memory in store.all():
+        if memory.lane not in (Lane.CANDIDATE, Lane.CANON) or memory.quarantined:
+            continue
+        by_scope.setdefault((memory.scope.value, memory.scope_ref), []).append(memory)
+
+    for group in by_scope.values():
+        clusters = _cluster(group)
+        for cluster in clusters:
+            if len(cluster) < 2:
+                continue
+            merged = _merge(cluster, store)
+            report.merged.append((tuple(sorted(m.id for m in cluster)), merged.id))
+    return report
+
+
+def _cluster(memories: list[Memory]) -> list[list[Memory]]:
+    """Single-link clustering on lexical similarity. Deterministic given a stable order."""
+    ordered = sorted(memories, key=lambda m: m.id)
+    clusters: list[list[Memory]] = []
+    assigned: set[str] = set()
+
+    for memory in ordered:
+        if memory.id in assigned:
+            continue
+        cluster = [memory]
+        assigned.add(memory.id)
+        for other in ordered:
+            if other.id in assigned:
+                continue
+            if any(
+                jaccard(member.content, other.content) >= DUPLICATE_MERGE_THRESHOLD
+                or containment(member.content, other.content) >= CONSOLIDATION_CONTAINMENT
+                for member in cluster
+            ):
+                cluster.append(other)
+                assigned.add(other.id)
+        clusters.append(cluster)
+    return clusters
+
+
+def _merge(cluster: list[Memory], store: MemoryStore) -> Memory:
+    """Fold a cluster into its best-sourced member.
+
+    The survivor is the one with the most provenance -- it is already the most defensible
+    claim -- and it inherits the union of every input's sources, evidence, and parents.
+    """
+    survivor = max(cluster, key=lambda m: (len(m.provenance_ids()), m.confidence, m.id))
+    others = [m for m in cluster if m.id != survivor.id]
+
+    sources: dict[str, Source] = {s.identity(): s for s in survivor.provenance}
+    evidence = set(survivor.evidence)
+    parents = set(survivor.parents)
+    supersedes = set(survivor.supersedes)
+
+    for memory in others:
+        for source in memory.provenance:
+            sources.setdefault(source.identity(), source)
+        evidence.update(memory.evidence)
+        parents.update(memory.parents)
+        supersedes.add(memory.id)
+
+    survivor.provenance = tuple(sorted(sources.values(), key=lambda s: s.identity()))
+    survivor.evidence = tuple(sorted(evidence))
+    survivor.parents = tuple(sorted(parents))
+    survivor.supersedes = tuple(sorted(supersedes))
+    survivor.confidence = max(m.confidence for m in cluster)
+    survivor.created_at = min(m.created_at for m in cluster)
+    survivor.helped_count = sum(m.helped_count for m in cluster)
+    store.put(
+        survivor,
+        op="merge",
+        actor="policy",
+        reason=f"absorbed {', '.join(sorted(m.id for m in others))}",
+    )
+
+    for memory in others:
+        memory.superseded_by = survivor.id
+        memory.lane = Lane.ARCHIVE
+        store.put(memory, op="supersede", actor="policy", reason=f"merged into {survivor.id}")
+    return survivor
+
+
+def invalidate(
+    store: MemoryStore, memory_id: str, *, reason: str, actor: str = "policy"
+) -> PolicyReport:
+    """Withdraw a memory and everything that rests on it (PRD FR-6.6, memory.md M-15).
+
+    This is the containment mechanism for poisoning. A descendant whose *entire*
+    provenance collapses is archived; one that keeps an independent source is penalised
+    and may fall out of Canon, but is not silently kept at full confidence.
+    """
+    report = PolicyReport()
+    root = store.get(memory_id)
+    if root is None:
+        return report
+
+    demote(root, store, reason=reason, actor=actor)
+    report.invalidated.append(root.id)
+
+    invalidated = {root.id}
+    for descendant in store.descendants_of(memory_id):
+        if descendant.lane is Lane.ARCHIVE:
+            continue
+        surviving_parents = [p for p in descendant.parents if p not in invalidated]
+        if not surviving_parents:
+            demote(
+                descendant,
+                store,
+                reason=f"provenance collapsed: every parent traces to invalidated {root.id}",
+                actor=actor,
+            )
+            invalidated.add(descendant.id)
+            report.invalidated.append(descendant.id)
+            continue
+
+        descendant.confidence *= COLLAPSE_PENALTY
+        if descendant.lane is Lane.CANON and descendant.confidence < CANON_FLOOR:
+            descendant.lane = Lane.ARCHIVE
+            store.put(
+                descendant,
+                op="demote",
+                actor=actor,
+                reason=f"weakened below the canon floor by invalidation of {root.id}",
+            )
+            report.invalidated.append(descendant.id)
+        else:
+            store.put(
+                descendant,
+                op="weaken",
+                actor=actor,
+                reason=f"partial provenance collapse from {root.id}",
+            )
+            report.weakened.append(descendant.id)
+    return report
+
+
+def blast_radius(store: MemoryStore, memory_id: str) -> dict[str, object]:
+    """What invalidating this memory would affect (memory.md M-17).
+
+    Run before accepting a high-fan-out claim: a memory that hundreds of others rest on
+    deserves more scrutiny than one nothing depends on.
+    """
+    descendants = store.descendants_of(memory_id)
+    return {
+        "memory": memory_id,
+        "descendants": [m.id for m in descendants],
+        "canon_affected": [m.id for m in descendants if m.lane is Lane.CANON],
+        "total": len(descendants),
+    }
+
+
+def enforce_budget(
+    store: MemoryStore,
+    scope: str,
+    scope_ref: str,
+    *,
+    max_items: int,
+    max_bytes: int,
+    now: datetime | None = None,
+) -> PolicyReport:
+    """Archive the lowest-value memories until the scope is under budget (FR-6.12).
+
+    Memory must be able to shrink, and what was dropped is always recorded -- an
+    operator who cannot see what a pass removed cannot trust the pass.
+    """
+    from software_factory.memory.records import Scope
+
+    now = now or utc_now()
+    report = PolicyReport()
+    live = [
+        m for m in store.in_scope(Scope(scope), scope_ref) if m.lane in (Lane.CANDIDATE, Lane.CANON)
+    ]
+
+    def over() -> bool:
+        return len(live) > max_items or sum(len(m.content) for m in live) > max_bytes
+
+    if not over():
+        return report
+
+    for memory in sorted(live, key=lambda m: (m.value_density(now), m.id)):
+        if not over():
+            break
+        demote(
+            memory,
+            store,
+            reason=(f"scope budget: archived at value density {memory.value_density(now):.6f}"),
+        )
+        live.remove(memory)
+        report.evicted.append(memory.id)
+    return report
+
+
+def run_pass(
+    store: MemoryStore,
+    *,
+    resolve: object | None = None,
+    now: datetime | None = None,
+) -> PolicyReport:
+    """Run the whole policy pass in dependency order.
+
+    Contradictions first (a quarantined memory must not be merged into a clean one),
+    then expiry, then anchor revalidation, then consolidation.
+    """
+    combined = PolicyReport()
+    for report in (
+        detect_contradictions(store),
+        expire_and_decay(store, now=now),
+        revalidate_anchors(store, resolve=resolve) if resolve else PolicyReport(),
+        consolidate(store),
+    ):
+        combined.quarantined += report.quarantined
+        combined.contradictions += report.contradictions
+        combined.expired += report.expired
+        combined.stale += report.stale
+        combined.merged += report.merged
+        combined.invalidated += report.invalidated
+        combined.weakened += report.weakened
+        combined.evicted += report.evicted
+    return combined
+
+
+def source_of(kind: SourceKind, ref: str, locator: str = "", digest: str = "") -> Source:
+    """Convenience constructor used by callers building provenance."""
+    return Source(kind=kind, ref=ref, locator=locator, excerpt_digest=digest)
