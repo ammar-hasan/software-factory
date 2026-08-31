@@ -548,6 +548,72 @@ def _resolve_provider() -> Provider | None:
     )
 
 
+spec_app = typer.Typer(
+    help="Work with the Living Spec: induct it, slice it, check agreement.",
+    no_args_is_help=True,
+)
+app.add_typer(spec_app, name="spec")
+
+
+@spec_app.command("induct")
+def spec_induct(
+    repo: Annotated[Path, typer.Argument(help="The repository to read.")] = Path(),
+    prefix: Annotated[
+        str, typer.Option(help="Only scan paths under this prefix, for incremental onboarding.")
+    ] = "",
+    id_prefix: Annotated[str, typer.Option("--id-prefix", help="Prefix for unit ids.")] = "SPEC",
+    limit: Annotated[int, typer.Option(help="Maximum units to propose.")] = 200,
+    as_json: JsonOpt = False,
+) -> None:
+    """Propose draft spec units from an existing codebase.
+
+    Proposes; never writes. Every unit arrives as `draft` and gates nothing until a
+    person promotes it, so running this on a large repository cannot block anyone.
+    """
+    from software_factory.spec.induction import induct
+
+    report = induct(repo, prefix=prefix, id_prefix=id_prefix, limit=limit)
+
+    if as_json:
+        _emit({"ok": True, "induction": report.as_dict()})
+        raise typer.Exit(EXIT_OK)
+
+    if not report.units:
+        console.print(
+            f"[yellow]nothing to propose[/] — scanned {report.scanned} file(s) with no public "
+            "definitions or tests"
+        )
+        raise typer.Exit(EXIT_OK)
+
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("id", "title", "from", "conf", "criteria"):
+        table.add_column(column, overflow="fold")
+    for unit in report.units[:40]:
+        origin = unit.provenance[0].split(":")[0] if unit.provenance else "?"
+        table.add_row(
+            unit.id,
+            unit.title,
+            origin,
+            f"{unit.confidence:.1f}",
+            str(len(unit.acceptance)) if unit.acceptance else "-",
+        )
+    console.print(table)
+
+    counts = ", ".join(
+        f"{count} from {source}" for source, count in sorted(report.by_source().items())
+    )
+    console.print(
+        f"\n[bold]{len(report.units)}[/] draft unit(s) proposed from {report.scanned} file(s)"
+        + (f" ({counts})" if counts else "")
+    )
+    if report.skipped:
+        console.print(f"[dim]{len(report.skipped)} file(s) skipped[/]")
+    console.print(
+        "\n[dim]Nothing was written. Draft units gate nothing until a person promotes them.[/]"
+    )
+    raise typer.Exit(EXIT_OK)
+
+
 memory_app = typer.Typer(
     help="Inspect the memory fabric: lanes, provenance, and what a claim rests on.",
     no_args_is_help=True,

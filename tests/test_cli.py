@@ -494,3 +494,37 @@ def test_work_on_a_missing_factory_is_actionable(tmp_path: Path) -> None:
 
     assert result.exit_code == 2
     assert payload(result.output)["error"]["remediation"]
+
+
+# ---------------------------------------------------------------------- sf spec induct
+
+
+def test_spec_induct_proposes_units_from_a_codebase(tmp_path: Path) -> None:
+    (tmp_path / "importer.py").write_text(
+        '"""Importer."""\n\n\ndef strip_bom(text):\n    """Strip a BOM."""\n    return text\n',
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["spec", "induct", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0
+    induction = payload(result.output)["induction"]
+    assert induction["proposed"] >= 1
+    assert all(unit["status"] == "draft" for unit in induction["units"])
+
+
+def test_spec_induct_writes_nothing(tmp_path: Path) -> None:
+    source = tmp_path / "importer.py"
+    source.write_text("def compute(a, b):\n    return a + b\n", encoding="utf-8")
+    before = sorted(p.name for p in tmp_path.iterdir())
+
+    runner.invoke(app, ["spec", "induct", str(tmp_path), "--json"])
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
+def test_spec_induct_on_an_empty_directory_is_not_an_error(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["spec", "induct", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0
+    assert payload(result.output)["induction"]["proposed"] == 0
