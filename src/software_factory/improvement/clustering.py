@@ -16,10 +16,10 @@ never to merge two that are distinct -- merging on text is how a clusterer produ
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from software_factory.digests import digest_parts
 from software_factory.memory.records import utc_now
 from software_factory.memory.similarity import analyse, jaccard_of
 
@@ -61,10 +61,14 @@ class Failure:
         any of them would give every failure its own signature, which is a clusterer that
         never clusters.
         """
-        material = "␟".join(
-            (self.stage, self.agent, self.scorer, self.gate, self.failure_class)
-        ).lower()
-        return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+        return digest_parts(
+            self.stage.lower(),
+            self.agent.lower(),
+            self.scorer.lower(),
+            self.gate.lower(),
+            self.failure_class.lower(),
+            length=16,
+        )
 
     def describe(self) -> str:
         parts = [p for p in (self.gate, self.scorer, self.failure_class) if p]

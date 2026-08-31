@@ -23,11 +23,11 @@ the one an operator is most likely to be watching.
 from __future__ import annotations
 
 import enum
-import hashlib
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from software_factory.digests import digest_parts
 from software_factory.memory.records import utc_now
 
 
@@ -69,9 +69,12 @@ def fingerprint_of(*parts: str) -> str:
 
     Content-addressed rather than id-based: a signal storm sends the *same* alert from a
     provider that assigns a new id each time, so deduplicating by id deduplicates nothing.
+
+    Length-prefixed, because the parts are attacker-supplied text and a separator that can
+    appear inside one lets a colliding fingerprint be constructed on purpose -- which would
+    make a real alert read as a duplicate of a fabricated one and be dropped.
     """
-    material = "␟".join(part.strip().lower() for part in parts)
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+    return digest_parts(*(part.strip().lower() for part in parts), length=16)
 
 
 @dataclass(frozen=True, slots=True)
