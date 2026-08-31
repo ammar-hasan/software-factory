@@ -31,16 +31,33 @@ from software_factory.errors import Severity, ValidationIssue, ValidationReport
 #: promising access is either wrong or a social-engineering attempt.
 _AUTHORITY_CLAIMS = re.compile(
     r"\b(?:"
-    r"grants?\s+(?:you\s+)?(?:access|permission|the\s+right)"
-    r"|you\s+(?:now\s+)?have\s+(?:access\s+to|permission\s+to)"
-    r"|this\s+skill\s+(?:grants?|enables?|unlocks?)\s+(?:access|the\s+\w+\s+secret)"
-    r"|ignore\s+(?:the\s+)?(?:previous|prior|above)\s+instructions"
-    r"|bypass(?:ing)?\s+(?:the\s+)?(?:gate|policy|permission|approval)"
-    r"|(?:disable|skip|turn\s+off|suppress)\s+(?:the\s+)?[\w-]*\s*"
-    r"(?:gate|check|test|validation|review|approval)s?\b"
-    r")\b",
+    r"grants?\s+(?:you\s+)?(?:\w+\s+){0,2}?(?:access|permission|rights?|privileges?)"
+    r"|(?:you|it)\s+(?:now\s+)?(?:ha(?:ve|s)|get|gets)\s+(?:\w+\s+){0,2}?"
+    r"(?:access|permission|rights?|privileges?)\b"
+    r"|(?:lets?|allows?|enables?)\s+you\s+(?:to\s+)?(?:read|write|access|use|deploy)"
+    r"\s+(?:\w+\s+){0,3}?(?:secret|secrets|credential|credentials|token|tokens|key|keys|"
+    r"password|passwords|database|production)\b"
+    r"|this\s+skill\s+(?:grants?|unlocks?|authoris\w*|authoriz\w*)"
+    r"|ignore\s+(?:\w+\s+){0,2}?(?:previous|prior|above|earlier|preceding)\s+"
+    r"(?:instruction|instructions|rule|rules)"
+    r"|disregard\s+(?:\w+\s+){0,2}?(?:instruction|instructions|rule|rules|polic\w+)"
+    r"|bypass(?:ing)?\s+(?:\w+\s+){0,2}?(?:gate|gates|polic\w+|permission|permissions|"
+    r"approval|approvals|check|checks|review)"
+    r"|(?:disable|skip|turn\s+off|suppress|do\s+not\s+run|don't\s+run)\s+"
+    r"(?:\w+\s+){0,2}?(?:gate|gates|check|checks|test|tests|validation|review|reviews|"
+    r"approval|approvals)\b"
+    r")",
     re.IGNORECASE,
 )
+"""Phrasings that claim an authority skills do not have (FR-7.11).
+
+Skills change what an agent knows, never what it can reach, so a body or description
+promising access is either wrong or a social-engineering attempt.
+
+The optional word runs exist because the first version was defeated by a single inserted
+word: "ignore *all* previous instructions" and "you have *full* access" both slipped past
+a pattern that expected the phrases adjacent.
+"""
 
 #: Phrases in a policy file that claim to enforce what only an external system can
 #: enforce (FR-16.2). Policy expresses intent; repositories and executors enforce.
@@ -312,7 +329,11 @@ def _check_skills(definition: Definition, report: ValidationReport) -> None:
                     remediation="State when to use it, what it produces, and what it is not for.",
                 )
             )
-        claim = _AUTHORITY_CLAIMS.search(skill.body)
+        # The description is what reaches the selection prompt, so scanning only the body
+        # left the more exposed field unchecked.
+        claim = _AUTHORITY_CLAIMS.search(skill.body) or _AUTHORITY_CLAIMS.search(
+            skill.definition.description
+        )
         if claim:
             report.add(
                 ValidationIssue(
@@ -415,18 +436,32 @@ def _description_similarity(left: str, right: str) -> float:
 def _check_secrets_declared(definition: Definition, report: ValidationReport) -> None:
     """Secret *names* belong in definitions; secret *values* never do (FR-2.8)."""
     value_shaped = re.compile(r"^(?:sk-|ghp_|gho_|github_pat_|xox[baprs]-|AKIA)[A-Za-z0-9_\-]{8,}$")
-    for agent in definition.agents.values():
-        for name in agent.definition.execution.secrets or ():
+    sources: list[tuple[Path, str, tuple[str, ...]]] = [
+        (definition.root / "factory.yaml", "the factory", definition.factory.secrets),
+        *(
+            (agent.path, f"agent {agent.name!r}", agent.definition.execution.secrets or ())
+            for agent in definition.agents.values()
+        ),
+        *(
+            (
+                automation.path,
+                f"automation {automation.name!r}",
+                automation.definition.execution.secrets or (),
+            )
+            for automation in definition.automations.values()
+        ),
+    ]
+    for path, who, names in sources:
+        for name in names:
             if value_shaped.match(name):
                 report.add(
                     ValidationIssue(
                         severity=Severity.ERROR,
                         code="secret.value_in_definition",
                         message=(
-                            f"agent {agent.name!r} declares what looks like a secret *value* "
-                            "under `secrets`"
+                            f"{who} declares what looks like a secret *value* under `secrets`"
                         ),
-                        path=agent.path,
+                        path=path,
                         key="secrets",
                         remediation=(
                             "Declare the secret's NAME here and store the value in the secret "

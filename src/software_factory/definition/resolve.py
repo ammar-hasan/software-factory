@@ -15,11 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from software_factory.definition.models import (
-    ExecutionDefaults,
-    FactoryDocument,
-    McpServerRef,
-)
+from software_factory.definition.models import ExecutionDefaults, FactoryDocument
 
 #: Fields whose maps/lists replace rather than merge.
 _REPLACING = ("secrets", "mcp_servers", "tools", "effects")
@@ -70,15 +66,18 @@ def _apply_factory_wide(
     """Factory-wide secrets and tool servers always apply, on top of the resolved set."""
     data = effective.model_dump(exclude_none=True, by_alias=False)
 
-    secrets: tuple[str, ...] = tuple(data.get("secrets") or ())
-    merged_secrets = tuple(dict.fromkeys((*factory.secrets, *secrets)))
-    if merged_secrets:
-        data["secrets"] = merged_secrets
+    # Factory-wide grants are a *default* for anything that declares nothing, not a floor
+    # beneath everything. An agent writing `secrets: []` is saying "none", and default-deny
+    # means that has to win -- otherwise there is no way to narrow at all, and this
+    # module's promise that "a narrowing intent stays narrowing" is simply false.
+    if "secrets" not in data:
+        if factory.secrets:
+            data["secrets"] = tuple(dict.fromkeys(factory.secrets))
+    elif data["secrets"]:
+        data["secrets"] = tuple(dict.fromkeys(data["secrets"]))
 
-    servers: dict[str, McpServerRef] = dict(data.get("mcp_servers") or {})
-    merged_servers = {**factory.mcp_servers, **servers}
-    if merged_servers:
-        data["mcp_servers"] = merged_servers
+    if "mcp_servers" not in data and factory.mcp_servers:
+        data["mcp_servers"] = dict(factory.mcp_servers)
 
     return ExecutionDefaults.model_validate(data)
 

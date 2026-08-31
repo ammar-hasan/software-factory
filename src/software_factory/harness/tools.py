@@ -117,6 +117,17 @@ class Violation:
     """True when the attempt targeted a grant boundary rather than a path outside scope."""
 
 
+def _safe_exception(exc: BaseException, *, limit: int = 200) -> str:
+    """Render an exception for a prompt without handing the model raw attacker text.
+
+    ``repr()`` embeds the exception's arguments verbatim, and those routinely contain file
+    contents or issue text. The type name is what a reader needs; the message is truncated
+    and stripped of anything that could read as a region boundary.
+    """
+    message = str(exc)[:limit].replace("<", "\\<").replace(">", "\\>")
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+
+
 class ToolRegistryError(Exception):
     """A tool declaration is invalid. Raised at registration, never at call time."""
 
@@ -233,7 +244,7 @@ class ToolRegistry:
         except Exception as exc:
             return ToolFailure(
                 FailureKind.INTERNAL,
-                f"{name} raised {exc!r}",
+                f"{name} raised {_safe_exception(exc)}",
                 "This is a defect in the tool, not in your request. Try a different approach.",
             )
 

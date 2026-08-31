@@ -3,11 +3,11 @@
 | Field | Value |
 | --- | --- |
 | Document | Master PRD |
-| Version | 2.0.0 |
-| Status | Revised after adversarial, completeness, and bias review |
+| Version | 2.1.0 |
+| Status | Revised after design review, then after an adversarial implementation review |
 | Owner | The Software Factory Authors |
 | Licence | Apache-2.0 |
-| Supersedes | 1.0.0 (baseline) |
+| Supersedes | 2.0.0 |
 | Review record | [`reviews/`](reviews/) — 62 adversarial, 117 completeness, 72 bias findings; dispositions in Appendix C |
 
 > **Reading order.** §1–§4 are the *why*. §5–§7 are the *what* (concepts, architecture, and the
@@ -431,8 +431,16 @@ with a documented, deterministic merge order and a `sf plan --explain` that show
 each resolved value.
 
 **FR-2.10 (P0)** — Definition inheritance is: factory defaults → agent → automation override. Maps
-(`secrets`, `mcpServers`, `tools`) declared at a lower level **replace** rather than merge, except
-factory-wide entries which always apply. `sf plan` must show the outcome explicitly.
+(`secrets`, `mcpServers`, `tools`) declared at a lower level **replace** rather than merge.
+`sf plan` must show the outcome explicitly.
+
+**FR-2.10a (P0) — Factory-wide grants are defaults, not floors.** *Revised in v2.1.0.* The original
+text made them always-apply on top of whatever a level resolved to, which an implementation review
+showed defeats narrowing entirely: an agent declaring `secrets: []` got the factory's secrets back.
+A level that declares nothing inherits the factory-wide set; a level that declares its own —
+**including an empty list** — replaces it. Default-deny (FR-17.2) requires that an explicit empty
+declaration results in nothing, because otherwise an agent cannot narrow its own grants and the
+narrowing syntax is decorative.
 
 ### 7.3 Agents (FR-3)
 
@@ -2160,6 +2168,7 @@ NFR-12 project governance**.
 | --- | --- | --- |
 | 1.0.0 | 2026-08-31 | Baseline. Written before adversarial, completeness, and bias review. |
 | 2.0.0 | 2026-08-31 | Revised against 251 review findings. Section 11 replaced outright; twelve mechanism-level corrections; eight new requirement families; four new non-functional families; risk register relabelled preventive/detective; open questions rewritten to threaten decisions rather than tune them. See Appendix C. |
+| 2.1.0 | 2026-08-31 | Revised against an adversarial review of the *implementation* (88 findings, 11 critical). FR-2.10a reverses factory-wide grants from floors to defaults, because always-apply defeated narrowing. See Appendix D. |
 
 ## Appendix C — Review dispositions
 
@@ -2220,3 +2229,48 @@ No review examined the harness specifications in [`harness/`](harness), which we
 PRD baseline and carry several of the corrections above. They are due for the same treatment. Nor did
 any review examine the implementation. Both are gaps in this record, stated here rather than left to
 be noticed.
+
+## Appendix D — Implementation review dispositions
+
+After the subsystems were built, an adversarial review ran against the *code* rather than
+the document: **88 findings — 11 critical, 45 major, 32 minor** — each reproduced against
+running code. The report is kept unedited at [`reviews/code-review.md`](reviews/code-review.md).
+
+It found what design review structurally cannot: places where the implementation did not do
+what the document says. Several defeated a control that reads as enforced elsewhere, which
+is the worst category — a reader of `sf audit`, or of this PRD, would have believed a
+guarantee that did not exist.
+
+### D.1 Critical findings, all fixed
+
+| Finding | The gap between document and code |
+| --- | --- |
+| C1 | FR-3.3a says review is non-skippable. The skip check measured from `BLOCKED`, which has no position in the stage order, so parking a work item and resuming it walked past review with an empty skip list — two ordinary calls, no human approval. |
+| C2 | FR-6.4b says untrusted content may never enter Canon. Memory consolidation clustered across lanes and never read `trust`, so an untrusted candidate could archive a Canon memory and take its place. |
+| C3 | FR-17.3 says secrets are redacted at every output boundary. The redaction function was called from nowhere. |
+| C4 | FR-12.10's violation classes distinguish a real attempt from cache noise. The tolerated-path check ran on the unresolved path, so one `..` made a write outside the contract read as benign. |
+| C5 | FR-5.5's agreement states depend on a unit's invariants. `apply_delta` used a copy that skips validation, so a re-anchor to nothing left an active unit anchorless — which then reported `agreed` and permanently satisfied the gate. |
+| C6 | FR-13.2 says a gate that cannot run is an error. A stage with no declared gate set ran zero gates and reported clean, including `HANDOFF` — the last point anything could be caught. |
+| C7 | Run isolation. Tool-registry violations were cumulative and unscoped, so one run's violation terminated every later run sharing the registry. |
+| C8 | NFR-1.2 promises crash safety. A torn append made both append-only logs permanently unreadable, and therefore permanently unwritable. |
+| C9 | FR-8.5's network policy. `allowlist` was the schema default, was reported by `sf audit` as a control, and was enforced nowhere. |
+| C10 | FR-15.10b's erasure-by-reference. `erase()` appended a tombstone and left the content in place. |
+| C11 | FR-6.5's contradiction detection. The tokenizer's length filter removed `"no"`, so contradictions phrased with it were invisible. |
+
+### D.2 What this changed in the document
+
+- **FR-2.10a** (this revision) reverses factory-wide grants from floors to defaults.
+- **FR-13.3a** gains a companion: an assertion whose whole subject is a name's existence is
+  not a behavioural failure, so `assert hasattr(module, "new_function")` does not satisfy
+  `regression-proven` — the same bypass an import error gives, one keystroke further on.
+- **FR-4.2a**'s stage order is now explicit data rather than derived from the transition
+  table's key order. A security control must not change behaviour with a dict literal's
+  ordering.
+
+### D.3 The general lesson
+
+Nine of the eleven critical findings were **a control that existed and was not wired in**,
+not a control nobody thought of. The document was right and the code did not implement it.
+That is an argument for the conformance suites in §11.3 being executable tests rather than
+prose, and it is why every one of these now has a regression test that reproduces the
+original exploit.

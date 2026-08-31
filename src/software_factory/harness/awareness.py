@@ -348,7 +348,11 @@ class PackAssembler:
             try:
                 items, degradation = builder()
             except Exception as exc:
-                pack.degradations.append((section_id.value, f"builder failed: {exc!r}"))
+                # The type name, not repr(): an exception's arguments routinely contain
+                # file contents or issue text, and this string goes into the prompt.
+                pack.degradations.append(
+                    (section_id.value, f"builder failed: {type(exc).__name__}")
+                )
                 continue
             if degradation:
                 pack.degradations.append((section_id.value, degradation))

@@ -50,7 +50,16 @@ class RunStatus(enum.StrEnum):
 
 #: Delimiters for the prompt's trust regions. Not user-controllable: occurrences in
 #: content are escaped so a payload cannot forge a boundary (HARNESS.md L-3).
-REGIONS = ("harness", "policy", "role", "skills", "awareness", "working", "task")
+REGIONS = (
+    "harness",
+    "policy",
+    "role",
+    "skills",
+    "awareness",
+    "working",
+    "task",
+    "tool_result",
+)
 
 _DELIMITER = re.compile(r"</?(?:" + "|".join(REGIONS) + r")(?:\s[^>]*)?>", re.IGNORECASE)
 
@@ -291,10 +300,17 @@ class TurnLoop:
             else:
                 payload = outcome.as_dict()
 
+            # Tool results carry file contents, issue text, and command output -- all of
+            # it attacker-writable. Every other channel is wrapped; this one was not, and
+            # the harness invariants scope the whole defence to the marker.
             messages.append(
                 Message(
                     role=Role.TOOL,
-                    content=escape_delimiters(json.dumps(payload, default=str)),
+                    content=(
+                        '<tool_result untrusted="true">'
+                        + escape_delimiters(json.dumps(payload, default=str))
+                        + "</tool_result>"
+                    ),
                     tool_call_id=call.id,
                     name=call.name,
                 )

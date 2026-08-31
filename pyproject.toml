@@ -57,6 +57,11 @@ packages = ["src/software_factory"]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+# ruff formats fenced Python inside Markdown, which is what we want for docs that teach --
+# the examples stay canonical. The review reports are the exception: they quote the code
+# exactly as it stood when the finding was written, and reformatting a quotation makes the
+# finding harder to match against the commit it describes.
+extend-exclude = ["docs/reviews"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RET", "ARG", "PTH", "RUF"]

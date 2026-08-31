@@ -79,42 +79,68 @@ def test_secrets_replace_rather_than_merge() -> None:
     assert resolved.secrets == ("narrow",)
 
 
-def test_factory_wide_secrets_always_apply_on_top() -> None:
+def test_an_agent_that_declares_nothing_inherits_the_factory_secrets() -> None:
+    resolved = resolve_for_agent(factory(secrets=["audit-token"]), defaults(tier="t"))
+
+    assert resolved.secrets == ("audit-token",)
+
+
+def test_an_agent_that_declares_secrets_replaces_the_factory_set() -> None:
+    """Factory-wide grants are defaults, not floors.
+
+    They used to be re-added on top, so an agent narrowing its grants got them back --
+    which meant an agent could never actually narrow, and default-deny was not the rule
+    the module claimed it was.
+    """
     resolved = resolve_for_agent(
-        factory(secrets=["audit-token"]),
+        factory(secrets=["prod-db-password"]),
         defaults(secrets=["agent-token"]),
     )
 
-    assert set(resolved.secrets or ()) == {"audit-token", "agent-token"}
+    assert resolved.secrets == ("agent-token",)
 
 
-def test_factory_wide_secrets_are_not_duplicated() -> None:
+def test_an_agent_can_narrow_to_no_secrets_at_all() -> None:
+    """An explicit empty list is a decision, and the safer direction has to win."""
     resolved = resolve_for_agent(
-        factory(secrets=["shared"]),
-        defaults(secrets=["shared"]),
+        factory(secrets=["prod-db-password", "deploy-token"]),
+        defaults(secrets=[]),
     )
+
+    assert not resolved.secrets
+
+
+def test_duplicate_secret_names_are_collapsed() -> None:
+    resolved = resolve_for_agent(factory(), defaults(secrets=["shared", "shared"]))
 
     assert resolved.secrets == ("shared",)
 
 
-def test_factory_wide_tool_servers_always_apply() -> None:
+def test_an_agent_that_declares_nothing_inherits_the_factory_tool_servers() -> None:
+    resolved = resolve_for_agent(
+        factory(mcpServers={"audit": {"id": "audit-server"}}), defaults(tier="t")
+    )
+
+    assert set(resolved.mcp_servers or {}) == {"audit"}
+    assert isinstance((resolved.mcp_servers or {})["audit"], McpServerRef)
+
+
+def test_an_agent_that_declares_tool_servers_replaces_the_factory_set() -> None:
     resolved = resolve_for_agent(
         factory(mcpServers={"audit": {"id": "audit-server"}}),
         defaults(mcpServers={"local": {"command": "./tools/local"}}),
     )
 
-    assert set(resolved.mcp_servers or {}) == {"audit", "local"}
+    assert set(resolved.mcp_servers or {}) == {"local"}
 
 
-def test_an_agent_cannot_shadow_a_factory_wide_server_away() -> None:
-    """Factory-wide grants are floors, not defaults."""
+def test_an_agent_can_narrow_to_no_tool_servers() -> None:
     resolved = resolve_for_agent(
         factory(mcpServers={"audit": {"id": "audit-server"}}),
         defaults(mcpServers={}),
     )
 
-    assert "audit" in (resolved.mcp_servers or {})
-    assert isinstance((resolved.mcp_servers or {})["audit"], McpServerRef)
+    assert not (resolved.mcp_servers or {})
 
 
 def test_automation_overrides_beat_the_agent() -> None:

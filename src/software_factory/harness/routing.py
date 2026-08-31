@@ -148,8 +148,16 @@ def _justify(
     complexity_threshold: float,
     detail: str,
 ) -> str | EscalationRefused:
-    # Exhaustive over Trigger: a new member without a case here is a type error, which
-    # is the behaviour we want -- escalation reasons must never silently default.
+    # Membership is checked before the match rather than with a `case _` arm, which is
+    # statically unreachable. The hole was real at runtime: a value outside the enum fell
+    # off the match, `_justify` returned None, and the caller read that as a justification
+    # -- so an unrecognised trigger *granted* the escalation with no recorded reason.
+    if trigger not in set(Trigger):
+        return EscalationRefused(
+            "escalation.unknown_trigger",
+            f"{trigger!r} is not a recognised escalation trigger",
+        )
+
     match trigger:
         case Trigger.GATE_REPEAT:
             repeated = state.repeated_gate_failure()
