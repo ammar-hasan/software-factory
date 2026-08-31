@@ -55,9 +55,14 @@ class SectionId(enum.StrEnum):
     OPEN_QUESTIONS = "open-questions"
 
 
-#: Sections that are never dropped, whatever the budget says. A pack without its mission
-#: or its contract is not a smaller pack, it is a broken one (awareness.md A-10).
-PROTECTED: frozenset[SectionId] = frozenset({SectionId.MISSION, SectionId.CONTRACT})
+#: Sections that are never dropped, whatever the budget says. A pack without its mission,
+#: its contract, or its toolbelt is not a smaller pack -- it is a broken one
+#: (awareness.md A-10). The toolbelt earns its place here the hard way: an integration
+#: test found it budget-dropped to nothing for a role with a low toolbelt weight, leaving
+#: an agent that could not see the tools it had been granted.
+PROTECTED: frozenset[SectionId] = frozenset(
+    {SectionId.MISSION, SectionId.CONTRACT, SectionId.TOOLBELT}
+)
 
 #: Fractions of the pack budget, by role. Starting values, not settled ones: pack
 #: telemetry measures which sections were actually used, and reweighting is an ordinary
