@@ -19,6 +19,14 @@ from software_factory.definition.models import AgentRole, Effect, Stage
 from software_factory.definition.resolve import resolve_for_agent
 from software_factory.evals.evidence import EvidenceBundle, EvidenceClass, EvidenceItem
 from software_factory.evals.gates import GateContext, GateReport, ViolationClass, run_gates
+from software_factory.evals.recording import (
+    Capture,
+    NotRecorded,
+    RecordingKind,
+    RecordingPolicy,
+    Unavailable,
+    visual_evidence_statement,
+)
 from software_factory.harness.awareness import (
     AwarenessPack,
     Citation,
@@ -28,6 +36,13 @@ from software_factory.harness.awareness import (
     PackAssembler,
     SectionId,
     Snapshot,
+)
+from software_factory.harness.conversation import (
+    ConversationState,
+    Note,
+    NoteKind,
+    compact,
+    resume,
 )
 from software_factory.harness.loop import Budget, RunResult, RunStatus, TurnLoop
 from software_factory.harness.routing import RoutingState, starting_tier
@@ -169,6 +184,7 @@ class Coordinator:
         skills: SkillRegistry | None = None,
         pack_budget_tokens: int = 6000,
         allow_unsandboxed: bool = False,
+        recording_policy: RecordingPolicy | None = None,
     ) -> None:
         self.definition = definition
         self.provider = provider
@@ -180,6 +196,12 @@ class Coordinator:
         self.pack_budget_tokens = pack_budget_tokens
         self.machine = StageMachine()
         self.allow_unsandboxed = allow_unsandboxed
+        self.recording_policy = recording_policy or RecordingPolicy()
+        self.conversations: dict[tuple[str, str], ConversationState] = {}
+        """Per (work item, agent). FR-3.7 asks a specialist to continue *its* conversation,
+        which is not the same as the work item's history: two agents on one item have two
+        conversations, and merging them would hand the critic the builder's reasoning as
+        though it were its own."""
 
     # ------------------------------------------------------------------------ public
 
@@ -329,7 +351,25 @@ class Coordinator:
             task=item.request,
             output_schema=STAGE_SCHEMAS.get(stage),
         )
+        conversation = self.conversations.setdefault(
+            (item.id, agent_name), ConversationState(work_item_id=item.id, agent=agent_name)
+        )
+        resumption = resume(conversation, stage=stage)
+        if conversation.notes:
+            # Recorded so "context was lost" is a diagnosable claim rather than a guess
+            # (FR-29.3). Without it, a run that behaved oddly and a run handed the wrong
+            # state look identical from outside -- and the second is a harness bug that
+            # would be attributed to the model.
+            self.ledger.append(
+                EntryType.COMPACTION,
+                actor=agent_name,
+                subject=item.id,
+                payload={"resumption": resumption.as_dict()},
+            )
+
         run = loop.run()
+
+        self._carry_forward(conversation, item, stage, run)
 
         # The entry `sf spend` and `cost_per_change` fold on. Without it the whole economics
         # layer reads an empty ledger and reports a factory running for free, which is the
@@ -526,10 +566,75 @@ class Coordinator:
                     location=f"{item.id}/diff.patch",
                 )
             )
+        # Visual evidence, or the explicit statement that there is none (FR-22.3). The
+        # absence is an artifact rather than a gap: without it a change that should have
+        # carried a recording and did not looks exactly like one that never needed any.
+        capture = self._visual_capture(item, stage)
+        if capture is not None:
+            item_evidence = capture.as_evidence()
+            bundle.add(item_evidence)
+            bundle.claim(visual_evidence_statement([capture]), item_evidence.id)
+
         for claim in (run.output or {}).get("claims", []) or []:
             if isinstance(claim, str):
                 bundle.claim(claim, *(["diff"] if diff else []))
         return bundle
+
+    def _visual_capture(self, item: WorkItem, stage: Stage) -> Capture | None:
+        """Whether this stage should have carried visual evidence, and what happened.
+
+        ``None`` when the work class does not call for it -- a chore renaming a variable
+        needs no screenshot, and demanding one teaches people to attach meaningless ones.
+        This build has no recorder, so where visual evidence *is* expected the answer is a
+        stated absence rather than silence.
+        """
+        if stage not in (Stage.VERIFY, Stage.REVIEW):
+            return None
+        if not self.recording_policy.expects_visual(item.work_class.value, user_facing=True):
+            return None
+        return NotRecorded(
+            kind=RecordingKind.BROWSER,
+            reason=Unavailable.NOT_ENABLED,
+            detail=f"no recorder is configured for {stage.value.lower()}",
+        )
+
+    def _carry_forward(
+        self, conversation: ConversationState, item: WorkItem, stage: Stage, run: RunResult
+    ) -> None:
+        """Record what this run learned, for the next run of the same specialist.
+
+        Only what a *later* run needs: what was decided, what was tried and did not work,
+        and what is still open. Everything else is in the transcript, which stays
+        retrievable -- a summary that carried everything would be a second transcript.
+        """
+        conversation.transcript_refs.append(item.id)
+        output = run.output or {}
+
+        for text in _as_texts(output.get("decisions")):
+            conversation.add(Note(kind=NoteKind.DECISION, text=text, run_id=item.id, stage=stage))
+        for text in _as_texts(output.get("attempted")):
+            conversation.add(Note(kind=NoteKind.ATTEMPT, text=text, run_id=item.id, stage=stage))
+        # Calibration unknowns are open questions by construction: the agent said it did not
+        # know. Losing them between runs turns an unanswered question into an assumption
+        # nobody made deliberately.
+        for text in run.calibration.unknowns if run.calibration else []:
+            conversation.add(
+                Note(kind=NoteKind.OPEN_QUESTION, text=str(text), run_id=item.id, stage=stage)
+            )
+
+        record = compact(conversation, run_id=item.id)
+        if record is not None:
+            self.ledger.append(
+                EntryType.COMPACTION,
+                actor=conversation.agent,
+                subject=item.id,
+                payload={
+                    "notesBefore": record.notes_before,
+                    "notesAfter": record.notes_after,
+                    "dropped": record.dropped_count,
+                    "digest": record.digest,
+                },
+            )
 
     def _gate_context(
         self,
@@ -667,3 +772,17 @@ def local_coordinator(
         ledger=Ledger(state_dir / "ledger.jsonl"),
         allow_unsandboxed=allow_unsandboxed,
     )
+
+
+def _as_texts(value: object) -> list[str]:
+    """Model output is untrusted in shape as well as content.
+
+    A field the schema says is a list of strings can arrive as a string, a list of objects,
+    or absent. Coercing here keeps the carried state well-formed rather than letting a
+    malformed field become a note that breaks the next run's summary.
+    """
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list):
+        return [str(entry) for entry in value if str(entry).strip()]
+    return []

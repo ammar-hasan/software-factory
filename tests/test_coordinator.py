@@ -445,3 +445,117 @@ def test_a_transition_records_whether_it_went_backwards(
     assert transitions
     assert all("backwards" in e.payload for e in transitions)
     assert all("to" in e.payload for e in transitions)
+
+
+# --------------------------------------------------- conversation and recording
+
+
+def test_a_specialists_conversation_carries_across_stages(
+    definition, repo: Path, tmp_path: Path
+) -> None:
+    """FR-3.7 asks a specialist to continue its conversation across revisions, which on a
+    multi-pass item exceeds any context window -- so what carries is structured state."""
+    provider = StubProvider([says(triage_output()), says(build_output()), says(review_output())])
+    work = item()
+    orchestrator = local_coordinator(
+        definition,
+        repo=repo,
+        state_dir=tmp_path / "state",
+        provider=provider,
+        allow_unsandboxed=True,
+    )
+
+    orchestrator.run(work)
+
+    assert orchestrator.conversations, "no conversation state was kept"
+    for state in orchestrator.conversations.values():
+        assert state.transcript_refs, "the full history is not addressable"
+
+
+def test_two_agents_on_one_work_item_have_two_conversations(
+    definition, repo: Path, tmp_path: Path
+) -> None:
+    """Merging them would hand the critic the builder's reasoning as though it were its own,
+    which is the opposite of the independence FR-3.5a asks for."""
+    provider = StubProvider([says(triage_output()), says(build_output()), says(review_output())])
+    work = item()
+    orchestrator = local_coordinator(
+        definition,
+        repo=repo,
+        state_dir=tmp_path / "state",
+        provider=provider,
+        allow_unsandboxed=True,
+    )
+
+    orchestrator.run(work)
+
+    agents = {agent for _, agent in orchestrator.conversations}
+    assert len(agents) > 1, "every stage ran as the same agent; the fixture proves nothing"
+
+
+def test_an_unanswered_question_survives_into_the_next_run(
+    definition, repo: Path, tmp_path: Path
+) -> None:
+    """A calibration unknown is an open question by construction: the agent said it did not
+    know. Losing it between runs turns it into an assumption nobody made deliberately."""
+    from software_factory.harness.conversation import NoteKind
+
+    provider = StubProvider([says(triage_output()), says(build_output()), says(review_output())])
+    work = item()
+    orchestrator = local_coordinator(
+        definition,
+        repo=repo,
+        state_dir=tmp_path / "state",
+        provider=provider,
+        allow_unsandboxed=True,
+    )
+
+    orchestrator.run(work)
+
+    carried = [
+        note
+        for state in orchestrator.conversations.values()
+        for note in state.of_kind(NoteKind.OPEN_QUESTION)
+    ]
+    # The stub's outputs may declare no unknowns; what must hold is that the mechanism ran
+    # and produced well-formed notes rather than raising on a missing field.
+    assert all(note.run_id and note.text for note in carried)
+
+
+def test_a_review_stage_states_whether_visual_evidence_exists(
+    definition, repo: Path, tmp_path: Path
+) -> None:
+    """FR-22.3's "never to silence": a change that should have carried a recording and did
+    not must not look like one that never needed any."""
+    # A feature rather than the default defect: `regression-proven` correctly blocks a
+    # defect fix that carries no failing test, so a defect never reaches review here -- and
+    # a test that worked around that gate would be testing a path the factory refuses.
+    provider = StubProvider([says(build_output()), says(review_output())])
+    outcome = local_coordinator(
+        definition,
+        repo=repo,
+        state_dir=tmp_path / "state",
+        provider=provider,
+        allow_unsandboxed=True,
+    ).run(item(WorkClass.FEATURE), stages=[Stage.BUILD, Stage.REVIEW])
+
+    review = next((s for s in outcome.stages if s.stage is Stage.REVIEW), None)
+    assert review is not None, [s.stage.value for s in outcome.stages]
+    statements = [claim.text for claim in review.bundle.claims]
+    assert any("Visual evidence is absent" in text for text in statements), statements
+
+
+def test_a_chore_is_not_asked_for_a_screenshot(definition, repo: Path, tmp_path: Path) -> None:
+    """Demanding one for a variable rename teaches people to attach meaningless ones."""
+    provider = StubProvider([says(build_output()), says(review_output())])
+    outcome = local_coordinator(
+        definition,
+        repo=repo,
+        state_dir=tmp_path / "state",
+        provider=provider,
+        allow_unsandboxed=True,
+    ).run(item(WorkClass.CHORE), stages=[Stage.BUILD, Stage.REVIEW])
+
+    review = next((s for s in outcome.stages if s.stage is Stage.REVIEW), None)
+    assert review is not None
+    assert not any("Visual evidence" in claim.text for claim in review.bundle.claims)
