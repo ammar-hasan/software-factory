@@ -124,14 +124,20 @@ def test_reacquiring_your_own_lease_renews_it() -> None:
     this pass is its first."""
     book = LeaseBook()
     now = utc_now()
-    book.acquire("wi-1", ActionClass.UPDATE_CHANGE, holder="run-1", intent="pushing", now=now)
+    first = book.acquire(
+        "wi-1", ActionClass.UPDATE_CHANGE, holder="run-1", intent="pushing", now=now
+    )
+    assert isinstance(first, Lease)
 
+    # The token, not the name. `holder` is a string the caller supplies and nothing
+    # authenticates, so repeating it renewed a lease the caller might not hold.
     again = book.acquire(
         "wi-1",
         ActionClass.UPDATE_CHANGE,
         holder="run-1",
         intent="pushing",
         now=now + timedelta(minutes=2),
+        token=first.token,
     )
 
     assert isinstance(again, Lease)
@@ -141,11 +147,14 @@ def test_reacquiring_your_own_lease_renews_it() -> None:
 def test_releasing_someone_elses_lease_fails() -> None:
     """Silently allowing it would be a way to defeat the whole mechanism."""
     book = LeaseBook()
-    book.acquire("wi-1", ActionClass.COMMENT, holder="run-1", intent="x")
+    lease = book.acquire("wi-1", ActionClass.COMMENT, holder="run-1", intent="x")
+    assert isinstance(lease, Lease)
 
     assert book.release("wi-1", ActionClass.COMMENT, holder="run-2") is False
+    # Nor by naming the holder without their token: the name is not the claim.
+    assert book.release("wi-1", ActionClass.COMMENT, holder="run-1") is False
     assert book.held("wi-1", ActionClass.COMMENT) is not None
-    assert book.release("wi-1", ActionClass.COMMENT, holder="run-1") is True
+    assert book.release("wi-1", ActionClass.COMMENT, holder="run-1", token=lease.token) is True
 
 
 def test_active_leases_on_a_work_item_are_listable() -> None:
@@ -297,15 +306,37 @@ def test_a_complete_handoff_is_accepted_and_recorded() -> None:
 
 def test_two_actors_cannot_both_hand_the_same_item_back() -> None:
     """FR-19.5a: not locking a work item is deliberate, and must not extend to external
-    effects -- two handoffs is two visible artifacts."""
+    effects -- two handoffs is two visible artifacts.
+
+    This passed for the wrong reason. It relied on the *lease*, and the lease refused only
+    when the second actor volunteered a different name -- so `actor="amaya"` bypassed it,
+    and after the lease's TTL the duplicate was available to anyone. A handoff already on
+    the record is not a concurrency problem, so it is the record that refuses now.
+    """
     tools = server()
     tools.hand_back("wi-1", actor="amaya", branch="factory/wi-1", changed="fixed it")
 
     second = tools.hand_back("wi-1", actor="bo", branch="factory/wi-1-b", changed="also fixed it")
+    impostor = tools.hand_back("wi-1", actor="amaya", branch="factory/wi-1-c", changed="again")
 
     assert second["accepted"] is False
-    assert second["code"] == "handoff.leased"
+    assert second["code"] == "handoff.already_recorded"
     assert "amaya" in second["message"]
+    assert impostor["accepted"] is False, "naming the first actor bypassed the refusal"
+
+
+def test_a_second_handoff_is_available_when_it_says_it_amends_the_first() -> None:
+    """The legitimate case -- an amended branch, a corrected change reference -- must stay
+    possible, and must say so on the record rather than looking like a duplicate."""
+    tools = server()
+    tools.hand_back("wi-1", actor="amaya", branch="factory/wi-1", changed="fixed it")
+
+    amended = tools.hand_back(
+        "wi-1", actor="amaya", branch="factory/wi-1", changed="fixed it properly", amends=True
+    )
+
+    assert amended["accepted"] is True
+    assert amended["amends"] is True
 
 
 # ------------------------------------------------------------------------ tool specs

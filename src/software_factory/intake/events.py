@@ -28,6 +28,7 @@ from datetime import datetime
 from typing import Any
 
 from software_factory.digests import digest_parts
+from software_factory.errors import FactoryError
 from software_factory.memory.records import utc_now
 
 
@@ -57,6 +58,23 @@ class Origin:
     ref: str
     thread: str = ""
     url: str = ""
+    source: str = ""
+    """The coarse origin this event belongs to -- a repository, a channel, an alert source.
+
+    Distinct from `ref`, which is a *reply address* and is per-item in every real provider
+    (`acme/payments#42`). Backpressure keyed on `ref` meant "source" was "this one issue",
+    so the rate limit and the circuit breaker could not see the two failure modes FR-26.3
+    names: one source consuming the factory, and a failing deploy emitting thousands of
+    alerts that each look like a legitimate work item. Both arrive under many refs.
+
+    Falls back to `ref` when an adapter does not set it, which is a narrower bucket rather
+    than a wrong one.
+    """
+
+    @property
+    def source_key(self) -> str:
+        """What backpressure counts against."""
+        return self.source or self.ref
 
     def render(self) -> str:
         thread = f" ({self.thread})" if self.thread else ""
@@ -141,7 +159,7 @@ def matches(filter_spec: dict[str, Any], event: FactoryEvent) -> bool:
     """
     for key, expected in filter_spec.items():
         actual = _event_value(event, key)
-        if not _key_matches(expected, actual):
+        if not _key_matches(key, expected, actual):
             return False
     return True
 
@@ -157,8 +175,41 @@ def _event_value(event: FactoryEvent, key: str) -> Any:
     return event.attributes.get(key)
 
 
-def _key_matches(expected: Any, actual: Any) -> bool:
+class FilterError(FactoryError):
+    """A trigger filter this code cannot evaluate.
+
+    Raised rather than treated as a non-match. A filter nobody can evaluate is a
+    configuration error, and the two ways to be wrong about it are not symmetric: failing
+    open matches every event on the surface that reads attacker-written text.
+    """
+
+
+FILTER_OPERATORS = frozenset({"in", "not_in"})
+"""What a dict operand may contain. Anything else is refused, never ignored."""
+
+
+def _key_matches(key: str, expected: Any, actual: Any) -> bool:
     if isinstance(expected, dict):
+        unknown = sorted(set(expected) - FILTER_OPERATORS)
+        if unknown or not expected:
+            # A dict with no recognised operator used to fall through to True, so the key
+            # matched *everything*: a camelCase typo, or an operator borrowed from another
+            # config language, silently converted a restrictive filter into an open one.
+            # FR-18.6 makes restrictive the default, and the misconfigured case was the
+            # most permissive one -- on the surface that reads attacker-written text.
+            raise FilterError(
+                f"filter key {key!r} uses "
+                + (
+                    f"unknown operator(s) {', '.join(unknown)}"
+                    if unknown
+                    else "an empty operator object"
+                )
+                + f"; supported operators are {', '.join(sorted(FILTER_OPERATORS))}",
+                remediation=(
+                    "Use `in:` or `not_in:`, or give the key a plain value. An operator "
+                    "this code does not understand would otherwise match every event."
+                ),
+            )
         if "in" in expected and not _any_of(expected["in"], actual):
             return False
         # Both forms may appear on one key: `{"in": [...], "not_in": [...]}` reads as
@@ -195,14 +246,37 @@ def overlapping_keys(left: dict[str, Any], right: dict[str, Any]) -> bool:
     Used by lint (FR-18.4: overlapping automations must be reported). Conservative on
     purpose: it reports a possible overlap rather than proving one, because a false report
     costs a reader thirty seconds and a missed one costs every matching event twice.
+
+    It was doing the opposite in the one direction that matters. Reading only the `in` list
+    meant a `not_in` filter had an empty value set, so it intersected with nothing -- and a
+    filter did not overlap *itself*. A negative filter admits everything except what it
+    names, which is the widest thing a key can say, not the narrowest.
     """
-    for key in set(left) & set(right):
-        if not (_as_filter_values(left[key]) & _as_filter_values(right[key])):
-            return False
-    return True
+    return all(_values_can_meet(left[key], right[key]) for key in set(left) & set(right))
 
 
-def _as_filter_values(spec: Any) -> set[str]:
+def _values_can_meet(left: Any, right: Any) -> bool:
+    """Whether two specs for one key admit a common value."""
+    left_admits, left_excludes = _admitted(left)
+    right_admits, right_excludes = _admitted(right)
+
+    if left_admits is None and right_admits is None:
+        # Two negative filters. Both admit everything outside their exclusions, and no
+        # finite exclusion set covers every possible value.
+        return True
+    if left_admits is None:
+        assert right_admits is not None  # narrowed by the branch above
+        return bool(right_admits - left_excludes)
+    if right_admits is None:
+        return bool(left_admits - right_excludes)
+    return bool(left_admits & right_admits)
+
+
+def _admitted(spec: Any) -> tuple[set[str] | None, set[str]]:
+    """``(what it admits, what it excludes)``; ``None`` for "everything but the exclusions"."""
     if isinstance(spec, dict):
-        return _as_set(spec.get("in", []))
-    return _as_set(spec)
+        excludes = _as_set(spec.get("not_in", [])) if "not_in" in spec else set()
+        if "in" in spec:
+            return _as_set(spec["in"]) - excludes, excludes
+        return None, excludes
+    return _as_set(spec), set()

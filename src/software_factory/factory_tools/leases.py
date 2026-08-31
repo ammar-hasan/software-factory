@@ -24,6 +24,7 @@ Three properties matter:
 from __future__ import annotations
 
 import enum
+import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -67,6 +68,19 @@ class Lease:
 
     acquired_at: datetime = field(default_factory=utc_now)
     ttl: timedelta = DEFAULT_TTL
+    token: str = field(default_factory=lambda: secrets.token_urlsafe(16))
+    """The secret that proves a caller is the holder, rather than merely naming them.
+
+    `holder` is a string the caller supplies and nothing authenticates. Refusing only when
+    it *differed* meant claiming the holder's name renewed their lease -- so the second
+    actor handed the item back too, and FR-19.5a's "two handoffs is two visible artifacts"
+    held in fact while the tool surface reported `handoff.leased` as having prevented it.
+
+    This does not make a lease a permission: any caller in-process can read the token off
+    the returned lease. It makes it a *capability* rather than a guess, which is what turns
+    "advisory about intent" into a refusal that actually holds against the case that
+    prompted it -- a second agent choosing a name.
+    """
 
     @property
     def key(self) -> tuple[str, ActionClass]:
@@ -123,24 +137,33 @@ class LeaseBook:
         intent: str,
         ttl: timedelta = DEFAULT_TTL,
         now: datetime | None = None,
+        token: str = "",
     ) -> Lease | Held:
         """Take the lease, or say who has it.
 
         Re-acquiring a lease you already hold *renews* it rather than failing: an actor that
         loops -- open a change, push again, update it -- would otherwise have to remember
-        whether this pass is its first.
+        whether this pass is its first. "You already hold it" now means presenting the
+        lease's token, not repeating its holder's name: `holder` is a caller-supplied string
+        that nothing authenticates, so refusing only on a *different* name meant the lease
+        was bypassed by claiming the holder's.
         """
         now = now or utc_now()
         existing = self.held(work_item_id, action, now=now)
-        if existing is not None and existing.holder != holder:
+        if existing is not None and not secrets.compare_digest(token, existing.token):
+            same_name = existing.holder == holder
             return Held(
                 lease=existing,
                 message=existing.describe(now),
                 remediation=(
-                    "Wait for the lease to expire or be released, or coordinate with the "
-                    "holder. Picking up a work item does not claim it, but doing something "
-                    "externally visible to it twice produces two of the artifact."
-                ),
+                    "Present the token returned when the lease was taken, if this is the "
+                    "same actor resuming."
+                    if same_name
+                    else "Wait for the lease to expire or be released, or coordinate with "
+                    "the holder."
+                )
+                + " Picking up a work item does not claim it, but doing something "
+                "externally visible to it twice produces two of the artifact.",
             )
         lease = Lease(
             work_item_id=work_item_id,
@@ -149,6 +172,9 @@ class LeaseBook:
             intent=intent,
             acquired_at=now,
             ttl=ttl,
+            # Renewal keeps the original token, so a holder that loops does not have to
+            # thread a new one through each pass.
+            token=existing.token if existing is not None else secrets.token_urlsafe(16),
         )
         self.leases[lease.key] = lease
         return lease
@@ -174,12 +200,20 @@ class LeaseBook:
             now=now,
         )
 
-    def release(self, work_item_id: str, action: ActionClass, *, holder: str) -> bool:
+    def release(
+        self, work_item_id: str, action: ActionClass, *, holder: str, token: str = ""
+    ) -> bool:
         """Give up a lease. Returns False when it was not yours -- which is worth knowing,
         because releasing someone else's lease silently would be a way to defeat the whole
-        mechanism."""
+        mechanism.
+
+        Checked on the token for the same reason `acquire` is: a name anyone can type is not
+        a claim to anything.
+        """
         lease = self.leases.get((work_item_id, action))
         if lease is None or lease.holder != holder:
+            return False
+        if not secrets.compare_digest(token, lease.token):
             return False
         del self.leases[(work_item_id, action)]
         return True

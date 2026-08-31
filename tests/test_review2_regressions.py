@@ -1344,3 +1344,197 @@ def test_i9_every_capability_in_the_routing_map_is_warned_about(tmp_path) -> Non
     warned = " ".join(i.message for i in report.warnings if i.code == "principal.unheld_capability")
     for capability in {c.value for c in ANSWERED_BY.values()}:
         assert capability in warned, capability
+
+
+# ------------------------------------------------------------------- N5, N6
+
+
+def matching(filter_spec: dict, **attributes) -> bool:
+    from software_factory.intake import Origin, Provider
+    from software_factory.intake.events import FactoryEvent, matches
+
+    event = FactoryEvent(
+        id="e1",
+        provider=Provider.GIT_HOST,
+        event="issue.opened",
+        origin=Origin(provider=Provider.GIT_HOST, ref="acme/svc#1"),
+        title="t",
+        author="amaya",
+        attributes=attributes,
+    )
+    return matches(filter_spec, event)
+
+
+def test_n5_an_unrecognised_filter_operator_is_refused_not_ignored() -> None:
+    """A dict with neither `in` nor `not_in` fell through to True, so the key matched
+    everything.
+
+    `Trigger.filter` is `dict[str, Any]` and validation does not inspect its shape, so a
+    camelCase typo or an operator borrowed from another config language silently converted
+    a restrictive filter into an open one. FR-18.6 makes restrictive the default; here the
+    *misconfigured* case was maximally permissive, on the surface that reads attacker text.
+    """
+    from software_factory.intake.events import FilterError
+
+    for bad in ({"notIn": ["main"]}, {"not-in": ["main"]}, {"eq": "release"}, {}):
+        with pytest.raises(FilterError, match="operator"):
+            matching({"branch": bad}, branch="feature/x")
+
+
+def test_n5_the_recognised_operators_still_work() -> None:
+    assert matching({"branch": {"in": ["feature/x"]}}, branch="feature/x")
+    assert not matching({"branch": {"in": ["main"]}}, branch="feature/x")
+    assert matching({"branch": {"not_in": ["main"]}}, branch="feature/x")
+    assert not matching({"branch": {"not_in": ["feature/x"]}}, branch="feature/x")
+
+
+def test_n6_a_filter_overlaps_itself() -> None:
+    """`overlapping_keys` reported that a `not_in` filter could not collide with itself.
+
+    Its docstring says it is conservative on purpose -- reporting a possible overlap rather
+    than proving one -- and it was doing the opposite in the one direction that matters.
+    """
+    from software_factory.intake.events import overlapping_keys
+
+    for spec in ({"branch": {"not_in": ["main"]}}, {"label": "bug"}, {"label": {"in": ["bug"]}}):
+        assert overlapping_keys(spec, spec), spec
+
+
+def test_n6_a_negative_filter_overlaps_a_value_it_admits() -> None:
+    from software_factory.intake.events import overlapping_keys
+
+    assert overlapping_keys({"branch": {"not_in": ["main"]}}, {"branch": "feature/x"})
+    assert not overlapping_keys({"branch": {"not_in": ["main"]}}, {"branch": "main"})
+
+
+def test_n6_lint_reports_two_automations_that_share_a_filter(tmp_path) -> None:
+    """Lint skipped every filtered trigger, so two identical filters produced no warning
+    and both automations fired on the same event."""
+    from software_factory.definition.loader import load
+    from software_factory.definition.validate import validate
+    from software_factory.scaffold import init_factory
+
+    init_factory(tmp_path, name="ref", owner="amaya", repo="service")
+    source = next((tmp_path / "automations").glob("*/automation.md"))
+    twin = tmp_path / "automations" / "triage-b"
+    twin.mkdir()
+    (twin / "automation.md").write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
+    definition, report = load(tmp_path)
+    validate(definition, report)
+
+    assert "automation.overlapping_triggers" in {i.code for i in report.warnings}
+
+
+# --------------------------------------------------------------- N9, N10, N11
+
+
+def issue_event(number: int, *, label: str = "bug", repo: str = "acme/payments"):
+    from software_factory.intake import FactoryEvent, Origin, Provider
+
+    return FactoryEvent(
+        id=f"e{number}",
+        provider=Provider.GIT_HOST,
+        event="issue.opened",
+        origin=Origin(provider=Provider.GIT_HOST, ref=f"{repo}#{number}", source=repo),
+        title=f"bug {number}",
+        author="amaya",
+        attributes={"label": label},
+    )
+
+
+def bug_pipeline():
+    from software_factory.intake import Provider
+    from software_factory.intake.pipeline import Automation, Pipeline
+
+    return Pipeline(
+        automations=[
+            Automation(
+                name="triage",
+                agent="conductor",
+                prompt="triage it",
+                provider=Provider.GIT_HOST,
+                event="issue.opened",
+                filter={"label": "bug"},
+                require_known_author=False,
+            )
+        ]
+    )
+
+
+def test_n9_backpressure_binds_across_items_from_one_source() -> None:
+    """The key was `provider:origin.ref` -- a per-issue reply address -- so "source" meant
+    "this one issue".
+
+    FR-26.3's stated failure modes are "one source consumes the factory" and "a failing
+    deploy emits thousands of alerts, each looking like a legitimate work item". Both arrive
+    under many refs, so the limit and the breaker could not see them: the protection bound
+    only on the one shape it is not needed for, where fingerprint dedupe already applies.
+    """
+    from software_factory.intake import Refused
+
+    pipeline = bug_pipeline()
+    outcomes = [pipeline.receive(issue_event(n))[0] for n in range(200)]
+
+    refused = [o for o in outcomes if isinstance(o, Refused)]
+    assert refused, "200 issues on one repository did not trip a 30-per-window limit"
+    assert refused[0].code in {"intake.rate_limited", "intake.breaker_tripped"}
+
+
+def test_n10_events_that_match_nothing_do_not_spend_the_rate_limit() -> None:
+    """33 junk events parked a source for an hour without touching an automation.
+
+    The pipeline's own comment gets the principle right for duplicates -- "a duplicate is
+    not evidence of load" -- and did not apply it to the unmatched case, which is the same
+    argument. Anyone who could produce events could park intake for an hour, and under N2
+    everything arriving during the park was lost outright.
+    """
+    from software_factory.intake import Ignored, Started
+
+    pipeline = bug_pipeline()
+    for n in range(40):
+        outcome = pipeline.receive(issue_event(n, label="not-a-bug"))[0]
+        assert isinstance(outcome, Ignored), (n, outcome)
+
+    real = pipeline.receive(issue_event(999, label="bug"))[0]
+
+    assert isinstance(real, Started)
+
+
+def test_n11_a_lease_cannot_be_bypassed_by_naming_its_holder(tmp_path) -> None:
+    """`actor` is an unauthenticated string the caller supplies, and `acquire` refused only
+    when it differed from the holder -- so claiming the holder's name renewed their lease
+    and handed the item back a second time.
+
+    The test named for this passed only because the second actor volunteered a different
+    name. The module is honest that a lease is "advisory about intent, not about
+    permission", but the tool surface presents `handoff.leased` as a refusal that prevents
+    a duplicate external effect.
+    """
+    from software_factory.factory_tools.leases import ActionClass, Held, Lease, LeaseBook
+
+    book = LeaseBook()
+    first = book.acquire("wi-1", ActionClass.HANDOFF, holder="amaya", intent="opening a PR")
+    assert isinstance(first, Lease)
+
+    impostor = book.acquire(
+        "wi-1", ActionClass.HANDOFF, holder="amaya", intent="opening a PR", token="wrong"
+    )
+
+    assert isinstance(impostor, Held)
+    assert "token" in impostor.remediation
+
+
+def test_n11_the_holder_can_renew_with_its_own_token(tmp_path) -> None:
+    from software_factory.factory_tools.leases import ActionClass, Lease, LeaseBook
+
+    book = LeaseBook()
+    first = book.acquire("wi-1", ActionClass.HANDOFF, holder="amaya", intent="opening a PR")
+    assert isinstance(first, Lease)
+
+    renewed = book.acquire(
+        "wi-1", ActionClass.HANDOFF, holder="amaya", intent="opening a PR", token=first.token
+    )
+
+    assert isinstance(renewed, Lease)
+    assert renewed.token == first.token

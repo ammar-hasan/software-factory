@@ -722,29 +722,51 @@ def _check_ladder(definition: Definition, report: ValidationReport) -> None:
 
 
 def _check_automation_overlap(definition: Definition, report: ValidationReport) -> None:
-    """Two automations matching the same event both fire, doubling the work (FR-18.4)."""
-    seen: dict[tuple[str, str], list[str]] = {}
+    """Two automations matching the same event both fire, doubling the work (FR-18.4).
+
+    Filtered triggers are compared rather than skipped. `if trigger.filter: continue` read
+    as "filtered triggers may legitimately coexist", which is true of *some* pairs and not
+    of two carrying the identical filter -- and it meant the overlap check never once used
+    `overlapping_keys`, the function written for exactly this. Two automations with the
+    same filter both fired on the same event and lint reported nothing.
+    """
+    from software_factory.intake.events import overlapping_keys
+
+    by_event: dict[tuple[str, str], list[tuple[str, dict[str, object]]]] = {}
     for automation in definition.automations.values():
         if not automation.definition.enabled:
             continue
         for trigger in automation.definition.triggers:
-            if trigger.filter:
-                continue  # filtered triggers may legitimately coexist
-            seen.setdefault((trigger.provider, trigger.event), []).append(automation.name)
-    for (provider, event), names in seen.items():
-        if len(names) > 1:
-            report.add(
-                ValidationIssue(
-                    severity=Severity.WARNING,
-                    code="automation.overlap",
-                    message=(
-                        f"{len(names)} unfiltered automations match {provider}/{event} "
-                        f"({', '.join(sorted(names))}); each match starts its own run"
-                    ),
-                    path=definition.root,
-                    remediation="Add filters so at most one automation matches a given event.",
-                )
+            by_event.setdefault((trigger.provider, trigger.event), []).append(
+                (automation.name, dict(trigger.filter))
             )
+
+    for (provider, event), entries in sorted(by_event.items()):
+        for index, (name, filter_spec) in enumerate(entries):
+            for other_name, other_filter in entries[index + 1 :]:
+                if name == other_name or not overlapping_keys(filter_spec, other_filter):
+                    continue
+                both_unfiltered = not filter_spec and not other_filter
+                report.add(
+                    ValidationIssue(
+                        severity=Severity.WARNING,
+                        code=(
+                            "automation.overlap"
+                            if both_unfiltered
+                            else "automation.overlapping_triggers"
+                        ),
+                        message=(
+                            f"{name!r} and {other_name!r} can both match {provider}/{event}"
+                            + ("" if both_unfiltered else " despite their filters")
+                            + "; each match starts its own run"
+                        ),
+                        path=definition.root,
+                        remediation=(
+                            "Narrow the filters so at most one automation matches a given "
+                            "event, or accept the duplication deliberately."
+                        ),
+                    )
+                )
 
 
 def _all_skills(definition: Definition) -> Iterable[LoadedSkill]:

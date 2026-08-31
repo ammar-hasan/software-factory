@@ -95,7 +95,13 @@ class FactoryToolServer:
     leases: LeaseBook = field(default_factory=LeaseBook)
     active_runs: dict[str, list[str]] = field(default_factory=dict)
     notification_routes: tuple[str, ...] = ()
-    conversation: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+    conversation: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    """Every exchange on a work item, including handoffs.
+
+    Values are `Any` rather than `str` because a handoff entry carries `amends`, and
+    stringifying a boolean to keep the annotation narrow would make the record ambiguous at
+    exactly the point it decides whether a second handoff is a duplicate.
+    """
 
     # ------------------------------------------------------------------ read surface
 
@@ -216,6 +222,8 @@ class FactoryToolServer:
         changed: str = "",
         validated: str = "",
         remaining: str = "",
+        lease_token: str = "",
+        amends: bool = False,
     ) -> dict[str, Any]:
         """Return work to the factory (FR-19.6).
 
@@ -250,8 +258,33 @@ class FactoryToolServer:
                 ),
             }
 
+        # Two mechanisms, because there are two problems and one control cannot hold both.
+        # The lease bounds *concurrency* -- two actors mid-handoff at the same moment -- and
+        # expires, as a lease must. A handoff already on the record is not a concurrency
+        # problem and does not expire: FR-19.5a's "two handoffs is two visible artifacts"
+        # is about the artifact, so it is the record that refuses, permanently, and an
+        # intentional second handoff says `amends` out loud.
+        previous = self._recorded_handoff(work_item_id)
+        if previous is not None and not amends:
+            return {
+                "accepted": False,
+                "code": "handoff.already_recorded",
+                "message": (
+                    f"{previous['actor']} already handed {work_item_id} back; a second "
+                    "handoff produces a second visible artifact"
+                ),
+                "remediation": (
+                    "Update the existing change rather than opening another. If this "
+                    "genuinely supersedes it, pass `amends: true` so the record says so."
+                ),
+            }
+
         lease = self.leases.acquire(
-            work_item_id, ActionClass.HANDOFF, holder=actor, intent="handing work back"
+            work_item_id,
+            ActionClass.HANDOFF,
+            holder=actor,
+            intent="handing work back",
+            token=lease_token,
         )
         if isinstance(lease, Held):
             return {
@@ -265,22 +298,36 @@ class FactoryToolServer:
             {
                 "actor": actor,
                 "kind": "handoff",
+                "amends": amends,
                 "text": (
                     f"changed: {changed}\nvalidated: {validated or 'nothing stated'}\n"
                     f"remaining: {remaining or 'nothing stated'}"
                 ),
             }
         )
+        # Released once the handoff is recorded. Holding it for the full TTL blocked the
+        # *legitimate* second handoff -- an amended branch, a corrected change reference --
+        # while doing nothing about the duplicate it was taken to prevent, which is now
+        # prevented by the token above.
+        self.leases.release(work_item_id, ActionClass.HANDOFF, holder=actor, token=lease.token)
         return {
             "accepted": True,
             "workItem": work_item_id,
             "branch": branch,
             "changeRef": change_ref,
+            "amends": amends,
             "note": (
                 "Recorded on the same work item with the same history: there is no second "
                 "identity for locally continued work."
             ),
         }
+
+    def _recorded_handoff(self, work_item_id: str) -> dict[str, Any] | None:
+        """The first handoff already on this work item's record, if there is one."""
+        for entry in self.conversation.get(work_item_id, []):
+            if entry.get("kind") == "handoff":
+                return entry
+        return None
 
     # ------------------------------------------------------------------- tool specs
 

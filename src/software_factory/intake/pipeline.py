@@ -160,10 +160,21 @@ class Pipeline:
                 )
             ]
 
+        selected = [a for a in self.automations if a.selects(event)]
+        if not selected:
+            # Matched nothing, so it costs nothing. Backpressure used to run *before* this,
+            # and 33 events matching no automation would rate-limit and then trip the
+            # breaker, parking a real source for an hour -- reachable by anyone who can
+            # comment on an issue or fire a webhook, without ever touching an automation.
+            # The docstring on the fingerprint case has the principle exactly right ("a
+            # duplicate is not evidence of load") and it applies identically here: an
+            # event nobody acts on is not load.
+            return [Ignored(event=event)]
+
         admitted = self.backpressure.admit(
             Queued(
                 id=event.id,
-                source=f"{event.provider.value}:{event.origin.ref}",
+                source=f"{event.provider.value}:{event.origin.source_key}",
                 fingerprint=event.fingerprint,
                 queued_at=now,
             ),
@@ -179,10 +190,6 @@ class Pipeline:
                 )
             ]
 
-        selected = [a for a in self.automations if a.selects(event)]
-        if not selected:
-            return [Ignored(event=event)]
-
         outcomes: list[Outcome] = []
         for automation in selected:
             refusal = self._author_check(event, automation)
@@ -196,7 +203,7 @@ class Pipeline:
                     agent=automation.agent,
                     queued=Queued(
                         id=f"{event.id}:{automation.name}",
-                        source=f"{event.provider.value}:{event.origin.ref}",
+                        source=f"{event.provider.value}:{event.origin.source_key}",
                         priority=automation.priority,
                         fingerprint=event.fingerprint,
                         queued_at=now,
