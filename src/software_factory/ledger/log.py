@@ -89,7 +89,22 @@ class Ledger:
         """
         if not self.path.exists():
             return
-        raw = self.path.read_text(encoding="utf-8")
+        # Snapshot under the shared lock, then yield outside it. Two reasons for the split:
+        # a generator that holds a lock across an arbitrary consumer's work deadlocks the
+        # first caller who appends mid-iteration, and the `_unlocked` internals below run
+        # with the exclusive lock already held -- flock is per open file description, so a
+        # second acquisition from the same process blocks against the first.
+        with self._locked(shared=True):
+            raw = self.path.read_text(encoding="utf-8")
+        yield from self._entries(raw)
+
+    def _read_unlocked(self) -> Iterator[LedgerEntry]:
+        """`read` without acquiring the lock, for callers that already hold it."""
+        if not self.path.exists():
+            return
+        yield from self._entries(self.path.read_text(encoding="utf-8"))
+
+    def _entries(self, raw: str) -> Iterator[LedgerEntry]:
         lines = raw.splitlines()
         complete = raw.endswith("\n")
 
@@ -221,18 +236,27 @@ class Ledger:
 
     def _tail_unlocked(self) -> tuple[int, str]:
         last: LedgerEntry | None = None
-        for last in self.read():  # noqa: B007 - we want the final value
+        for last in self._read_unlocked():  # noqa: B007 - we want the final value
             pass
         return (last.seq, last.hash) if last else (0, GENESIS)
 
     @contextmanager
-    def _locked(self) -> Iterator[None]:
+    def _locked(self, *, shared: bool = False) -> Iterator[None]:
+        """Hold the ledger lock. ``shared`` lets concurrent readers in but excludes writers.
+
+        Readers used to take no lock at all. An append is one buffered `write()`, but
+        TextIOWrapper flushes in 8192-byte chunks, and PACK_ASSEMBLED and TOOL_CALLED
+        payloads routinely exceed that -- so a reader could observe the first chunk without
+        the second and raise "malformed ledger entry", reporting tampering that never
+        happened. `sf ledger verify` running while a worker appends is the case this
+        module's own docstring names as expected.
+        """
         if not _HAVE_FCNTL:  # pragma: no cover - Windows
             yield
             return
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock_path.open("a+") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
             try:
                 yield
             finally:

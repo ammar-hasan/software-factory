@@ -118,6 +118,15 @@ class ValidationIssue:
     key: str | None = None
     accepted: tuple[str, ...] = ()
     remediation: str = ""
+    depends_on: tuple[str, ...] = ()
+    """Definition entities this finding presumes were loaded.
+
+    A cross-reference check cannot tell "this agent does not exist" from "this agent's file
+    failed to parse", and reporting both buries the real error: one typo in the conductor's
+    file used to produce `factory.no_conductor` plus an `agent.unknown_fallback` for every
+    agent pointing at it. Naming the dependency lets the caller drop the consequences and
+    keep the cause.
+    """
 
     def location(self) -> str:
         if self.path is None:

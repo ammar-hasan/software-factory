@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 from software_factory.definition.models import AgentRole, SkillStatus, Stage
 from software_factory.memory.similarity import jaccard
+from software_factory.surfaces import surfaces_overlap
 
 DEFAULT_OFFER_SIZE = 7
 """How many skills an agent is offered per run.
@@ -495,11 +496,8 @@ class SkillRegistry:
 
 
 def _surface_match(declared: tuple[str, ...], actual: set[str]) -> bool:
-    return any(
-        path == pattern or path.startswith(pattern.rstrip("/*") + "/")
-        for pattern in declared
-        for path in actual
-    )
+    """One rule, shared with the spec's own path matching. See `software_factory.surfaces`."""
+    return surfaces_overlap(declared, actual)
 
 
 def _scope_overlap(left: SkillRecord, right: SkillRecord) -> float:

@@ -256,7 +256,10 @@ def _merge(cluster: list[Memory], store: MemoryStore) -> Memory:
 
     survivor.provenance = tuple(sorted(sources.values(), key=lambda s: s.identity()))
     survivor.evidence = tuple(sorted(evidence))
-    survivor.parents = tuple(sorted(parents))
+    # A merged member that listed the survivor -- or another member -- as a parent would
+    # otherwise make the survivor its own ancestor. That is where the cycles in the
+    # provenance graph come from in ordinary operation, not from hand-built data.
+    survivor.parents = tuple(sorted(parents - {m.id for m in cluster}))
     survivor.supersedes = tuple(sorted(supersedes))
     # Trust is monotone downward even within a group: a merge can only ever lower it.
     survivor.trust = derived_trust(*(m.trust for m in cluster))

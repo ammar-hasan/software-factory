@@ -67,7 +67,8 @@ class MemoryStore:
         """
         self._memories = {}
         if self.path.exists():
-            raw = self.path.read_text(encoding="utf-8")
+            with self._locked(shared=True):
+                raw = self.path.read_text(encoding="utf-8")
             lines = raw.splitlines()
             complete = raw.endswith("\n")
             for number, line in enumerate(lines, start=1):
@@ -261,16 +262,40 @@ class MemoryStore:
                 frontier.append(child.id)
         return found
 
-    def provenance_tree(self, memory_id: str) -> dict[str, Any]:
+    def provenance_tree(
+        self,
+        memory_id: str,
+        *,
+        _seen: frozenset[str] = frozenset(),
+        _depth: int = 0,
+        max_depth: int = 32,
+    ) -> dict[str, Any]:
         """The complete "why does this exist" answer (FR-6.11, memory.md M-34).
 
         A memory a human cannot trace is a memory a human should not accept, so this is
         the subsystem's primary trust instrument.
+
+        Cycle-aware and depth-bounded, which it was not: `descendants_of` ten lines above
+        carries a visited set precisely because provenance graphs are not guaranteed acyclic
+        once merges enter the picture, and this walked the same graph with none. Two
+        memories that were each other's parent raised RecursionError -- out of `sf memory
+        why`, the command whose docstring calls this the primary trust instrument. A
+        diamond needs no cycle to make the tree exponential in depth, so the bound matters
+        on its own.
+
+        A repeat is reported, never dropped: a node the reader has already seen appears as
+        `{"id": ..., "cycle": True}` rather than vanishing, because a provenance answer with
+        an edge silently missing is worse than one that says where it stopped.
         """
         self._ensure_loaded()
         memory = self._memories.get(memory_id)
         if memory is None:
             return {"id": memory_id, "found": False}
+        if memory_id in _seen:
+            return {"id": memory_id, "found": True, "cycle": True}
+        if _depth >= max_depth:
+            return {"id": memory_id, "found": True, "truncated": True, "depth": _depth}
+        seen = _seen | {memory_id}
         return {
             "id": memory.id,
             "found": True,
@@ -289,7 +314,10 @@ class MemoryStore:
                 if memory.promotion
                 else None
             ),
-            "parents": [self.provenance_tree(pid) for pid in memory.parents],
+            "parents": [
+                self.provenance_tree(pid, _seen=seen, _depth=_depth + 1, max_depth=max_depth)
+                for pid in memory.parents
+            ],
         }
 
     def mutations(self, memory_id: str | None = None) -> list[Mutation]:
@@ -297,7 +325,9 @@ class MemoryStore:
         history: list[Mutation] = []
         if not self.path.exists():
             return history
-        for line in self.path.read_text(encoding="utf-8").splitlines():
+        with self._locked(shared=True):
+            raw = self.path.read_text(encoding="utf-8")
+        for line in raw.splitlines():
             if not line.strip():
                 continue
             record = json.loads(line)
@@ -333,12 +363,21 @@ class MemoryStore:
         return counts
 
     @contextmanager
-    def _locked(self) -> Iterator[None]:
+    def _locked(self, *, shared: bool = False) -> Iterator[None]:
+        """Hold the store lock. ``shared`` lets concurrent readers in but excludes writers.
+
+        Readers used to take no lock. An append is one buffered `write()`, but
+        TextIOWrapper flushes in 8192-byte chunks, so a record longer than that reaches
+        disk in several `write(2)` calls and a concurrent reader could see the first
+        without the second -- then raise "malformed memory record", which reads as
+        tampering and, for `load()`, takes the whole fabric offline.
+        """
         if not _HAVE_FCNTL:  # pragma: no cover - Windows
             yield
             return
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock_path.open("a+") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
             try:
                 yield
             finally:

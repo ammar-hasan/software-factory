@@ -68,18 +68,33 @@ _FALSE_ENFORCEMENT = re.compile(
 
 
 def validate(definition: Definition, report: ValidationReport | None = None) -> ValidationReport:
-    """Run every cross-file check over a loaded definition."""
+    """Run every cross-file check over a loaded definition.
+
+    Findings that merely follow from a file that failed to parse are dropped. `load` returns
+    a partial tree on purpose -- `sf validate` exists to report every problem at once, and
+    stopping at the first unparseable file would report one -- but running cross-reference
+    checks over that partial tree produced phantoms: a typo in the conductor's file gave
+    `factory.no_conductor` plus an `agent.unknown_fallback` for every agent naming it, and
+    the one error a reader could act on was buried under the ones they could not.
+    """
     report = report or ValidationReport()
-    _check_conductor(definition, report)
-    _check_agent_references(definition, report)
-    _check_automation_references(definition, report)
-    _check_scorer_references(definition, report)
-    _check_review_independence(definition, report)
-    _check_skills(definition, report)
-    _check_secrets_declared(definition, report)
-    _check_runner_pinning(definition, report)
-    _check_ladder(definition, report)
-    _check_automation_overlap(definition, report)
+    scratch = ValidationReport()
+    _check_conductor(definition, scratch)
+    _check_agent_references(definition, scratch)
+    _check_automation_references(definition, scratch)
+    _check_scorer_references(definition, scratch)
+    _check_review_independence(definition, scratch)
+    _check_skills(definition, scratch)
+    _check_secrets_declared(definition, scratch)
+    _check_runner_pinning(definition, scratch)
+    _check_ladder(definition, scratch)
+    _check_automation_overlap(definition, scratch)
+
+    unloaded = definition.unloaded
+    for issue in scratch.issues:
+        if unloaded and (set(issue.depends_on) & unloaded):
+            continue
+        report.add(issue)
     return report
 
 
@@ -94,6 +109,7 @@ def _check_conductor(definition: Definition, report: ValidationReport) -> None:
                 code="factory.no_conductor",
                 message="no agent declares `role: CONDUCTOR`",
                 path=definition.root,
+                depends_on=tuple(sorted(definition.unloaded)),
                 remediation=(
                     "Exactly one agent must be the conductor -- the entry point and the "
                     "only agent that talks to the requester. Set `role: CONDUCTOR` on one."
@@ -135,6 +151,7 @@ def _check_runner_ref(
             message=f"{who} selects unknown runner {runner!r}",
             path=path,
             key="runner",
+            depends_on=(runner,),
             accepted=tuple(sorted(definition.runners)),
             remediation="Define `runners/<name>.yaml`, or select a runner that exists.",
         )
@@ -154,6 +171,7 @@ def _check_agent_references(definition: Definition, report: ValidationReport) ->
                     message=f"agent {agent.name!r} names unknown fallback agent {fallback!r}",
                     path=agent.path,
                     key="fallback",
+                    depends_on=(fallback,),
                     accepted=tuple(sorted(definition.agents)),
                     remediation="Name an agent that exists, or remove `fallback`.",
                 )
@@ -192,6 +210,7 @@ def _check_automation_references(definition: Definition, report: ValidationRepor
                     message=(f"automation {automation.name!r} routes to unknown agent {target!r}"),
                     path=automation.path,
                     key="agent",
+                    depends_on=(target,),
                     accepted=tuple(sorted(definition.agents)),
                     remediation="Route to an agent that exists, or omit `agent` to use the conductor.",
                 )
@@ -235,6 +254,7 @@ def _check_scorer_references(definition: Definition, report: ValidationReport) -
                         message=f"scorer {scorer.name!r} targets unknown agent {agent_name!r}",
                         path=scorer.path,
                         key="agents",
+                        depends_on=(agent_name,),
                         accepted=tuple(sorted(definition.agents)),
                         remediation="Target an agent that exists.",
                     )

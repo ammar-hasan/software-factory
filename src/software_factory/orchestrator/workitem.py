@@ -402,7 +402,73 @@ def validate_graph(
     if unreachable:
         problems.append(f"unreachable stage(s) from INTAKE: {', '.join(unreachable)}")
 
+    # The check the message above actually claims. Testing that `non_skippable` is
+    # non-empty says nothing about whether work has to pass through any of it.
+    #
+    # What closes the gap at runtime is not the transition table but the skip rule: an edge
+    # is refused when a non-skippable stage lies strictly between its endpoints *in the
+    # declared order*. So a bypass is a path to HANDOFF built only from edges that clear
+    # that rule and never land on a non-skippable stage. In the default graph
+    # TRIAGE -> HANDOFF is such an edge in the table and is refused in practice, because
+    # REVIEW sits between them in the order -- which is why this asks about the order and
+    # not only about the edges.
+    #
+    # The hole this catches is the one C1 showed to be real: a declared order that places
+    # HANDOFF *before* the non-skippable stage leaves an edge that skips nothing, passes
+    # the check, and reaches a human with no verification behind it.
+    if non_skippable and Stage.HANDOFF in transitions:
+        bypass = _bypass_path(transitions, non_skippable, tuple(order or DEFAULT_ORDER))
+        if bypass is not None:
+            problems.append(
+                "handoff is reachable without passing through any non-skippable stage "
+                f"({' -> '.join(stage.value for stage in bypass)}); "
+                "no transition on that path skips one, so nothing would refuse it"
+            )
+
     return problems
+
+
+def _bypass_path(
+    transitions: dict[Stage, frozenset[Stage]],
+    non_skippable: frozenset[Stage],
+    order: tuple[Stage, ...],
+) -> tuple[Stage, ...] | None:
+    """A path INTAKE -> HANDOFF that no rule would refuse and no check would cover.
+
+    Returned as the path rather than a boolean because "your graph has a hole" is not
+    actionable and "INTAKE -> BUILD -> HANDOFF is a hole" is.
+    """
+    if Stage.INTAKE in non_skippable:
+        return None
+
+    positions = {stage: index for index, stage in enumerate(order)}
+
+    def skips_a_check(from_stage: Stage, to_stage: Stage) -> bool:
+        """Whether the skip rule would refuse this edge. Mirrors ``StageMachine``."""
+        start, end = positions.get(from_stage), positions.get(to_stage)
+        if start is None or end is None or end <= start:
+            return False
+        return any(stage in non_skippable for stage in order[start + 1 : end])
+
+    frontier: list[tuple[Stage, ...]] = [(Stage.INTAKE,)]
+    seen = {Stage.INTAKE}
+    while frontier:
+        path = frontier.pop(0)
+        current = path[-1]
+        if current is Stage.HANDOFF:
+            return path
+        for target in sorted(transitions.get(current, frozenset()), key=lambda s: s.value):
+            # BLOCKED is a parking state, not a step: routing through it is the primitive
+            # C1 used to hide a skipped review, and the skip rule already measures a resume
+            # from where the item was parked. Treating it as a path step here would report
+            # a bypass the machine refuses.
+            if target in non_skippable or target in seen or target is Stage.BLOCKED:
+                continue
+            if skips_a_check(current, target):
+                continue
+            seen.add(target)
+            frontier.append((*path, target))
+    return None
 
 
 def new_id() -> str:

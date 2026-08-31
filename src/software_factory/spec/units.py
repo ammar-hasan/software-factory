@@ -16,6 +16,8 @@ from typing import Annotated, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from software_factory.surfaces import surfaces_overlap
+
 UNIT_ID = r"^[A-Z][A-Z0-9]{1,7}-[0-9]{1,6}$"
 UnitId = Annotated[str, StringConstraints(pattern=UNIT_ID)]
 """Spec unit ids look like ``PAY-101``.
@@ -215,13 +217,11 @@ class SpecUnit(BaseModel):
     def intersects(self, paths: set[str]) -> bool:
         """True when this unit governs any of ``paths``.
 
-        Prefix matching, so an anchor on a package covers files inside it.
+        Prefix matching, so an anchor on a package covers files inside it -- through the
+        same rule the skill registry uses, so the two cannot disagree about what a path
+        pattern means.
         """
-        for anchor in self.implements:
-            for path in paths:
-                if path == anchor.path or path.startswith(anchor.path.rstrip("/") + "/"):
-                    return True
-        return False
+        return surfaces_overlap(tuple(anchor.path for anchor in self.implements), paths)
 
 
 VAGUE = re.compile(

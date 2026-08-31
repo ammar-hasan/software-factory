@@ -1,8 +1,17 @@
 """Whole-tree, atomic definition loading (PRD FR-2.3).
 
-A definition either loads completely or not at all. There is no path that applies
-half a tree, because a factory running on half a definition is worse than a factory
-running on yesterday's.
+A definition either loads completely or not at all. There is no path that *applies* half
+a tree, because a factory running on half a definition is worse than a factory running on
+yesterday's -- :func:`load_strict` is that path and it raises.
+
+:func:`load` is the diagnostic path, and it does return a partial tree: `sf validate`
+exists to report every problem at once, and stopping at the first unparseable file would
+make it report one. What it must not do is let the partial tree be mistaken for a whole
+one, so every name whose file failed is recorded in ``Definition.unloaded`` and the
+cross-reference pass in :mod:`.validate` suppresses findings that are merely downstream of
+that absence -- otherwise one typo in the conductor's file produced `factory.no_conductor`
+plus an `agent.unknown_fallback` for every agent pointing at it, and the real error was
+buried in phantoms.
 
 The loader is deliberately I/O-bound and pure otherwise: it reads files, builds
 models, and collects issues. Cross-reference checking lives in :mod:`.validate`, and
@@ -101,6 +110,12 @@ class Definition:
     runners: dict[str, LoadedRunner] = field(default_factory=dict)
     scorers: dict[str, LoadedScorer] = field(default_factory=dict)
     skills: dict[str, LoadedSkill] = field(default_factory=dict)
+    unloaded: set[str] = field(default_factory=set)
+    """Names whose files failed to parse, so they are absent from the maps above.
+
+    A cross-reference finding about one of these is a consequence of the parse failure,
+    not an independent problem, and reporting both makes the real one harder to find.
+    """
 
     def conductor(self) -> LoadedAgent | None:
         from software_factory.definition.models import AgentRole
@@ -120,10 +135,12 @@ class Definition:
 def load(
     root: Path, *, report: ValidationReport | None = None
 ) -> tuple[Definition, ValidationReport]:
-    """Load the definition tree at ``root``.
+    """Load the definition tree at ``root``, reporting every problem rather than the first.
 
-    Returns the definition and a report. The definition is only meaningful when
-    ``report.ok`` -- callers that need a guarantee should use :func:`load_strict`.
+    Returns a definition and a report. The definition is *partial* when ``report`` carries
+    errors: files that failed to parse are absent from its maps and named in
+    ``definition.unloaded``. Callers that need a whole tree must use :func:`load_strict`,
+    which is the only function that applies one.
     """
     report = report or ValidationReport()
     root = root.resolve()
@@ -231,6 +248,7 @@ def _load_agents(root: Path, definition: Definition, report: ValidationReport) -
         doc = fm.parse(path)
         parsed = _build(AgentDefinition, _lift_execution(doc.frontmatter), path, doc, report)
         if parsed is None:
+            definition.unloaded.add(directory.name)
             continue
         skills: dict[str, LoadedSkill] = {}
         _load_skills(directory / "skills", skills, report, owner_agent=directory.name)
@@ -263,6 +281,7 @@ def _load_automations(root: Path, definition: Definition, report: ValidationRepo
         doc = fm.parse(path)
         parsed = _build(AutomationDefinition, _lift_execution(doc.frontmatter), path, doc, report)
         if parsed is None:
+            definition.unloaded.add(directory.name)
             continue
         definition.automations[directory.name] = LoadedAutomation(
             name=directory.name, path=path, definition=parsed, prompt=doc.body
@@ -279,6 +298,7 @@ def _load_runners(root: Path, definition: Definition, report: ValidationReport) 
             parsed = RunnerDefinition.model_validate(raw)
         except ValidationError as exc:
             _record_pydantic(exc, path, report, line_lookup=partial(fm.yaml_line_of, path))
+            definition.unloaded.add(path.stem)
             continue
         definition.runners[path.stem] = LoadedRunner(name=path.stem, path=path, definition=parsed)
 
@@ -303,6 +323,7 @@ def _load_scorers(root: Path, definition: Definition, report: ValidationReport) 
         doc = fm.parse(path)
         parsed = _build(ScorerDefinition, doc.frontmatter, path, doc, report)
         if parsed is None:
+            definition.unloaded.add(directory.name)
             continue
         if not doc.body.strip():
             report.add(

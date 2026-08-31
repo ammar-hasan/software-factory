@@ -2267,7 +2267,18 @@ guarantee that did not exist.
   table's key order. A security control must not change behaviour with a dict literal's
   ordering.
 
-### D.3 The general lesson
+### D.3 Findings that were real with the wrong trigger
+
+Two findings named a genuine hole and reproduced it with a case the code already handled.
+Both are recorded here rather than quietly re-scoped, because a fix that answers a different
+question from the one asked is how a review record stops meaning anything.
+
+| Finding | What the report said | What was actually true |
+| --- | --- | --- |
+| M38 | A graph declaring `non_skippable={TRIAGE}` with a legal `INTAKE → BUILD → REVIEW → HANDOFF` path validates clean while enforcing nothing. | That path is refused at runtime: skipping is measured against the declared *order*, and `TRIAGE` lies between `INTAKE` and `BUILD` in it. But the check `validate_graph` performed really was weaker than the message it printed. The hole it does leave is the one C1 exposed — a declared order placing `HANDOFF` *before* the non-skippable stage leaves an edge that skips nothing, passes the skip rule, and reaches a human unverified. The fix checks reachability through edges the skip rule would permit, not through the transition table alone. |
+| M39 | `load()` returns a partial tree, so cross-reference checks run against a tree missing the files that failed. | True, and the partiality is deliberate: `sf validate` exists to report every problem at once, and raising on the first unparseable file would report one. The defect was that nothing marked the tree as partial, so the checks invented phantoms. `Definition.unloaded` now names what failed and `validate()` drops the findings that merely follow from it. |
+
+### D.4 The general lesson
 
 Nine of the eleven critical findings were **a control that existed and was not wired in**,
 not a control nobody thought of. The document was right and the code did not implement it.

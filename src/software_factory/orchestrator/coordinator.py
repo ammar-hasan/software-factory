@@ -194,7 +194,10 @@ class Coordinator:
             payload={"title": item.title, "workClass": item.work_class.value},
         )
 
-        workspace = self.workspaces.create(run_id=item.id)
+        # A work item can be run more than once (a resume after a block), and each run
+        # starts from the source, so discarding the previous workspace is intended here
+        # rather than stumbled into.
+        workspace = self.workspaces.create(run_id=item.id, replace=True)
         try:
             for stage in stages or self._default_path(item):
                 moved = self.machine.advance(

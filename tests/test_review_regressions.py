@@ -2227,3 +2227,384 @@ def test_m19_the_effect_table_matches_the_registry_it_describes(tmp_path: Path) 
     }
 
     assert registered == BUILTIN_TOOL_EFFECTS
+
+
+# --------------------------------------------------------------------------------- M26
+# `provenance_tree` walked a graph the store itself documents as possibly cyclic.
+
+
+def test_m26_a_provenance_cycle_is_reported_not_a_recursion_error(tmp_path: Path) -> None:
+    """`descendants_of`, ten lines above, carries a visited set with the comment that
+    provenance graphs are not acyclic once merges enter the picture. This walked the same
+    graph with none, so `sf memory why` -- the command whose docstring calls this the
+    subsystem's primary trust instrument -- crashed with a traceback."""
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    store.load()
+    _chain_memory(store, "A", parents=("B",), lane=Lane.CANON)
+    _chain_memory(store, "B", parents=("A",), lane=Lane.CANON)
+
+    tree = store.provenance_tree("A")
+
+    assert tree["id"] == "A"
+    cycle_marked = tree["parents"][0]["parents"][0]
+    assert cycle_marked["cycle"] is True
+    assert cycle_marked["id"] == "A"
+
+
+def test_m26_a_deep_chain_is_truncated_rather_than_exploding(tmp_path: Path) -> None:
+    """A diamond needs no cycle to make the tree exponential in depth."""
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    store.load()
+    _chain_memory(store, "M0", lane=Lane.CANON)
+    for index in range(1, 60):
+        _chain_memory(store, f"M{index}", parents=(f"M{index - 1}",), lane=Lane.CANON)
+
+    tree = store.provenance_tree("M59", max_depth=4)
+
+    node = tree
+    for _ in range(4):
+        node = node["parents"][0]
+    assert node["truncated"] is True
+
+
+def test_m26_merging_does_not_make_the_survivor_its_own_parent(tmp_path: Path) -> None:
+    """`_merge` unions the cluster's parents into the survivor, so a member listing the
+    survivor as a parent made the survivor its own ancestor. That is where the cycles come
+    from in ordinary operation, not from hand-built data."""
+    from software_factory.memory.policing import _merge
+
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    store.load()
+    survivor = _chain_memory(store, "S", lane=Lane.CANDIDATE)
+    absorbed = _chain_memory(store, "T", parents=("S",), lane=Lane.CANDIDATE)
+
+    merged = _merge([survivor, absorbed], store)
+
+    assert merged.id not in merged.parents
+
+
+# --------------------------------------------------------------------------------- M30
+# Glob surface patterns never matched, and the exclusion reason read as correct.
+
+
+@pytest.mark.parametrize(
+    ("pattern", "path"),
+    [
+        ("*.py", "a.py"),
+        ("src/**", "src/a.py"),
+        ("src/importers", "src/importers/csv.py"),
+        ("src/importers/", "src/importers/csv.py"),
+        ("src/*/models.py", "src/app/models.py"),
+        ("Makefile", "Makefile"),
+    ],
+)
+def test_m30_declared_surface_patterns_match(pattern: str, path: str) -> None:
+    """`pattern.rstrip("/*")` strips trailing `/` and `*` characters and nothing else, so
+    `src/**` worked and `*.py` silently did not. An author whose skill declared `*.py` saw
+    it excluded with the reason "no surface overlap", which reads like a correct decision.
+    """
+    from software_factory.surfaces import surface_match
+
+    assert surface_match(pattern, path)
+
+
+@pytest.mark.parametrize(
+    ("pattern", "path"),
+    [("*.py", "a.txt"), ("src/**", "lib/a.py"), ("src/importers", "src/importers_old/x.py")],
+)
+def test_m30_unrelated_paths_still_do_not_match(pattern: str, path: str) -> None:
+    from software_factory.surfaces import surface_match
+
+    assert not surface_match(pattern, path)
+
+
+def test_m30_the_spec_and_the_skill_registry_agree_on_what_a_pattern_means() -> None:
+    """Two copies of one rule had already drifted; `SpecUnit.intersects` carried the prefix
+    half with none of the glob half."""
+    from software_factory.skills.registry import _surface_match
+    from software_factory.spec.units import CodeAnchor, SpecUnit, UnitStatus
+
+    unit = SpecUnit(
+        id="CAC-1",
+        title="cache policy",
+        status=UnitStatus.ACTIVE,
+        intent="The cache is disabled for admin routes.",
+        implements=(CodeAnchor(path="src/cache"),),
+    )
+
+    assert unit.intersects({"src/cache/policy.py"})
+    assert _surface_match(("src/cache",), {"src/cache/policy.py"})
+    assert not unit.intersects({"src/cache_old/policy.py"})
+    assert not _surface_match(("src/cache",), {"src/cache_old/policy.py"})
+
+
+# --------------------------------------------------------------------------------- M32
+# Readers took no lock and could observe a half-written line as tampering.
+
+
+def test_m32_a_reader_holds_a_shared_lock_while_snapshotting(tmp_path: Path) -> None:
+    """An append is one buffered write(), but TextIOWrapper flushes in 8192-byte chunks and
+    PACK_ASSEMBLED payloads routinely exceed that. A reader could see the first chunk
+    without the second and raise "malformed ledger entry" -- reporting tampering that never
+    happened, on `sf ledger verify` running while a worker appends, which this module's own
+    docstring names as the expected case.
+    """
+    import inspect
+
+    from software_factory.ledger import log as ledger_log
+
+    source = inspect.getsource(ledger_log.Ledger.read)
+    assert "_locked(shared=True)" in source
+
+    store_source = inspect.getsource(MemoryStore.load)
+    assert "_locked(shared=True)" in store_source
+
+
+def test_m32_a_reader_does_not_deadlock_against_a_writer_in_the_same_process(
+    tmp_path: Path,
+) -> None:
+    """flock is per open file description, so a second acquisition from the same process
+    blocks against the first. The internals that run under the exclusive lock must use the
+    unlocked read, or every append hangs."""
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    for index in range(5):
+        ledger.append(EntryType.RUN_STARTED, actor="test", subject=f"r{index}")
+
+    assert len(list(ledger.read())) == 5
+    ledger.verify()
+
+
+def test_m32_a_large_payload_round_trips_intact(tmp_path: Path) -> None:
+    """Bigger than the 8192-byte flush boundary, which is the size that made the race real."""
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append(
+        EntryType.PACK_ASSEMBLED, actor="test", subject="r1", payload={"pack": "x" * 20_000}
+    )
+
+    entries = list(ledger.read())
+
+    assert len(entries) == 1
+    assert len(entries[0].payload["pack"]) == 20_000
+
+
+# --------------------------------------------------------------------------------- M33
+# `reclaim()` with no argument deleted every workspace, including live ones.
+
+
+def test_m33_reclaim_requires_an_explicit_statement_of_what_is_live(tmp_path: Path) -> None:
+    """`keep` was optional and `keep=None` was indistinguishable from `keep=set()`, so a
+    scheduled `reclaim()` written without arguments destroyed every in-flight run's
+    uncommitted work -- and its checkpoint refs, which are the undo the courage clause
+    promises -- while `ignore_errors=True` reported nothing."""
+    from software_factory.runtime.workspace import WorkspaceFactory
+
+    factory = WorkspaceFactory(_seeded_repo(tmp_path / "repo"), tmp_path / "state")
+
+    with pytest.raises(TypeError):
+        factory.reclaim()  # type: ignore[call-arg]
+
+
+def test_m33_a_young_workspace_survives_an_empty_live_set(tmp_path: Path) -> None:
+    """A run that started moments ago is the one most likely to be missing from a `live`
+    set gathered while the orchestrator was restarting."""
+    from software_factory.runtime.workspace import WorkspaceFactory
+
+    factory = WorkspaceFactory(_seeded_repo(tmp_path / "repo"), tmp_path / "state")
+    workspace = factory.create(run_id="in-flight")
+
+    assert factory.reclaim(live=set()) == []
+    assert workspace.root.exists()
+
+
+def test_m33_create_refuses_to_destroy_an_existing_workspace_silently(tmp_path: Path) -> None:
+    """`run_id` is caller-supplied, so reusing one wiped the previous workspace without a
+    word."""
+    from software_factory.runtime.workspace import WorkspaceError, WorkspaceFactory
+
+    factory = WorkspaceFactory(_seeded_repo(tmp_path / "repo"), tmp_path / "state")
+    factory.create(run_id="wi-1")
+
+    with pytest.raises(WorkspaceError, match="already exists"):
+        factory.create(run_id="wi-1")
+
+    assert factory.create(run_id="wi-1", replace=True)
+
+
+# --------------------------------------------------------------------------------- M34
+# `_git` decoded strictly, so one binary asset crashed the keystone gate.
+
+
+def test_m34_reading_a_binary_file_at_a_commit_does_not_raise(tmp_path: Path) -> None:
+    """`git show <commit>:<path>` emits raw bytes, and `text=True` with no `errors=` uses
+    the locale codec with errors='strict'. `file_at` is documented as the primitive for
+    two-checkout gates like regression-proven, so a repository with a PNG in it crashed
+    that gate with UnicodeDecodeError -- straight past the `check=False` the caller passed
+    specifically to handle failure gracefully.
+    """
+    from software_factory.runtime.workspace import WorkspaceFactory
+
+    repo = _seeded_repo(tmp_path / "repo")
+    (repo / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\xff\xfe\xfd" * 40)
+    _run_git(repo, "add", "-A")
+    _run_git(repo, "commit", "-qm", "add a binary asset")
+
+    factory = WorkspaceFactory(repo, tmp_path / "state")
+    workspace = factory.create(run_id="wi-1")
+
+    assert workspace.file_at(workspace.base_commit, "logo.png") is None
+    assert workspace.file_at(workspace.base_commit, "README.md") is not None
+
+
+def test_m34_a_latin1_text_file_reads_without_raising(tmp_path: Path) -> None:
+    """The other half: a text file that is not UTF-8 must come back, not explode."""
+    from software_factory.runtime.workspace import WorkspaceFactory
+
+    repo = _seeded_repo(tmp_path / "repo")
+    (repo / "notes.txt").write_bytes("caf\xe9 na\xefve".encode("latin-1"))
+    _run_git(repo, "add", "-A")
+    _run_git(repo, "commit", "-qm", "add latin-1 notes")
+
+    factory = WorkspaceFactory(repo, tmp_path / "state")
+    workspace = factory.create(run_id="wi-1")
+
+    content = workspace.file_at(workspace.base_commit, "notes.txt")
+
+    assert content is not None
+    assert "na" in content
+
+
+def _run_git(repo: Path, *args: str) -> None:
+    import subprocess
+
+    subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        env={
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+            "HOME": str(repo),
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@localhost",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@localhost",
+        },
+    )
+
+
+def _seeded_repo(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    _run_git(path, "init", "-q", "-b", "main")
+    (path / "README.md").write_text("# repo\n", encoding="utf-8")
+    _run_git(path, "add", "-A")
+    _run_git(path, "commit", "-qm", "initial")
+    return path
+
+
+# --------------------------------------------------------------------------------- M38
+# The non-skippable invariant was stated in a message and never checked.
+
+
+def test_m38_a_graph_reaching_handoff_with_no_check_behind_it_is_rejected() -> None:
+    """The message said "at least one verification stage must precede handoff"; the check
+    only tested that the non-skippable set was non-empty. Skipping is enforced against the
+    declared *order*, so a graph placing HANDOFF before REVIEW in that order leaves an edge
+    that skips nothing, passes the skip rule, and reaches a human unverified.
+    """
+    from software_factory.orchestrator.workitem import validate_graph
+
+    transitions = {
+        Stage.INTAKE: frozenset({Stage.BUILD}),
+        Stage.BUILD: frozenset({Stage.HANDOFF}),
+        Stage.HANDOFF: frozenset({Stage.REVIEW}),
+        Stage.REVIEW: frozenset({Stage.COMPLETE}),
+        Stage.COMPLETE: frozenset(),
+    }
+    order = (Stage.INTAKE, Stage.BUILD, Stage.HANDOFF, Stage.REVIEW, Stage.COMPLETE)
+
+    problems = validate_graph(transitions, frozenset({Stage.REVIEW}), order)
+
+    assert any("without passing through any non-skippable stage" in p for p in problems)
+    assert any("INTAKE -> BUILD -> HANDOFF" in p for p in problems)
+
+
+def test_m38_the_default_graph_is_not_flagged() -> None:
+    """TRIAGE -> HANDOFF is an edge in the default table and is refused in practice, because
+    REVIEW sits between them in the declared order. A check that read the table alone would
+    condemn a graph that is actually sound."""
+    from software_factory.orchestrator.workitem import DEFAULT_ORDER, validate_graph
+
+    assert validate_graph(DEFAULT_TRANSITIONS, DEFAULT_NON_SKIPPABLE, DEFAULT_ORDER) == []
+
+
+# --------------------------------------------------------------------------------- M39
+# Cross-reference checks ran over a partial tree and invented errors.
+
+
+def test_m39_a_broken_agent_file_does_not_manufacture_phantom_errors(tmp_path: Path) -> None:
+    """One typo in the conductor's file produced `factory.no_conductor` plus an
+    `agent.unknown_fallback` for every agent naming it -- and the error a reader could act
+    on was buried under the ones they could not."""
+    from software_factory.definition.loader import load
+    from software_factory.definition.validate import validate
+
+    root = tmp_path / "factory"
+    (root / "agents" / "conductor").mkdir(parents=True)
+    (root / "agents" / "builder").mkdir(parents=True)
+    (root / "factory.yaml").write_text(
+        "schemaVersion: v1alpha1\n"
+        "name: payments\n"
+        "repositories:\n"
+        "  - owner: acme\n"
+        "    name: svc\n"
+        "agentDefaults:\n"
+        "  tier: small\n",
+        encoding="utf-8",
+    )
+    # The conductor's file names a role that does not exist: it will not parse.
+    (root / "agents" / "conductor" / "agent.md").write_text(
+        "---\nrole: NOT_A_ROLE\n---\nYou coordinate.\n", encoding="utf-8"
+    )
+    (root / "agents" / "builder" / "agent.md").write_text(
+        "---\nrole: BUILDER\nfallback: conductor\n---\nYou build.\n",
+        encoding="utf-8",
+    )
+
+    definition, report = load(root)
+    validate(definition, report)
+
+    codes = {issue.code for issue in report.errors}
+    assert "conductor" in definition.unloaded
+    assert any(code.startswith("field.") or "role" in code for code in codes), codes
+    assert "factory.no_conductor" not in codes
+    assert "agent.unknown_fallback" not in codes
+
+
+def test_m39_a_genuinely_missing_reference_is_still_reported(tmp_path: Path) -> None:
+    """The fix must not turn the cross-reference pass off. A reference to something that
+    was never declared is a real error, not a consequence of a parse failure."""
+    from software_factory.definition.loader import load
+    from software_factory.definition.validate import validate
+
+    root = tmp_path / "factory"
+    (root / "agents" / "conductor").mkdir(parents=True)
+    (root / "factory.yaml").write_text(
+        "schemaVersion: v1alpha1\n"
+        "name: payments\n"
+        "repositories:\n"
+        "  - owner: acme\n"
+        "    name: svc\n"
+        "agentDefaults:\n"
+        "  tier: small\n",
+        encoding="utf-8",
+    )
+    (root / "agents" / "conductor" / "agent.md").write_text(
+        "---\nrole: CONDUCTOR\nfallback: nobody\n---\nYou coordinate.\n",
+        encoding="utf-8",
+    )
+
+    definition, report = load(root)
+    validate(definition, report)
+
+    assert not definition.unloaded
+    assert "agent.unknown_fallback" in {issue.code for issue in report.errors}

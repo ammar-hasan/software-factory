@@ -11,11 +11,17 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 
 from software_factory.errors import FactoryError
+
+#: Git's empty-tree object. Diffing against it turns "what is in this commit" into a
+#: numstat, whose ``-\t-\t`` prefix is git's own answer for "this file is binary".
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 
 class WorkspaceError(FactoryError):
@@ -46,6 +52,12 @@ def _git(args: list[str], *, cwd: Path, check: bool = True) -> subprocess.Comple
         cwd=cwd,
         capture_output=True,
         text=True,
+        # `git show <commit>:<path>` emits the file's raw bytes, so strict decoding raised
+        # UnicodeDecodeError -- not WorkspaceError -- straight past the `check=False` a
+        # caller passed specifically to handle failure gracefully. One binary asset in a
+        # repository was enough to crash `regression-proven`, the keystone gate, whose
+        # two-checkout comparison is built on `file_at`.
+        errors="replace",
         check=False,
         env={
             "PATH": "/usr/bin:/bin:/usr/local/bin",
@@ -129,7 +141,17 @@ class Workspace:
             return None
 
     def file_at(self, commit: str, relative: str) -> str | None:
-        """A file's content at another commit, for two-checkout gates like regression-proven."""
+        """A file's content at another commit, for two-checkout gates like regression-proven.
+
+        ``None`` for a path that does not exist there *and* for one git reports as binary.
+        A mangled string full of replacement characters would compare unequal to itself
+        across two checkouts and read as a change that never happened.
+        """
+        probe = _git(
+            ["diff", "--numstat", EMPTY_TREE, commit, "--", relative], cwd=self.root, check=False
+        )
+        if probe.returncode == 0 and probe.stdout.startswith("-\t-\t"):
+            return None
         result = _git(["show", f"{commit}:{relative}"], cwd=self.root, check=False)
         return result.stdout if result.returncode == 0 else None
 
@@ -141,11 +163,18 @@ class WorkspaceFactory:
         self.source = Path(source).resolve()
         self.state_dir = Path(state_dir).resolve()
 
-    def create(self, *, run_id: str | None = None, ref: str = "HEAD") -> Workspace:
+    def create(
+        self, *, run_id: str | None = None, ref: str = "HEAD", replace: bool = False
+    ) -> Workspace:
         """Clone the source into a fresh directory at ``ref``.
 
         A local clone rather than a worktree: worktrees share the object store and a
         `git clean` in one can surprise another, and isolation is the point.
+
+        ``run_id`` is caller-supplied, so reusing one used to delete the previous
+        workspace -- its uncommitted work and its checkpoint refs, which are the undo the
+        courage clause promises -- without a word. Destroying a workspace is now something
+        a caller asks for with ``replace=True``, never something it stumbles into.
         """
         if not (self.source / ".git").exists():
             raise WorkspaceError(
@@ -156,6 +185,14 @@ class WorkspaceFactory:
         run_id = run_id or f"run_{uuid.uuid4().hex[:12]}"
         root = self.state_dir / "workspaces" / run_id
         if root.exists():
+            if not replace:
+                raise WorkspaceError(
+                    f"a workspace for run {run_id!r} already exists at {root}",
+                    remediation=(
+                        "Use a different run id, reclaim the old workspace first, or pass "
+                        "replace=True to discard it deliberately."
+                    ),
+                )
             shutil.rmtree(root)
         root.parent.mkdir(parents=True, exist_ok=True)
 
@@ -172,19 +209,46 @@ class WorkspaceFactory:
         if workspace.root.exists():
             shutil.rmtree(workspace.root, ignore_errors=True)
 
-    def reclaim(self, *, keep: set[str] | None = None) -> list[str]:
+    def reclaim(
+        self,
+        *,
+        live: set[str],
+        older_than: timedelta = timedelta(hours=6),
+        now: float | None = None,
+    ) -> list[str]:
         """Remove workspaces for runs that are no longer live (PRD FR-28.6).
 
-        Without this, a factory fills the disk within days of normal operation, and a
-        full disk during a chained ledger append is this design's worst corruption mode.
+        Without this, a factory fills the disk within days of normal operation, and a full
+        disk during a chained ledger append is this design's worst corruption mode.
+
+        Two conditions, both required, and neither with a default that means "everything".
+        ``live`` was previously an optional ``keep`` set, so ``reclaim()`` written without
+        arguments -- or one whose set came back empty because the orchestrator happened to
+        be restarting -- deleted every in-flight run's uncommitted work and its checkpoint
+        refs with it, reporting nothing, because ``ignore_errors=True`` swallowed the lot.
+        ``live`` is now required, and age is the second condition: a workspace younger than
+        ``older_than`` is left alone even when it is absent from ``live``, because a run
+        that started moments ago is the one most likely to be missing from a stale list.
+
+        Removal failures are returned as part of the answer rather than silenced: a
+        reclaim that could not reclaim is something an operator watching disk needs told.
         """
-        keep = keep or set()
         base = self.state_dir / "workspaces"
         if not base.is_dir():
             return []
+        cutoff = (now if now is not None else time.time()) - older_than.total_seconds()
         removed = []
-        for path in base.iterdir():
-            if path.is_dir() and path.name not in keep:
-                shutil.rmtree(path, ignore_errors=True)
-                removed.append(path.name)
+        for path in sorted(base.iterdir()):
+            if not path.is_dir() or path.name in live:
+                continue
+            if path.stat().st_mtime > cutoff:
+                continue
+            try:
+                shutil.rmtree(path)
+            except OSError as exc:
+                raise WorkspaceError(
+                    f"could not reclaim workspace {path.name}: {exc}",
+                    remediation=("Check for a process still holding files open in it, then retry."),
+                ) from exc
+            removed.append(path.name)
         return sorted(removed)

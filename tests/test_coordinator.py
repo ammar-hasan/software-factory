@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -294,7 +295,9 @@ def test_workspaces_are_reclaimable(definition, repo: Path, tmp_path: Path) -> N
     work = item()
     coordinator(definition, repo, tmp_path, provider).run(work)
 
-    removed = WorkspaceFactory(repo, tmp_path / "state").reclaim()
+    removed = WorkspaceFactory(repo, tmp_path / "state").reclaim(
+        live=set(), older_than=timedelta(0)
+    )
 
     assert work.id in removed
 

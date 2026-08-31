@@ -694,6 +694,18 @@ def memory_why(
 
 def _render_provenance(node: dict[str, Any], *, depth: int) -> None:
     indent = "  " * depth
+    # The tree can carry a `cycle` or `truncated` marker instead of a full node. Both are
+    # printed, never skipped: a reader tracing why a memory exists needs to know the walk
+    # stopped and where, and a silently missing branch reads as a shorter provenance.
+    if node.get("cycle"):
+        console.print(f"{indent}[bold]{node['id']}[/] [yellow](already shown above)[/]")
+        return
+    if node.get("truncated"):
+        console.print(f"{indent}[bold]{node['id']}[/] [yellow](depth limit reached)[/]")
+        return
+    if not node.get("found", False):
+        console.print(f"{indent}[bold]{node['id']}[/] [red](not found)[/]")
+        return
     console.print(
         f"{indent}[bold]{node['id']}[/] [dim]({node['lane']}, {node['kind']}, "
         f"trust {node['trust']}, confidence {node['confidence']:.2f})[/]"

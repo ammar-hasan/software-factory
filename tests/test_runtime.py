@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -149,12 +150,23 @@ def test_a_file_can_be_read_at_the_parent_commit(factory: WorkspaceFactory) -> N
 def test_reclaim_removes_workspaces_for_finished_runs(factory: WorkspaceFactory) -> None:
     """Without this a factory fills the disk within days of normal operation."""
     factory.create(run_id="finished")
-    live = factory.create(run_id="live")
+    running = factory.create(run_id="live")
 
-    removed = factory.reclaim(keep={"live"})
+    removed = factory.reclaim(live={"live"}, older_than=timedelta(0))
 
     assert removed == ["finished"]
-    assert live.root.exists()
+    assert running.root.exists()
+
+
+def test_reclaim_spares_a_workspace_younger_than_the_age_bound(
+    factory: WorkspaceFactory,
+) -> None:
+    """A run that started moments ago is the one most likely to be missing from a `live`
+    set gathered while the orchestrator was restarting."""
+    just_started = factory.create(run_id="fresh")
+
+    assert factory.reclaim(live=set()) == []
+    assert just_started.root.exists()
 
 
 # --------------------------------------------------------------------------- executor
