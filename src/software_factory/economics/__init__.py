@@ -19,6 +19,7 @@ from software_factory.economics.spend import (
     Ledgerless,
     SpendCap,
     SpendReport,
+    charges_from,
 )
 
 __all__ = [
@@ -37,5 +38,6 @@ __all__ = [
     "SourceLimits",
     "SpendCap",
     "SpendReport",
+    "charges_from",
     "fingerprint_of",
 ]

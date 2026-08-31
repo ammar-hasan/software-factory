@@ -1022,3 +1022,136 @@ def test_providers_reports_an_unknown_name_without_failing_the_others(tmp_path: 
     assert len(body["tiers"]) == 2
     assert body["tiers"][0]["usable"] is False
     assert body["tiers"][1]["usable"] is True
+
+
+# ------------------------------------------------------------------- sf checkpoints
+
+
+def ledger_with_checkpoint(root: Path) -> Path:
+    """A ledger carrying one open checkpoint, as the coordinator would write it."""
+    from software_factory.identity import Capability
+    from software_factory.identity.checkpoints import CheckpointKind
+    from software_factory.ledger import EntryType, Ledger
+
+    path = root / "ledger.jsonl"
+    Ledger(path).append(
+        EntryType.CHECKPOINT_OPENED,
+        actor="coordinator",
+        subject="wi-1:widen",
+        payload={
+            "kind": CheckpointKind.BLAST_RADIUS_WIDENING.value,
+            "workItem": "wi-1",
+            "question": "widen the radius to touch the migrations directory?",
+            "capability": Capability.WIDEN_BLAST_RADIUS.value,
+            "origin": "cli",
+        },
+    )
+    return path
+
+
+def test_checkpoints_list_shows_what_is_waiting_on_a_person(scaffold: Path) -> None:
+    """`checkpoints.py` told users to run `sf checkpoints`. The command did not exist, and
+    nothing anywhere opened a checkpoint -- the whole mechanism was reachable from nothing.
+    """
+    path = ledger_with_checkpoint(scaffold)
+
+    body = payload(
+        runner.invoke(
+            app, ["checkpoints", "list", str(path), "--factory", str(scaffold), "--json"]
+        ).output
+    )
+
+    assert body["open"] == 1
+    assert body["checkpoints"][0]["workItem"] == "wi-1"
+    assert body["checkpoints"][0]["routableTo"], "a checkpoint nobody can clear is a dead end"
+
+
+def test_resolving_a_checkpoint_records_who_decided_and_why(scaffold: Path) -> None:
+    path = ledger_with_checkpoint(scaffold)
+    who = payload(runner.invoke(app, ["principals", str(scaffold), "--json"]).output)
+    approver = next(p["id"] for p in who["principals"] if "widen_blast_radius" in p["capabilities"])
+
+    result = runner.invoke(
+        app,
+        [
+            "checkpoints",
+            "resolve",
+            str(path),
+            "wi-1:widen",
+            "--as",
+            approver,
+            "--answer",
+            "yes: the migration is the change, and it is reviewed",
+            "--factory",
+            str(scaffold),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    decision = payload(result.output)["decision"]
+    assert decision["principal"] == approver
+    assert "reviewed" in decision["rationale"]
+
+    after = payload(
+        runner.invoke(
+            app, ["checkpoints", "list", str(path), "--factory", str(scaffold), "--json"]
+        ).output
+    )
+    assert after["open"] == 0
+
+
+def test_a_principal_without_the_capability_cannot_resolve(scaffold: Path) -> None:
+    """The answer `sf principals` prints has to be the answer that binds."""
+    path = ledger_with_checkpoint(scaffold)
+
+    result = runner.invoke(
+        app,
+        [
+            "checkpoints",
+            "resolve",
+            str(path),
+            "wi-1:widen",
+            "--as",
+            "nobody-at-all",
+            "--answer",
+            "sure",
+            "--factory",
+            str(scaffold),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert payload(result.output)["code"] == "identity.unknown_principal"
+
+
+# ------------------------------------------------------------- sf govern sweep/erase
+
+
+def test_govern_sweep_is_a_dry_run_unless_told_otherwise(scaffold: Path) -> None:
+    """A retention report that asserts deletions it did not make is shaped to be shown to
+    an auditor, so it must not be a positive claim nothing established."""
+    path = ledger_with_checkpoint(scaffold)
+
+    body = payload(runner.invoke(app, ["govern", "sweep", str(path), "--json"]).output)
+
+    assert body["sweep"]["dryRun"] is True
+    assert body["sweep"]["acted"] is False
+    assert body["sweep"]["examined"] >= 1
+
+
+def test_govern_erase_says_what_it_cannot_erase(scaffold: Path) -> None:
+    """The ledger holds references and decisions, never bodies. A subject is entitled to
+    know that, not to be told everything is gone."""
+    path = ledger_with_checkpoint(scaffold)
+
+    body = payload(
+        runner.invoke(
+            app, ["govern", "erase", str(path), "coordinator", "--by", "human:dpo", "--json"]
+        ).output
+    )
+
+    assert body["erasure"]["examined"] >= 1
+    assert body["erasure"]["unerasable"], "the ledger is unerasable by design and must say so"
+    assert body["erasure"]["complete"] is False, "a dry run has not completed anything"

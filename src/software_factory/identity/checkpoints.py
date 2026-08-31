@@ -19,8 +19,10 @@ checkpoint as answered, which is the only guarantee a policy layer can honestly 
 from __future__ import annotations
 
 import enum
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Any
 
 from software_factory.identity.principals import (
     Capability,
@@ -28,6 +30,7 @@ from software_factory.identity.principals import (
     Directory,
     Refused,
 )
+from software_factory.ledger.entry import EntryType
 from software_factory.memory.records import utc_now
 
 
@@ -141,6 +144,37 @@ class CheckpointBook:
             )
         self.checkpoints[checkpoint.id] = checkpoint
         return checkpoint
+
+    @classmethod
+    def from_ledger(cls, entries: Iterable[Any], directory: Directory) -> CheckpointBook:
+        """Rebuild the open checkpoints from the ledger.
+
+        The ledger is the durable store: a checkpoint has to outlive the process that
+        opened it, or "a person decides" means "a person decides before the run ends".
+        Resolved ones are folded back in as resolved rather than dropped, so answering a
+        checkpoint twice is refused rather than silently re-recorded.
+        """
+        book = cls(directory=directory)
+        for entry in entries:
+            if entry.type is EntryType.CHECKPOINT_OPENED:
+                kind = str(entry.payload.get("kind", ""))
+                if kind not in set(CheckpointKind):
+                    continue
+                book.checkpoints[str(entry.subject)] = Checkpoint(
+                    id=str(entry.subject),
+                    kind=CheckpointKind(kind),
+                    work_item_id=str(entry.payload.get("workItem", "")),
+                    question=str(entry.payload.get("question", "")),
+                    asked_by=str(entry.actor),
+                    origin=str(entry.payload.get("origin", "cli")),
+                    opened_at=datetime.fromisoformat(entry.ts.replace("Z", "+00:00")),
+                )
+            elif entry.type is EntryType.CHECKPOINT_RESOLVED:
+                held = book.checkpoints.get(str(entry.subject))
+                if held is not None:
+                    held.status = CheckpointStatus.RESOLVED
+                    held.answer = str(entry.payload.get("answer", ""))
+        return book
 
     def routable_to(self, checkpoint_id: str) -> list[str]:
         """Who can clear this checkpoint. The notification's recipient list."""

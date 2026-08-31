@@ -17,6 +17,7 @@ from typing import Any
 from software_factory.definition.loader import Definition
 from software_factory.definition.models import AgentRole, Effect, Stage
 from software_factory.definition.resolve import resolve_for_agent
+from software_factory.economics.spend import Ledgerless, SpendCap, charges_from
 from software_factory.evals.evidence import EvidenceBundle, EvidenceClass, EvidenceItem
 from software_factory.evals.gates import GateContext, GateReport, ViolationClass, run_gates
 from software_factory.evals.recording import (
@@ -56,6 +57,8 @@ from software_factory.harness.sections import (
     terrain_builder,
 )
 from software_factory.harness.tools import BlastRadius, Grants
+from software_factory.identity.checkpoints import Checkpoint, CheckpointBook, CheckpointKind
+from software_factory.identity.loading import directory_from
 from software_factory.ledger import EntryType, Ledger
 from software_factory.memory.records import utc_now
 from software_factory.memory.store import MemoryStore
@@ -185,6 +188,7 @@ class Coordinator:
         pack_budget_tokens: int = 6000,
         allow_unsandboxed: bool = False,
         recording_policy: RecordingPolicy | None = None,
+        spend_cap: SpendCap | None = None,
     ) -> None:
         self.definition = definition
         self.provider = provider
@@ -197,6 +201,20 @@ class Coordinator:
         self.machine = StageMachine()
         self.allow_unsandboxed = allow_unsandboxed
         self.recording_policy = recording_policy or RecordingPolicy()
+        self.directory = directory_from(definition)
+        self.checkpoints = CheckpointBook(directory=self.directory)
+        """The book is built here rather than by a caller because a coordinator with no
+        checkpoint book enforces no human checkpoints at all, and that was the state of the
+        world: `identity/` was complete, tested, and reachable from nothing."""
+
+        self.spend_cap = spend_cap
+        """Optional, and absent means unbounded rather than zero.
+
+        A factory may legitimately run without a cap -- a local one against a local model
+        costs nothing to bound. What it may not do is carry a cap that nothing consults,
+        which is what a `sf spend` report with no enforcement path amounts to.
+        """
+
         self.conversations: dict[tuple[str, str], ConversationState] = {}
         """Per (work item, agent). FR-3.7 asks a specialist to continue *its* conversation,
         which is not the same as the work item's history: two agents on one item have two
@@ -216,12 +234,25 @@ class Coordinator:
             payload={"title": item.title, "workClass": item.work_class.value},
         )
 
+        refusal = self._cap_refusal(starting=True)
+        if refusal is not None:
+            self._block(item, Blocker.BUDGET_EXCEEDED, refusal)
+            return outcome
+
         # A work item can be run more than once (a resume after a block), and each run
         # starts from the source, so discarding the previous workspace is intended here
         # rather than stumbled into.
         workspace = self.workspaces.create(run_id=item.id, replace=True)
         try:
             for stage in stages or self._default_path(item):
+                # Checked per stage, not once at the start: a long work item can cross the
+                # halt threshold halfway through, and the point of a halt is that it stops
+                # spending rather than that it declines to begin.
+                refusal = self._cap_refusal(starting=False)
+                if refusal is not None:
+                    self._block(item, Blocker.BUDGET_EXCEEDED, refusal)
+                    break
+
                 moved = self.machine.advance(
                     item, stage, actor="coordinator", reason=f"entering {stage.value}"
                 )
@@ -233,11 +264,18 @@ class Coordinator:
                 outcome.stages.append(stage_outcome)
 
                 if not stage_outcome.advanced:
-                    self._block(
-                        item,
-                        self._blocker_for(stage_outcome),
-                        self._action_for(stage_outcome),
-                    )
+                    blocker = self._blocker_for(stage_outcome)
+                    action = self._action_for(stage_outcome)
+                    if blocker is Blocker.GATE_FAILED_TERMINAL and (
+                        stage_outcome.run.status is RunStatus.CONTRACT_VIOLATION
+                    ):
+                        # A run that tried to act outside its declared blast radius is one
+                        # of FR-16.1's named checkpoints: only a person may widen it. This
+                        # is the coordinator's one call into `CheckpointBook`, and until it
+                        # existed the whole checkpoint mechanism was reachable from
+                        # nothing -- a factory enforced no human checkpoints at all.
+                        blocker, action = self._open_widening_checkpoint(item, action)
+                    self._block(item, blocker, action)
                     break
 
             outcome.diff = workspace.diff()
@@ -691,6 +729,71 @@ class Coordinator:
             }
         )
 
+    def _open_widening_checkpoint(self, item: WorkItem, detail: str) -> tuple[Blocker, str]:
+        """Ask a person to widen the blast radius, or say why nobody can be asked.
+
+        `CheckpointBook.open` refuses a checkpoint no principal could clear, which is the
+        right refusal and the wrong place to raise: a definition that grants
+        `widen_blast_radius` to nobody is a configuration problem, not a crash. So the
+        refusal becomes the blocker's action, which is where an operator will read it.
+        """
+        checkpoint = Checkpoint(
+            id=f"{item.id}:widen",
+            kind=CheckpointKind.BLAST_RADIUS_WIDENING,
+            work_item_id=item.id,
+            question=(
+                f"This run stopped at a grant boundary: {detail}. Widen the blast radius "
+                "for this work item, or leave it stopped?"
+            ),
+            asked_by="coordinator",
+            origin=item.source.provider,
+        )
+        try:
+            self.checkpoints.open(checkpoint)
+        except ValueError as exc:
+            return Blocker.GATE_FAILED_TERMINAL, str(exc)
+
+        self.ledger.append(
+            EntryType.CHECKPOINT_OPENED,
+            actor="coordinator",
+            subject=checkpoint.id,
+            payload={
+                "kind": checkpoint.kind.value,
+                "workItem": item.id,
+                "question": checkpoint.question,
+                "capability": checkpoint.capability.value,
+                "routableTo": self.checkpoints.routable_to(checkpoint.id),
+                "origin": checkpoint.origin,
+            },
+        )
+        return Blocker.AWAITING_HUMAN, (
+            f"answer checkpoint {checkpoint.id} — `sf checkpoints resolve` — or leave the "
+            "work item stopped at its declared radius"
+        )
+
+    def _cap_refusal(self, *, starting: bool) -> str | None:
+        """Why spend forbids this, or None.
+
+        Two thresholds, deliberately different: at `stop_intake_at` the factory finishes
+        what it started and admits nothing new, and only at `halt_at` does it stop work
+        already running. Halting mid-item wastes everything spent on it, so the cap is
+        shaped to spend a little more rather than throw that away.
+        """
+        if self.spend_cap is None:
+            return None
+        report = Ledgerless(self.spend_cap).report(charges_from(self.ledger.read()))
+        if starting and not report.state.accepts_new_work:
+            return (
+                f"spend is {report.spent:.2f} of {report.limit:.2f} units "
+                f"({report.state.value}); raise the cap or wait for the window to roll"
+            )
+        if not starting and not report.state.continues_running_work:
+            return (
+                f"spend reached {report.spent:.2f} of {report.limit:.2f} units, past the "
+                "halt threshold; running work stops here rather than spending further"
+            )
+        return None
+
     def _block(self, item: WorkItem, blocker: Blocker, action: str) -> None:
         self.machine.block(item, blocker, actor="coordinator", action=action or "investigate")
         self.ledger.append(
@@ -763,6 +866,7 @@ def local_coordinator(
     state_dir: Path,
     provider: Provider,
     allow_unsandboxed: bool = False,
+    spend_cap: SpendCap | None = None,
 ) -> Coordinator:
     """Assemble a coordinator for a single-machine run. The reference topology."""
     return Coordinator(
@@ -771,6 +875,7 @@ def local_coordinator(
         workspaces=WorkspaceFactory(repo, state_dir),
         ledger=Ledger(state_dir / "ledger.jsonl"),
         allow_unsandboxed=allow_unsandboxed,
+        spend_cap=spend_cap,
     )
 
 

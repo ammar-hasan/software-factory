@@ -138,6 +138,9 @@ class Pipeline:
                 )
             ]
 
+        # Refreshed before it is consulted. `accepts()` reads stored health, and nothing
+        # ever populated it, so this branch was dead and every integration read as up.
+        self.registry.ensure_checked(event.provider, now=now)
         if not self.registry.accepts(event.provider):
             report = self.registry.last_health.get(event.provider)
             return [

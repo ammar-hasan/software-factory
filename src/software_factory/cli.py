@@ -1337,6 +1337,117 @@ def govern_seal(
     raise typer.Exit(EXIT_OK)
 
 
+@govern_app.command("sweep")
+def govern_sweep(
+    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    apply: Annotated[
+        bool,
+        typer.Option("--apply", help="Actually tombstone. Without it, nothing is destroyed."),
+    ] = False,
+    as_json: JsonOpt = False,
+) -> None:
+    """Expire what is past its retention, keeping what a legal hold covers (FR-27.1).
+
+    Dry by default, and the report says which it was. A retention report that asserts
+    deletions it did not make is worse than no report -- it is shaped to be shown to an
+    auditor, and it would be a positive claim nothing established.
+    """
+    from software_factory.governance import Artifact, DataClass, Retention
+
+    try:
+        entries = list(Ledger(path).read())
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    # The ledger's own entries are the artifacts a local factory has to answer for. Bodies
+    # live elsewhere in a larger deployment; the classification and the arithmetic are the
+    # same either way, which is the point of doing it here.
+    artifacts = [
+        Artifact(
+            id=str(entry.seq),
+            data_class=DataClass.LEDGER,
+            created_at=datetime.fromisoformat(entry.ts.replace("Z", "+00:00")),
+        )
+        for entry in entries
+    ]
+
+    tombstoned: list[str] = []
+    report = Retention().sweep(
+        artifacts,
+        tombstone=(lambda a: tombstoned.append(a.id)) if apply else None,
+        dry_run=not apply,
+    )
+
+    if as_json:
+        _emit({"ok": True, "sweep": report.as_dict()})
+        raise typer.Exit(EXIT_OK)
+
+    console.print(
+        f"examined {report.examined}, expiring {len(report.expired)}, "
+        f"held {len(report.held)}, already tombstoned {len(report.already_tombstoned)}"
+    )
+    if not apply:
+        console.print("[yellow]dry run — nothing was destroyed; pass --apply to act[/]")
+    raise typer.Exit(EXIT_OK)
+
+
+@govern_app.command("erase")
+def govern_erase(
+    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    subject: Annotated[str, typer.Argument(help="Whose data to erase.")],
+    requested_by: Annotated[str, typer.Option("--by", help="Who asked, for the receipt.")],
+    apply: Annotated[bool, typer.Option("--apply", help="Actually destroy.")] = False,
+    as_json: JsonOpt = False,
+) -> None:
+    """Answer a subject-erasure request, and say honestly what cannot be erased (FR-27.3).
+
+    The report names what remains and why. The ledger holds references and decisions, never
+    bodies, and the record that a thing existed and was erased survives by design -- a
+    subject is entitled to know that, not to be told "everything is gone".
+    """
+    from software_factory.governance import Artifact, DataClass, Retention
+
+    try:
+        entries = list(Ledger(path).read())
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    artifacts = [
+        Artifact(
+            id=str(entry.seq),
+            data_class=DataClass.LEDGER,
+            created_at=datetime.fromisoformat(entry.ts.replace("Z", "+00:00")),
+            subjects=frozenset({str(entry.actor)}),
+        )
+        for entry in entries
+    ]
+
+    destroyed: list[str] = []
+    report = Retention().erase(
+        subject,
+        artifacts,
+        requested_by=requested_by,
+        destroy=(lambda a: destroyed.append(a.id)) if apply else None,
+        dry_run=not apply,
+    )
+
+    if as_json:
+        _emit({"ok": True, "erasure": report.as_dict()})
+        raise typer.Exit(EXIT_OK)
+
+    console.print(
+        f"examined {report.examined} for {subject!r}: erased {len(report.erased)}, "
+        f"unerasable {len(report.unerasable)}, blocked by hold {len(report.blocked_by_hold)}"
+    )
+    for artifact_id, why in report.unerasable[:3]:
+        console.print(f"  [yellow]{artifact_id}[/] {why}")
+    if not apply:
+        console.print("[yellow]dry run — nothing was destroyed; pass --apply to act[/]")
+    raise typer.Exit(EXIT_OK)
+
+
 @govern_app.command("verify")
 def govern_verify(
     path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
@@ -1404,7 +1515,7 @@ def spend(
     """
     from datetime import timedelta
 
-    from software_factory.economics import Cause, Charge, Ledgerless, SpendCap
+    from software_factory.economics import Ledgerless, SpendCap, charges_from
 
     ledger = Ledger(path)
     try:
@@ -1413,27 +1524,10 @@ def spend(
         _fail(exc, as_json)
         return
 
-    charges: list[Charge] = []
-    for entry in entries:
-        if entry.type is not EntryType.MODEL_CALLED:
-            continue
-        payload = entry.payload
-        units = float(payload.get("costUnits", 0.0) or 0.0)
-        if not units:
-            continue
-        raw_cause = str(payload.get("cause", Cause.PRIMARY.value))
-        charges.append(
-            Charge(
-                units=units,
-                work_item_id=str(payload.get("workItem", entry.subject)),
-                agent=str(payload.get("agent", "unknown")),
-                stage=str(payload.get("stage", "unknown")),
-                cause=Cause(raw_cause) if raw_cause in set(Cause) else Cause.PRIMARY,
-                at=datetime.fromisoformat(entry.ts.replace("Z", "+00:00")),
-                run_id=str(payload.get("run", "")),
-                tier=str(payload.get("tier", "")),
-            )
-        )
+    # The fold lives in `economics` so this command and the coordinator's own cap check
+    # compute the same number. Two folds with one name is how a factory reports itself
+    # within budget while spending past it.
+    charges = charges_from(entries)
 
     cap = SpendCap(scope=str(path), limit_units=limit, period=timedelta(hours=period_hours))
     report = Ledgerless(cap).report(charges)
@@ -1557,6 +1651,133 @@ def stages(as_json: JsonOpt = False) -> None:
     console.print(
         "\n[yellow]*[/] cannot be skipped on an agent's authority; skipping needs a human decision"
     )
+    raise typer.Exit(EXIT_OK)
+
+
+checkpoints_app = typer.Typer(
+    help="Human checkpoints: what is waiting on a person, and answering it.",
+    no_args_is_help=True,
+)
+app.add_typer(checkpoints_app, name="checkpoints")
+
+
+@checkpoints_app.command("list")
+def checkpoints_list(
+    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    root: Annotated[Path, typer.Option("--factory", help="Factory root, for principals.")] = Path(),
+    as_json: JsonOpt = False,
+) -> None:
+    """What is waiting on a person, who can clear it, and how overdue it is (FR-16.1).
+
+    Rebuilt from the ledger rather than from memory: a checkpoint has to outlive the
+    process that opened it, or "a person decides" means "a person decides before the run
+    ends". Its due state is computed from the clock here, so a deadline that passed while
+    nothing was running is not missed.
+    """
+    from software_factory.identity.checkpoints import CheckpointBook, CheckpointStatus
+    from software_factory.identity.loading import directory_from
+
+    try:
+        definition = load_strict(root)
+        book = CheckpointBook.from_ledger(Ledger(path).read(), directory_from(definition))
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    rows: list[dict[str, Any]] = []
+    routable: dict[str, list[str]] = {}
+    for checkpoint in sorted(book.checkpoints.values(), key=lambda c: c.opened_at):
+        routable[checkpoint.id] = book.routable_to(checkpoint.id)
+        rows.append(
+            {
+                **checkpoint.as_dict(),
+                "dueState": checkpoint.due_state().value,
+                "routableTo": routable[checkpoint.id],
+            }
+        )
+
+    open_rows = [r for r in rows if r["status"] != CheckpointStatus.RESOLVED.value]
+    if as_json:
+        _emit({"ok": True, "checkpoints": rows, "open": len(open_rows)})
+        raise typer.Exit(EXIT_OK)
+
+    if not open_rows:
+        console.print("[green]nothing is waiting on a person[/]")
+        raise typer.Exit(EXIT_OK)
+
+    table = Table(show_header=True, header_style="bold", box=None)
+    table.add_column("id")
+    table.add_column("kind")
+    table.add_column("work item")
+    table.add_column("state")
+    table.add_column("who can clear it", overflow="fold")
+    for row in open_rows:
+        colour = {"open": "green", "reminded": "yellow", "parked": "red"}.get(
+            str(row["dueState"]), "white"
+        )
+        table.add_row(
+            str(row["id"]),
+            str(row["kind"]),
+            str(row["workItem"]),
+            f"[{colour}]{row['dueState']}[/]",
+            ", ".join(routable[str(row["id"])]) or "[red]nobody[/]",
+        )
+    console.print(table)
+    raise typer.Exit(EXIT_OK)
+
+
+@checkpoints_app.command("resolve")
+def checkpoints_resolve(
+    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    checkpoint_id: Annotated[str, typer.Argument(help="Which checkpoint to answer.")],
+    principal: Annotated[str, typer.Option("--as", help="Who is deciding.")],
+    answer: Annotated[str, typer.Option("--answer", help="The decision, and why.")],
+    root: Annotated[Path, typer.Option("--factory", help="Factory root, for principals.")] = Path(),
+    as_json: JsonOpt = False,
+) -> None:
+    """Answer a checkpoint as a named principal, recording the decision.
+
+    The authorisation and the decision are written as one ledger entry, so an approval and
+    the thing it authorised cannot end up as two records that disagree.
+    """
+    from software_factory.identity import Refused as IdentityRefused
+    from software_factory.identity.checkpoints import CheckpointBook
+    from software_factory.identity.loading import directory_from
+
+    try:
+        definition = load_strict(root)
+        ledger = Ledger(path)
+        book = CheckpointBook.from_ledger(ledger.read(), directory_from(definition))
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    decision = book.resolve(checkpoint_id, principal_id=principal, answer=answer)
+    if isinstance(decision, IdentityRefused):
+        if as_json:
+            _emit(
+                {
+                    "ok": False,
+                    "code": decision.code,
+                    "message": decision.message,
+                    "remediation": decision.remediation,
+                }
+            )
+        else:
+            console.print(f"[red]{decision.message}[/]\n  [dim]{decision.remediation}[/]")
+        raise typer.Exit(EXIT_FAILED)
+
+    ledger.append(
+        EntryType.CHECKPOINT_RESOLVED,
+        actor=principal,
+        subject=checkpoint_id,
+        payload={"answer": answer, "decision": decision.as_dict()},
+    )
+
+    if as_json:
+        _emit({"ok": True, "decision": decision.as_dict()})
+        raise typer.Exit(EXIT_OK)
+    console.print(f"[green]resolved[/] {checkpoint_id} — decided by {decision.principal_id}")
     raise typer.Exit(EXIT_OK)
 
 

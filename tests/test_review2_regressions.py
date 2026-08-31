@@ -630,3 +630,110 @@ def test_n3_reopening_a_rejected_proposal_needs_authority() -> None:
 
     with pytest.raises(TypeError):
         settle(state, "p1", ProposalStatus.OPEN)  # type: ignore[call-arg]
+
+
+# ------------------------------------------------------------------------------- I2
+
+
+def test_i2_the_spend_cap_stops_a_halted_factory_starting_work(tmp_path) -> None:
+    """The spend cap was a report. Nothing consulted it.
+
+    `CapState.accepts_new_work` and `continues_running_work` -- the entire behavioural half
+    -- were referenced only by tests, so a factory past its cap carried on spending.
+    """
+    from datetime import timedelta
+
+    from software_factory.economics import Cause, Charge, SpendCap
+    from software_factory.economics.spend import Ledgerless
+
+    cap = SpendCap(scope="f", limit_units=10.0, period=timedelta(days=1))
+    report = Ledgerless(cap).report(
+        [
+            Charge(
+                units=13.0, work_item_id="wi-0", agent="builder", stage="BUILD", cause=Cause.PRIMARY
+            )
+        ]
+    )
+
+    assert not report.state.accepts_new_work
+    assert not report.state.continues_running_work
+
+
+def test_i2_charges_are_folded_by_the_economics_module_not_the_cli(tmp_path) -> None:
+    """The fold lived in the CLI, so the coordinator could not consult the same number.
+
+    A cap the operator sees and a cap the factory enforces have to be the same
+    computation, or "within budget" means two different things depending on who asks.
+    """
+    from software_factory.economics.spend import charges_from
+    from software_factory.ledger import EntryType, Ledger
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append(
+        EntryType.MODEL_CALLED,
+        actor="builder",
+        subject="run-1",
+        payload={"costUnits": 4.0, "workItem": "wi-1", "agent": "builder", "stage": "BUILD"},
+    )
+
+    charges = charges_from(ledger.read())
+
+    assert [c.units for c in charges] == [4.0]
+    assert charges[0].work_item_id == "wi-1"
+
+
+def test_i2_an_unavailable_adapter_is_actually_checked(tmp_path) -> None:
+    """`Registry.check()` was never called, so `accepts()` always returned True and the
+    provider-unavailable branch of intake was unreachable."""
+    from software_factory.intake import Provider, Refused
+    from software_factory.intake.adapters import Registry
+    from software_factory.intake.pipeline import Pipeline
+
+    registry = Registry()
+    registry.register(SickAdapter(Provider.GIT_HOST))
+    pipeline = Pipeline(registry=registry)
+
+    outcomes = pipeline.receive(factory_event())
+
+    assert isinstance(outcomes[0], Refused)
+    assert outcomes[0].code == "intake.provider_unavailable"
+    assert outcomes[0].parks_work
+
+
+def test_i2_a_checkpoint_is_opened_when_a_block_needs_a_person(tmp_path) -> None:
+    """`CheckpointBook` had no caller, so a factory enforced zero human checkpoints.
+
+    `checkpoints.py` even told users to run `sf checkpoints`, a command that did not exist.
+    """
+    from software_factory.identity import (
+        Capability,
+        CheckpointKind,
+        Directory,
+        Principal,
+        PrincipalKind,
+    )
+    from software_factory.identity.checkpoints import Checkpoint, CheckpointBook
+
+    book = CheckpointBook(
+        directory=Directory(
+            [
+                Principal(
+                    id="amaya",
+                    kind=PrincipalKind.PERSON,
+                    capabilities=frozenset({Capability.ANSWER_QUESTION}),
+                )
+            ]
+        )
+    )
+
+    opened = book.open(
+        Checkpoint(
+            id="cp-1",
+            kind=CheckpointKind.QUESTION,
+            work_item_id="wi-1",
+            question="which importer?",
+            asked_by="conductor",
+        )
+    )
+
+    assert book.routable_to(opened.id) == ["amaya"]

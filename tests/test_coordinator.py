@@ -559,3 +559,59 @@ def test_a_chore_is_not_asked_for_a_screenshot(definition, repo: Path, tmp_path:
     review = next((s for s in outcome.stages if s.stage is Stage.REVIEW), None)
     assert review is not None
     assert not any("Visual evidence" in claim.text for claim in review.bundle.claims)
+
+
+# ---------------------------------------------------------------------- the spend cap
+
+
+def test_a_factory_past_its_halt_threshold_refuses_to_start_work(
+    definition, repo: Path, tmp_path: Path
+) -> None:
+    """The cap was a report and nothing consulted it.
+
+    `CapState.accepts_new_work` and `continues_running_work` -- the entire behavioural half
+    -- were referenced only by tests, so a factory well past its cap carried on spending
+    while `sf spend` printed a red number nobody was obliged to act on.
+    """
+    from software_factory.economics import SpendCap
+    from software_factory.orchestrator import Blocker
+
+    state = tmp_path / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    ledger = Ledger(state / "ledger.jsonl")
+    ledger.append(
+        EntryType.MODEL_CALLED,
+        actor="builder",
+        subject="run-0",
+        payload={"costUnits": 99.0, "workItem": "wi-0", "agent": "builder", "stage": "BUILD"},
+    )
+
+    work = item()
+    outcome = local_coordinator(
+        definition,
+        repo=repo,
+        state_dir=state,
+        provider=StubProvider(),
+        allow_unsandboxed=True,
+        spend_cap=SpendCap(scope="demo", limit_units=10.0, period=timedelta(days=1)),
+    ).run(work)
+
+    assert work.blocker is Blocker.BUDGET_EXCEEDED
+    assert "raise the cap" in work.blocker_action
+    assert outcome.stages == [], "no stage should have run"
+
+
+def test_a_factory_inside_its_cap_runs_normally(definition, repo: Path, tmp_path: Path) -> None:
+    """The check must not become a reason nothing ever runs."""
+    from software_factory.economics import SpendCap
+
+    outcome = local_coordinator(
+        definition,
+        repo=repo,
+        state_dir=tmp_path / "state",
+        provider=StubProvider([says(triage_output()), says(build_output()), says(review_output())]),
+        allow_unsandboxed=True,
+        spend_cap=SpendCap(scope="demo", limit_units=1000.0, period=timedelta(days=1)),
+    ).run(item())
+
+    assert outcome.stages, "the cap blocked a factory that had spent nothing"

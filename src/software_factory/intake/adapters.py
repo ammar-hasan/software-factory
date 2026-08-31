@@ -215,6 +215,44 @@ class Registry:
             reports.append(report)
         return reports
 
+    def ensure_checked(
+        self,
+        provider: Provider,
+        *,
+        max_age: timedelta = timedelta(minutes=1),
+        now: datetime | None = None,
+    ) -> HealthReport | None:
+        """Refresh one adapter's health if what we hold is missing or stale.
+
+        `accepts()` reads `last_health`, and nothing called `check()` -- so `last_health` was
+        always empty, `accepts()` always returned True, and the whole
+        `provider_unavailable` branch of intake was unreachable. FR-18.9's "park rather
+        than fail" could not fire.
+
+        Bounded staleness rather than a poll per event: the class docstring is right that an
+        operator asking what is broken should not cause six network calls, and a webhook
+        storm should not cause a thousand. A report a minute old is a good enough answer to
+        "is this integration up", and it is a far better one than no report at all.
+        """
+        adapter = self.adapters.get(provider)
+        if adapter is None:
+            return None
+        now = now or utc_now()
+        held = self.last_health.get(provider)
+        if held is not None and now - held.checked_at < max_age:
+            return held
+        try:
+            report = adapter.health()
+        except Exception as exc:
+            report = HealthReport(
+                provider=provider,
+                status=Health.UNAVAILABLE,
+                detail=f"health check raised {type(exc).__name__}",
+                checked_at=now,
+            )
+        self.last_health[provider] = report
+        return report
+
     def unhealthy(self) -> list[HealthReport]:
         return [r for r in self.last_health.values() if r.status is not Health.HEALTHY]
 

@@ -26,6 +26,7 @@ import enum
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Any
 
 from software_factory.memory.records import utc_now
 
@@ -121,6 +122,40 @@ class SpendCap:
         if fraction >= self.warn_at:
             return CapState.WARNING
         return CapState.OK
+
+
+def charges_from(entries: Iterable[Any]) -> list[Charge]:
+    """Fold ledger entries into charges.
+
+    Here rather than in the CLI, which is where it used to live. A cap the operator reads
+    with `sf spend` and a cap the coordinator enforces before starting a stage have to be
+    the *same* computation -- otherwise "within budget" means two different things depending
+    on who asks, and the one that stops work is the one nobody checked.
+    """
+    from software_factory.ledger.entry import EntryType
+
+    charges: list[Charge] = []
+    for entry in entries:
+        if entry.type is not EntryType.MODEL_CALLED:
+            continue
+        payload = entry.payload
+        units = float(payload.get("costUnits", 0.0) or 0.0)
+        if not units:
+            continue
+        raw_cause = str(payload.get("cause", Cause.PRIMARY.value))
+        charges.append(
+            Charge(
+                units=units,
+                work_item_id=str(payload.get("workItem", entry.subject)),
+                agent=str(payload.get("agent", "unknown")),
+                stage=str(payload.get("stage", "unknown")),
+                cause=Cause(raw_cause) if raw_cause in set(Cause) else Cause.PRIMARY,
+                at=datetime.fromisoformat(entry.ts.replace("Z", "+00:00")),
+                run_id=str(payload.get("run", "")),
+                tier=str(payload.get("tier", "")),
+            )
+        )
+    return charges
 
 
 @dataclass(frozen=True, slots=True)
