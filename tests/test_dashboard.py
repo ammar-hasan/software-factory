@@ -212,6 +212,15 @@ def dashboard(tmp_path: Path):
         tmp_path,
         (EntryType.RUN_STARTED, "r1", {"agent": "builder"}),
         (EntryType.GATE_EVALUATED, "wi-1", {"gate": "tests-pass", "outcome": "pass"}),
+        # Enough for the activity board to rebuild one work item, which is the point: the
+        # ledger carries the title, the moves, and the blocker.
+        (
+            EntryType.WORK_ITEM_CREATED,
+            "wi-1",
+            {"title": "CSV importer mangles BOM headers", "workClass": "defect"},
+        ),
+        (EntryType.WORK_ITEM_TRANSITION, "wi-1", {"from": "INTAKE", "to": "TRIAGE"}),
+        (EntryType.WORK_ITEM_TRANSITION, "wi-1", {"from": "TRIAGE", "to": "BUILD"}),
     )
     server = serve(tmp_path / "ledger.jsonl", port=0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -279,14 +288,20 @@ def test_the_run_view_requires_a_run_id(dashboard: str) -> None:
     assert json.loads(caught.value.read())["error"] == "run.missing"
 
 
-def test_the_activity_view_says_why_it_is_empty(dashboard: str) -> None:
-    """An empty table reads as "no work". Saying the view needs orchestrator state reads as
-    what it is."""
+def test_the_activity_view_rebuilds_work_items_from_the_ledger(dashboard: str) -> None:
+    """It used to serve an empty board with a note saying it was "empty by construction".
+
+    FR-15.2 says derived state is rebuildable from the ledger, and this was the one view
+    that did not do it -- the entries carry the title, every stage move, and the blocker.
+    The note now says what a ledger genuinely cannot supply instead.
+    """
     with urlopen(f"{dashboard}/api/activity") as response:
         body = json.loads(response.read())
 
-    assert body["workItems"] == []
-    assert "not because the factory has no work" in body["note"]
+    assert [row["id"] for row in body["workItems"]] == ["wi-1"]
+    assert body["workItems"][0]["title"] == "CSV importer mangles BOM headers"
+    assert body["workItems"][0]["stage"] == "BUILD"
+    assert "not recorded there" in body["note"]
 
 
 def test_the_dashboard_offers_no_write_endpoint(dashboard: str) -> None:

@@ -100,6 +100,80 @@ def overview(
     }
 
 
+def work_items_from(entries: Iterable[Any]) -> list[WorkItem]:
+    """Rebuild work items from the ledger, for the activity board.
+
+    FR-15.2 says all derived state is rebuildable from the ledger, and the board was the one
+    view that did not do it: `sf dash` served the ledger and rendered an empty activity
+    table with a note saying it was "empty by construction". It was empty because nothing
+    reconstructed it -- `WORK_ITEM_CREATED` carries the title and class, the transitions
+    carry every move with where it came from, and `WORK_ITEM_BLOCKED` carries the blocker
+    and the action that clears it. That is the whole board.
+
+    A note about what a ledger genuinely cannot supply stays on the view: the request body
+    and the source permalink are not written, so the reconstructed items carry the id,
+    title, stage and blocker and say nothing they cannot support.
+    """
+    from software_factory.ledger.entry import EntryType
+    from software_factory.orchestrator.workitem import (
+        SourceContext,
+        Transition,
+        WorkClass,
+        WorkItem,
+    )
+
+    items: dict[str, WorkItem] = {}
+    for entry in entries:
+        subject = str(entry.subject)
+        at = datetime.fromisoformat(entry.ts.replace("Z", "+00:00"))
+        payload = entry.payload
+
+        if entry.type is EntryType.WORK_ITEM_CREATED:
+            raw_class = str(payload.get("workClass", WorkClass.CHORE.value))
+            items[subject] = WorkItem(
+                id=subject,
+                factory=str(payload.get("factory", "")),
+                title=str(payload.get("title", subject)),
+                request="",
+                source=SourceContext(
+                    provider=str(payload.get("provider", "ledger")),
+                    kind="reconstructed",
+                    ref=str(payload.get("origin", "")),
+                ),
+                work_class=(
+                    WorkClass(raw_class) if raw_class in set(WorkClass) else WorkClass.CHORE
+                ),
+                created_at=at,
+            )
+            continue
+
+        item = items.get(subject)
+        if item is None:
+            continue
+
+        if entry.type is EntryType.WORK_ITEM_TRANSITION and not payload.get("terminal"):
+            source = str(payload.get("from", ""))
+            target = str(payload.get("to", ""))
+            if source in set(Stage) and target in set(Stage):
+                item.history.append(
+                    Transition(
+                        from_stage=Stage(source),
+                        to_stage=Stage(target),
+                        actor=str(entry.actor),
+                        reason=str(payload.get("reason", "")),
+                        at=at,
+                    )
+                )
+                item.stage = Stage(target)
+        elif entry.type is EntryType.WORK_ITEM_BLOCKED:
+            raw_blocker = str(payload.get("blocker", ""))
+            if raw_blocker in set(Blocker):
+                item.blocker = Blocker(raw_blocker)
+                item.blocker_action = str(payload.get("action", ""))
+
+    return sorted(items.values(), key=lambda i: i.created_at)
+
+
 def activity_board(
     items: Iterable[WorkItem],
     *,

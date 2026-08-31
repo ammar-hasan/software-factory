@@ -28,7 +28,12 @@ from urllib.parse import parse_qs, urlparse
 
 from software_factory.ledger.log import Ledger
 from software_factory.observability.metrics import Window
-from software_factory.observability.views import activity_board, overview, run_inspector
+from software_factory.observability.views import (
+    activity_board,
+    overview,
+    run_inspector,
+    work_items_from,
+)
 
 #: Loopback only. A dashboard reachable from the network is one that has published a
 #: factory's whole history to whoever can reach the port, and FR-15.8 asks for a local
@@ -66,15 +71,15 @@ class DashboardData:
             case "overview":
                 return overview(entries, window=window, integrations=self.integrations)
             case "activity":
-                # Work items are reconstructed by the orchestrator, not the ledger reader, so
-                # the board is empty until a caller supplies them. Saying so beats an empty
-                # table that reads as "no work".
+                # Rebuilt from the ledger. This used to serve an empty board with a note
+                # explaining that it was "empty by construction" -- but FR-15.2 says derived
+                # state is rebuildable from the ledger, and this was the one view that did
+                # not do it. The entries carry every field the board shows.
                 return {
-                    **activity_board([]),
+                    **activity_board(work_items_from(entries)),
                     "note": (
-                        "This view lists work items from the orchestrator's state. Served "
-                        "from a ledger alone it is empty by construction, not because the "
-                        "factory has no work."
+                        "Rebuilt from the ledger. The request body and source permalink are "
+                        "not recorded there, so those are absent rather than empty."
                     ),
                 }
             case "run":

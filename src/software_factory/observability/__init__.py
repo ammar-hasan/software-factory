@@ -22,6 +22,7 @@ from software_factory.observability.views import (
     overview,
     registry_view,
     run_inspector,
+    work_items_from,
 )
 
 __all__ = [
@@ -44,4 +45,5 @@ __all__ = [
     "registry_view",
     "run_inspector",
     "unavailable",
+    "work_items_from",
 ]
