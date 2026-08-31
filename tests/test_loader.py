@@ -33,7 +33,7 @@ def test_loads_a_minimal_factory(factory_root: Path) -> None:
     assert report.ok, report.as_dict()
     assert definition.factory.name == "payments"
     assert definition.factory.handle == "payments"
-    assert set(definition.agents) == {"conductor"}
+    assert set(definition.agents) == {"conductor", "builder"}
     assert definition.conductor() is not None
     assert definition.runners["linux"].definition.instance_shape.vcpus == 4
 

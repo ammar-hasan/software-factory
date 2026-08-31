@@ -187,6 +187,29 @@ silently kept:
 
 ---
 
+## What has been inducted
+
+| Item | Requirement | Status |
+| --- | --- | --- |
+| 3 — incidental discoveries | FR-31 | **Done.** `discoveries` on every stage schema, siblings not children, capped at three per run with the cap recorded. |
+| 4 — review comments as an improvement input | FR-33 | **Done.** `Source.REVIEW_COMMENT` clusters beside assurance failures and never merges with them; a review-driven proposal measured against comment count is refused by name. |
+| 6 — post-handoff explanation | FR-32 | **Done.** `sf explain` answers from the recorded conversation, never by re-running, and says so when the record is silent. |
+| 8 — a provisioned agent suite | FR-2.1 | **Done.** `sf validate` requires a conductor *and* a specialist; the requirement was weaker than every real factory including the scaffold. |
+| 1 — computer use | — | Not built. Waiting on the measurement below. |
+| 2 — sub-agent delegation | — | Not built. Moderate, unblocks nothing. |
+| 5 — recording post-production | — | Not built. Depends on 1, and on watch-through data. |
+| 7 — benchmarks driving routing | — | Not built. Waiting on §11.2's result. |
+
+The four that are done are the four the sequencing section below called small and independent.
+The four that are not are the ones with a measurement in front of them, and building them first
+would be building on the assumption the measurement exists to test.
+
+One thing the work changed about the plan. Item 3's cap was going to be a `maxItems` on the
+schema, and that would have been wrong: a schema violation rejects the *whole stage output*, so
+an agent that reported nine findings would lose its build as well. The schema describes what a
+discovery must look like and the coordinator decides how many are acted on, which is also what
+lets the cap be recorded rather than fatal.
+
 ## Sequencing
 
 Items 3, 4, 6 and 8 are small, independent, and worth doing first — three of them are cheap and

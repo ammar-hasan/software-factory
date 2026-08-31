@@ -16,6 +16,7 @@ never to merge two that are distinct -- merging on text is how a clusterer produ
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -40,6 +41,22 @@ SPLIT_THRESHOLD = 0.25
 MIN_CLUSTER_SIZE = 3
 
 
+class Source(enum.StrEnum):
+    """Where an observed failure came from (FR-33.1).
+
+    A gate or scorer failure is a failure mode somebody already encoded as a rule. A
+    reviewer's complaint is one nobody has encoded *yet*, which makes it the most valuable
+    input this loop could have and the one it ignored -- FR-14.2 clustered only the first
+    kind.
+
+    Kept as a field rather than folded into `failure_class` because it changes what a
+    proposal may be measured against; see `ImprovementProposal` and FR-33.2.
+    """
+
+    ASSURANCE = "assurance"
+    REVIEW_COMMENT = "review_comment"
+
+
 @dataclass(frozen=True, slots=True)
 class Failure:
     """One observed failure, as the loop sees it."""
@@ -52,6 +69,7 @@ class Failure:
     gate: str = ""
     failure_class: str = ""
     detail: str = ""
+    source: Source = Source.ASSURANCE
     at: datetime = field(default_factory=utc_now)
 
     def signature(self) -> str:
@@ -62,6 +80,7 @@ class Failure:
         never clusters.
         """
         return digest_parts(
+            self.source.value,
             self.stage.lower(),
             self.agent.lower(),
             self.scorer.lower(),
@@ -72,7 +91,8 @@ class Failure:
 
     def describe(self) -> str:
         parts = [p for p in (self.gate, self.scorer, self.failure_class) if p]
-        return f"{self.stage}/{self.agent}: {' · '.join(parts) or 'unclassified'}"
+        prefix = "review" if self.source is Source.REVIEW_COMMENT else self.stage
+        return f"{prefix}/{self.agent}: {' · '.join(parts) or 'unclassified'}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +101,17 @@ class Cluster:
 
     signature: str
     failures: tuple[Failure, ...]
+
+    @property
+    def source(self) -> Source:
+        """Where this cluster's failures came from.
+
+        Every member shares it, because `source` is part of the signature: an assurance
+        failure and a reviewer's complaint about the same stage are not the same problem
+        even when they look alike, and merging them would hide which one a proposal is
+        answering.
+        """
+        return self.failures[0].source
 
     @property
     def size(self) -> int:

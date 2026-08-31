@@ -65,10 +65,12 @@ from software_factory.memory.records import utc_now
 from software_factory.memory.store import MemoryStore
 from software_factory.orchestrator.workitem import (
     Blocker,
+    SourceContext,
     StageMachine,
     Transition,
     WorkClass,
     WorkItem,
+    new_id,
 )
 from software_factory.providers.base import Provider
 from software_factory.runtime.executor import LocalExecutor, SandboxPolicy
@@ -80,7 +82,28 @@ from software_factory.spec.units import SpecStore
 #: What each role must produce. Downstream stages consume validated structures, never
 #: free prose (HARNESS.md O-1).
 #:
-#: Every stage carries the four carry-forward keys. `_carry_forward` read `decisions` and
+MAX_DISCOVERIES_PER_RUN = 3
+"""How many incidental findings one run may file (FR-31.3).
+
+An agent filing forty issues in one run has found one thing and reported it forty times. The
+bound is small on purpose: a discovery is worth filing because it is unusual, and a run that
+routinely produces three has stopped distinguishing "I noticed something" from "I have
+opinions about this codebase".
+
+Enforced by the coordinator, deliberately not by the schema. As a `maxItems` it would reject
+the *whole stage output* -- losing a good build because the agent was over-enthusiastic about
+side findings, which is a bad trade and an incentive to report nothing. The schema describes
+the shape a discovery must have; this is policy about how many are acted on, and the two
+being separate is what lets the cap be recorded rather than fatal.
+"""
+
+
+#: Every stage carries the four carry-forward keys and `discoveries`.
+#:
+#: FR-31.1: a run that finds something unrelated to its own work item had nowhere to put it,
+#: so the finding landed in a transcript nobody reads again. The discovery is free and losing
+#: it is pure waste, which is what makes it worth a field on every stage rather than one.
+#: `_carry_forward` read `decisions` and
 #: `attempted` and no schema asked for either, so the model was never told to produce them
 #: and a schema-conformant response never did: four of the five note kinds were constructed
 #: nowhere, and the only thing a conversation ever carried was calibration unknowns. A
@@ -115,6 +138,23 @@ STAGE_SCHEMAS: dict[Stage, dict[str, Any]] = {
                 "items": {"type": "string"},
                 "description": "Things produced -- a branch, a file, a checkpoint -- that a later run acts on.",
             },
+            "discoveries": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["what", "where"],
+                    "properties": {
+                        "what": {"type": "string", "minLength": 1},
+                        "where": {"type": "string", "minLength": 1},
+                        "why_separate": {"type": "string"},
+                    },
+                },
+                "description": (
+                    "Things found that are real and are not this work item. Reported here so "
+                    "they become their own work rather than dying in a transcript. At most "
+                    f"{MAX_DISCOVERIES_PER_RUN} are filed; the rest are recorded as capped."
+                ),
+            },
             "calibration": {"type": "object"},
         },
     },
@@ -145,6 +185,23 @@ STAGE_SCHEMAS: dict[Stage, dict[str, Any]] = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Things produced -- a branch, a file, a checkpoint -- that a later run acts on.",
+            },
+            "discoveries": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["what", "where"],
+                    "properties": {
+                        "what": {"type": "string", "minLength": 1},
+                        "where": {"type": "string", "minLength": 1},
+                        "why_separate": {"type": "string"},
+                    },
+                },
+                "description": (
+                    "Things found that are real and are not this work item. Reported here so "
+                    "they become their own work rather than dying in a transcript. At most "
+                    f"{MAX_DISCOVERIES_PER_RUN} are filed; the rest are recorded as capped."
+                ),
             },
             "calibration": {"type": "object"},
         },
@@ -177,6 +234,23 @@ STAGE_SCHEMAS: dict[Stage, dict[str, Any]] = {
                 "items": {"type": "string"},
                 "description": "Things produced -- a branch, a file, a checkpoint -- that a later run acts on.",
             },
+            "discoveries": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["what", "where"],
+                    "properties": {
+                        "what": {"type": "string", "minLength": 1},
+                        "where": {"type": "string", "minLength": 1},
+                        "why_separate": {"type": "string"},
+                    },
+                },
+                "description": (
+                    "Things found that are real and are not this work item. Reported here so "
+                    "they become their own work rather than dying in a transcript. At most "
+                    f"{MAX_DISCOVERIES_PER_RUN} are filed; the rest are recorded as capped."
+                ),
+            },
             "calibration": {"type": "object"},
         },
     },
@@ -208,6 +282,23 @@ STAGE_SCHEMAS: dict[Stage, dict[str, Any]] = {
                 "items": {"type": "string"},
                 "description": "Things produced -- a branch, a file, a checkpoint -- that a later run acts on.",
             },
+            "discoveries": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["what", "where"],
+                    "properties": {
+                        "what": {"type": "string", "minLength": 1},
+                        "where": {"type": "string", "minLength": 1},
+                        "why_separate": {"type": "string"},
+                    },
+                },
+                "description": (
+                    "Things found that are real and are not this work item. Reported here so "
+                    "they become their own work rather than dying in a transcript. At most "
+                    f"{MAX_DISCOVERIES_PER_RUN} are filed; the rest are recorded as capped."
+                ),
+            },
             "calibration": {"type": "object"},
         },
     },
@@ -238,6 +329,23 @@ STAGE_SCHEMAS: dict[Stage, dict[str, Any]] = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Things produced -- a branch, a file, a checkpoint -- that a later run acts on.",
+            },
+            "discoveries": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["what", "where"],
+                    "properties": {
+                        "what": {"type": "string", "minLength": 1},
+                        "where": {"type": "string", "minLength": 1},
+                        "why_separate": {"type": "string"},
+                    },
+                },
+                "description": (
+                    "Things found that are real and are not this work item. Reported here so "
+                    "they become their own work rather than dying in a transcript. At most "
+                    f"{MAX_DISCOVERIES_PER_RUN} are filed; the rest are recorded as capped."
+                ),
             },
             "calibration": {"type": "object"},
         },
@@ -275,6 +383,23 @@ STAGE_SCHEMAS: dict[Stage, dict[str, Any]] = {
                 "items": {"type": "string"},
                 "description": "Things produced -- a branch, a file, a checkpoint -- that a later run acts on.",
             },
+            "discoveries": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["what", "where"],
+                    "properties": {
+                        "what": {"type": "string", "minLength": 1},
+                        "where": {"type": "string", "minLength": 1},
+                        "why_separate": {"type": "string"},
+                    },
+                },
+                "description": (
+                    "Things found that are real and are not this work item. Reported here so "
+                    "they become their own work rather than dying in a transcript. At most "
+                    f"{MAX_DISCOVERIES_PER_RUN} are filed; the rest are recorded as capped."
+                ),
+            },
             "calibration": {"type": "object"},
         },
     },
@@ -299,6 +424,13 @@ class StageOutcome:
     gates: GateReport
     bundle: EvidenceBundle
     pack_digest: str
+    discoveries: list[WorkItem] = field(default_factory=list)
+    """Sibling work items this stage filed (FR-31.2).
+
+    Carried on the outcome rather than written straight to storage, so a caller decides what
+    to do with them. A coordinator that filed into a tracker on its own would be taking an
+    externally visible action nobody reviewed.
+    """
 
     @property
     def advanced(self) -> bool:
@@ -313,6 +445,7 @@ class StageOutcome:
             "run": self.run.as_dict(),
             "gates": self.gates.as_dict(),
             "evidence": self.bundle.as_dict(),
+            "discoveries": [found.id for found in self.discoveries],
         }
 
 
@@ -325,12 +458,21 @@ class WorkOutcome:
     diff: str = ""
     changed_paths: tuple[str, ...] = ()
 
+    @property
+    def discoveries(self) -> list[WorkItem]:
+        """Every sibling work item this run filed, across its stages (FR-31.2)."""
+        return [found for stage in self.stages for found in stage.discoveries]
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "workItem": self.item.as_dict(),
             "stages": [s.as_dict() for s in self.stages],
             "changedPaths": list(self.changed_paths),
             "diffBytes": len(self.diff),
+            "discoveries": [
+                {"id": found.id, "title": found.title, "discoveredBy": found.discovered_by}
+                for found in self.discoveries
+            ],
         }
 
 
@@ -602,6 +744,7 @@ class Coordinator:
         run = loop.run()
 
         self._carry_forward(conversation, item, stage, run, run_id)
+        discoveries = self._file_discoveries(item, stage, run, run_id)
 
         # The entry `sf spend` and `cost_per_change` fold on. Without it the whole economics
         # layer reads an empty ledger and reports a factory running for free, which is the
@@ -647,6 +790,21 @@ class Coordinator:
                 # this, the precedent section degrades to "recent runs", which is noise.
                 "paths": sorted(workspace.changed_paths()),
                 "unknowns": (run.calibration.unknowns if run.calibration else []),
+                "workItem": item.id,
+                # What this run wrote down, so a reviewer can ask about the change after the
+                # coordinator has exited (FR-32.1). The conversation objects live in a
+                # process that is gone by the time anyone reads the diff, and reconstructing
+                # an answer from the transcript would mean summarising it -- a fourth place
+                # the record could be misquoted. These notes already *are* the summary.
+                "carried": [
+                    {
+                        "kind": note.kind.value,
+                        "text": note.text,
+                        "run": note.run_id,
+                        "stage": note.stage.value,
+                    }
+                    for note in conversation.notes
+                ],
             },
         )
 
@@ -670,6 +828,7 @@ class Coordinator:
             gates=gates,
             bundle=bundle,
             pack_digest=pack.digest(),
+            discoveries=discoveries,
         )
 
     # ------------------------------------------------------------------------- pack
@@ -835,6 +994,89 @@ class Coordinator:
             reason=Unavailable.NOT_ENABLED,
             detail=f"no recorder is configured for {stage.value.lower()}",
         )
+
+    def _file_discoveries(
+        self, item: WorkItem, stage: Stage, run: RunResult, run_id: str
+    ) -> list[WorkItem]:
+        """Turn a run's incidental findings into sibling work items (FR-31.2).
+
+        Siblings, not children. As a child, a discovery would make the finder's completion
+        depend on unrelated work -- which is exactly the incentive that teaches an agent not
+        to report them, and the reason this is worth building at all.
+
+        Each carries the locator the finder gave (FR-31.4): a work item saying "there is a
+        bug somewhere in the importer" costs a human more than the discovery saved.
+        """
+        raw = (run.output or {}).get("discoveries")
+        if not isinstance(raw, list) or not raw:
+            return []
+
+        filed: list[WorkItem] = []
+        for entry in raw[:MAX_DISCOVERIES_PER_RUN]:
+            if not isinstance(entry, dict):
+                continue
+            what = str(entry.get("what", "")).strip()
+            where = str(entry.get("where", "")).strip()
+            if not what or not where:
+                continue
+
+            sibling = WorkItem(
+                id=new_id(),
+                factory=item.factory,
+                title=what[:120],
+                request=(
+                    f"Found while working {item.id} ({stage.value}), and not part of it.\n\n"
+                    f"What: {what}\nWhere: {where}\n"
+                    f"Why separate: {entry.get('why_separate') or 'not stated'}"
+                ),
+                source=SourceContext(
+                    provider="factory",
+                    kind="discovery",
+                    ref=item.source.ref,
+                ),
+                work_class=WorkClass.DEFECT,
+                # Attributed as machine-filed (FR-16.5) so a human reading it knows what
+                # produced it, and reads the confidence accordingly.
+                discovered_by=run_id,
+            )
+            filed.append(sibling)
+            self.ledger.append(
+                EntryType.WORK_ITEM_CREATED,
+                actor="coordinator",
+                subject=sibling.id,
+                payload={
+                    "title": sibling.title,
+                    "workClass": sibling.work_class.value,
+                    "discoveredBy": run_id,
+                    "discoveredWhile": item.id,
+                    "where": where,
+                    "note": (
+                        "Filed by the factory, not by a person. It is a sibling of "
+                        f"{item.id}, not a child: that work item does not wait on this one."
+                    ),
+                },
+            )
+
+        dropped = len(raw) - len(filed)
+        if dropped > 0:
+            # Recorded rather than silently truncated: the cap is a real judgement about the
+            # agent's output and a reader deserves to know it was applied.
+            self.ledger.append(
+                EntryType.VIOLATION,
+                actor="coordinator",
+                subject=item.id,
+                payload={
+                    "kind": "discovery_cap",
+                    "stage": stage.value,
+                    "reported": len(raw),
+                    "filed": len(filed),
+                    "detail": (
+                        f"a run may file {MAX_DISCOVERIES_PER_RUN} discoveries; the rest were "
+                        "not filed"
+                    ),
+                },
+            )
+        return filed
 
     def _persist_transcript(self, run_id: str, run: RunResult) -> str:
         """Write the run's transcript beside the ledger and return its reference.

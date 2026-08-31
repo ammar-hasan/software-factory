@@ -99,9 +99,40 @@ def validate(definition: Definition, report: ValidationReport | None = None) -> 
     return report
 
 
+def _check_has_a_specialist(definition: Definition, report: ValidationReport) -> None:
+    """A conductor with nobody to route to can accept work and do none of it (FR-2.1).
+
+    The requirement used to ask for "at least one agent", which the conductor satisfies alone
+    -- weaker than the implementation, since the scaffold has always shipped five. A document
+    that under-describes the product is the safe direction and still a document a reader
+    cannot rely on.
+    """
+    specialists = [
+        agent
+        for agent in definition.agents.values()
+        if agent.definition.role is not AgentRole.CONDUCTOR
+    ]
+    if specialists:
+        return
+    report.add(
+        ValidationIssue(
+            severity=Severity.ERROR,
+            code="factory.no_specialist",
+            message="the only agent is the conductor, so there is nobody to route work to",
+            path=definition.root,
+            depends_on=tuple(sorted(definition.unloaded)),
+            remediation=(
+                "Add at least one specialist -- a builder, a critic, whatever this factory's "
+                "work needs. A conductor alone can accept work and do none of it."
+            ),
+        )
+    )
+
+
 def _check_conductor(definition: Definition, report: ValidationReport) -> None:
     conductors = [a for a in definition.agents.values() if a.definition.role is AgentRole.CONDUCTOR]
     if len(conductors) == 1:
+        _check_has_a_specialist(definition, report)
         return
     if not conductors:
         report.add(

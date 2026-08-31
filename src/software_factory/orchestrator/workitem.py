@@ -168,6 +168,13 @@ class WorkItem:
     """Pinned for the item's duration, so its stages stay comparable (PRD FR-24.2)."""
 
     base_commit: str = ""
+    discovered_by: str = ""
+    """The run that filed this as an incidental discovery, if one did (FR-31.3).
+
+    Attribution rather than decoration: a human reading a machine-filed work item should
+    know a machine filed it, and read its confidence accordingly (FR-16.5).
+    """
+
     user_facing: bool | None = None
     """Whether this change alters what a person sees. ``None`` means nobody has said.
 

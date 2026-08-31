@@ -75,12 +75,22 @@ def agent(role: str, *, body: str = "Do the work well.", **frontmatter: object) 
 
 @pytest.fixture
 def factory_root(tmp_path: Path) -> Path:
-    """A minimal but complete, valid definition tree."""
+    """A minimal but complete, valid definition tree.
+
+    Minimal now includes a specialist. FR-2.1 asked for "at least one agent", which a
+    conductor satisfies alone -- and a conductor with nobody to route to can accept work and
+    do none of it, so the requirement was weaker than every real factory including the
+    scaffold. This fixture was the one tree in the suite that took the requirement literally.
+    """
     root = tmp_path / "factory"
     write(root / "factory.yaml", FACTORY_YAML)
     write(root / "runners" / "linux.yaml", RUNNER_YAML)
     write(
         root / "agents" / "conductor" / "agent.md",
         agent("CONDUCTOR", body="Route each work item from intake to human handoff."),
+    )
+    write(
+        root / "agents" / "builder" / "agent.md",
+        agent("BUILDER", body="Make the smallest change that satisfies the work item."),
     )
     return root

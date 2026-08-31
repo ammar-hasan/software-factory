@@ -400,7 +400,13 @@ policy/*.yaml                    # gates, checkpoints, budgets, escalation
 memory/policy.yaml               # memory admission, decay, promotion rules
 ```
 
-Resource names derive from the path. Only `factory.yaml` and at least one agent are required.
+Resource names derive from the path. `factory.yaml`, a conductor, and at least one specialist
+agent are required.
+
+The specialist requirement is inducted from the source analysis (item 8), and it tightens a
+requirement that was *weaker* than the implementation: the scaffold has always shipped five
+agents, and a conductor with nobody to route to is a factory that can accept work and do none
+of it. `sf validate` enforces it.
 
 **FR-2.2 (P0)** — Every file kind must have a published, machine-readable JSON Schema, generated from
 the same parser that validates loads, and served by `sf schema [kind]` without authentication or
@@ -1773,6 +1779,60 @@ reader can copy and run.
 command, produced from the same definitions that validate (NFR-4.3).
 
 **FR-30.5 (P1)** — A published threat model and a description of the trust boundaries in §6.2.
+
+### 7.31 Incidental discovery
+
+Inducted from the source analysis (`docs/induction-plan.md` item 3). A run that finds something
+unrelated to its own work item currently loses it: the finding lands in a transcript nobody
+reads again. The discovery is free and losing it is pure waste, which is what makes this the
+cheapest requirement in this document and possibly the highest-value.
+
+**FR-31.1 (P0) — Discoveries are a declared output.** Every stage output schema carries a
+`discoveries` field: what was found, where, and why it is not part of this work. An agent that
+can only report findings inside its own scope reports the ones outside it nowhere.
+
+**FR-31.2 (P0) — A discovery becomes a sibling, never a child.** The work item created from a
+discovery is independent of the one that found it. As a child it would make the finder's
+completion depend on unrelated work, which is exactly the reason an agent would learn not to
+report them.
+
+**FR-31.3 (P0) — Discoveries are attributed and capped.** A filed discovery states that a machine
+filed it (FR-16.5), and a run may file at most a declared number. An agent that files forty
+issues in one run has found one thing and reported it forty times.
+
+**FR-31.4 (P1) — A discovery carries its own evidence.** A sibling work item with no locator is a
+report a human has to re-derive, which costs more than the discovery saved.
+
+### 7.32 Post-handoff explanation
+
+Inducted from the source analysis (item 6). A reviewer looking at a change cannot ask why it was
+made that way. The plumbing exists -- FR-18.8 replies in place, FR-4.5 keeps the work item
+addressable, FR-29 keeps the conversation -- and only the capability was missing.
+
+**FR-32.1 (P0) — A handed-off work item answers questions.** From the recorded conversation state
+and the evidence bundle.
+
+**FR-32.2 (P0) — Answering does not re-run anything.** An answer produced by re-running is an
+answer about a different execution, and a reviewer asking "why did you do that" would be told
+what a *second* run would have done.
+
+**FR-32.3 (P0) — An answer that is not in the record says so.** "The record does not say" is an
+answer; a plausible reconstruction is not. This is the same rule as everywhere else in this
+document, applied at the point a human is most likely to believe the output.
+
+### 7.33 Review comments as an improvement input
+
+Inducted from the source analysis (item 4). FR-14.2 clusters *scorer* failures. A reviewer's
+complaint is a failure mode no rubric has encoded yet, which makes it the most valuable input the
+improvement loop could have and the one it ignored.
+
+**FR-33.1 (P1) — Review comments cluster beside scorer failures.** Same signature-based grouping,
+same anti-thrash rules, same evidence requirements.
+
+**FR-33.2 (P0) — The outcome partner is never comment count.** Fewer comments is achievable by
+producing changes nobody reviews carefully. A proposal driven by review comments is measured
+against O-2 (revert rate), and a proposal that reduces comments while revert rate rises is a
+proposal that made things worse.
 
 ## 8. Non-functional requirements
 

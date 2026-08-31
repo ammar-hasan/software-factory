@@ -1812,6 +1812,50 @@ def checkpoints_resolve(
 
 
 @app.command()
+def explain(
+    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    work_item_id: Annotated[str, typer.Argument(help="Which work item to ask about.")],
+    question: Annotated[str, typer.Argument(help="What you want to know.")],
+    as_json: JsonOpt = False,
+) -> None:
+    """Ask a handed-off work item why it did something (FR-32).
+
+    Answered from what the run wrote down at the time -- its decisions, what it tried, the
+    constraints it found -- and from nothing else. It does not re-run anything: an answer
+    produced by re-running is an answer about a *different* execution, so a reviewer asking
+    "why did you do that" would be told what a second run would do.
+
+    When the record does not contain the answer it says so. That is the point where a person
+    is most likely to accept a plausible reconstruction: reading a change they did not
+    write, from a system that has been right so far, in a hurry.
+    """
+    from software_factory.orchestrator.explain import Explainer
+
+    try:
+        entries = list(Ledger(path).read())
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    answer = Explainer.from_ledger(entries).answer(work_item_id, question)
+
+    if as_json:
+        _emit({"ok": answer.answered, "answer": answer.as_dict()})
+        raise typer.Exit(EXIT_OK if answer.answered else EXIT_FAILED)
+
+    if not answer.answered:
+        console.print(f"[yellow]{answer.note}[/]")
+        raise typer.Exit(EXIT_FAILED)
+
+    console.print(f"[bold]{answer.work_item_id}[/] — {answer.question}\n")
+    for citation in answer.citations:
+        console.print(f"  [dim]{citation.kind.value} · {citation.stage} · {citation.run_id}[/]")
+        console.print(f"  {citation.text}\n")
+    console.print(f"[dim]{answer.note}[/]")
+    raise typer.Exit(EXIT_OK)
+
+
+@app.command()
 def providers(
     root: RootArg = Path(),
     probe: Annotated[

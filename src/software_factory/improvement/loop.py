@@ -35,7 +35,7 @@ from typing import Any
 
 from software_factory.evals.scorers import ImprovementProposal, ProposalVerdict, Scorer
 from software_factory.identity import Capability, Decision
-from software_factory.improvement.clustering import Cluster
+from software_factory.improvement.clustering import Cluster, Source
 from software_factory.memory.records import utc_now
 
 #: How long the loop must leave a target alone after proposing a change to it (FR-14.6).
@@ -315,6 +315,22 @@ def check_effectiveness(
     return None
 
 
+FORBIDDEN_PARTNERS_FOR_REVIEW: frozenset[str] = frozenset(
+    {"review-comment-count", "comments-per-change", "review-comments", "comment-count"}
+)
+"""Outcome metrics a review-driven proposal may never be measured against (FR-33.2).
+
+Fewer review comments is trivially achievable by producing changes nobody reviews carefully,
+so a loop optimising for it would learn to make its output harder to scrutinise and would
+score that as an improvement. The partner for this input is O-2, the revert rate: a proposal
+that reduces comments while reverts rise made things worse, and only the second metric can
+say so.
+
+Named rather than inferred, because the failure is a *specific* metric being chosen and a
+heuristic over metric names would either miss a rename or forbid something legitimate.
+"""
+
+
 def may_propose(
     state: LoopState,
     cluster: Cluster,
@@ -389,6 +405,20 @@ def may_propose(
                 "not had time to alter."
             ),
         )
+
+    if cluster.source is Source.REVIEW_COMMENT and scorer is not None:
+        partner = (scorer.outcome_partner or "").strip().lower()
+        if partner in FORBIDDEN_PARTNERS_FOR_REVIEW:
+            return Refused(
+                "loop.gameable_partner",
+                f"a proposal driven by review comments cannot be measured against {partner!r}",
+                (
+                    "Measure it against the revert rate (O-2). Fewer comments is achievable "
+                    "by producing changes nobody reviews carefully, so a loop optimising for "
+                    "it learns to make its output harder to scrutinise and scores that as an "
+                    "improvement."
+                ),
+            )
 
     rejected = state.rejected_signatures().get(cluster.signature)
     if rejected is not None and not new_evidence:
