@@ -34,6 +34,7 @@ from software_factory.definition.models import (
     AgentDefinition,
     AutomationDefinition,
     FactoryDocument,
+    PrincipalDefinition,
     RunnerDefinition,
     ScorerDefinition,
     SkillDefinition,
@@ -99,6 +100,13 @@ class LoadedSkill:
         return f"agent:{self.owner_agent}" if self.owner_agent else "factory"
 
 
+@dataclass(frozen=True, slots=True)
+class LoadedPrincipal:
+    name: str
+    path: Path
+    definition: PrincipalDefinition
+
+
 @dataclass(slots=True)
 class Definition:
     """A fully loaded, structurally valid factory definition."""
@@ -110,6 +118,7 @@ class Definition:
     runners: dict[str, LoadedRunner] = field(default_factory=dict)
     scorers: dict[str, LoadedScorer] = field(default_factory=dict)
     skills: dict[str, LoadedSkill] = field(default_factory=dict)
+    principals: dict[str, LoadedPrincipal] = field(default_factory=dict)
     unloaded: set[str] = field(default_factory=set)
     """Names whose files failed to parse, so they are absent from the maps above.
 
@@ -181,6 +190,7 @@ def load(
     _load_runners(root, definition, report)
     _load_scorers(root, definition, report)
     _load_skills(root / "skills", definition.skills, report, owner_agent=None)
+    _load_principals(root, definition, report)
     return definition, report
 
 
@@ -285,6 +295,29 @@ def _load_automations(root: Path, definition: Definition, report: ValidationRepo
             continue
         definition.automations[directory.name] = LoadedAutomation(
             name=directory.name, path=path, definition=parsed, prompt=doc.body
+        )
+
+
+def _load_principals(root: Path, definition: Definition, report: ValidationReport) -> None:
+    """Load ``principals/*.yaml``.
+
+    A factory with none has no decision-makers; `validate` reports that. Inventing a default
+    principal here would be inventing an authority nobody granted.
+    """
+    base = root / "principals"
+    if not base.is_dir():
+        return
+    for path in sorted(base.glob("*.yaml")):
+        raw = fm.parse_yaml_file(path)
+        raw.setdefault("id", path.stem)
+        try:
+            parsed = PrincipalDefinition.model_validate(raw)
+        except ValidationError as exc:
+            _record_pydantic(exc, path, report, line_lookup=partial(fm.yaml_line_of, path))
+            definition.unloaded.add(path.stem)
+            continue
+        definition.principals[parsed.id] = LoadedPrincipal(
+            name=parsed.id, path=path, definition=parsed
         )
 
 

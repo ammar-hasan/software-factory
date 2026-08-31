@@ -89,6 +89,7 @@ def validate(definition: Definition, report: ValidationReport | None = None) -> 
     _check_runner_pinning(definition, scratch)
     _check_ladder(definition, scratch)
     _check_automation_overlap(definition, scratch)
+    _check_principals(definition, scratch)
 
     unloaded = definition.unloaded
     for issue in scratch.issues:
@@ -469,6 +470,108 @@ def _description_similarity(left: str, right: str) -> float:
     if not left_set or not right_set:
         return 0.0
     return len(left_set & right_set) / len(left_set | right_set)
+
+
+def _check_principals(definition: Definition, report: ValidationReport) -> None:
+    """Capability grants must name real capabilities, and reach real holders (FR-25.2)."""
+    from software_factory.identity.principals import PERSON_ONLY, Capability
+
+    known = {c.value for c in Capability}
+    granted: dict[str, list[str]] = {}
+
+    for loaded in definition.principals.values():
+        declared = loaded.definition
+        for name in declared.capabilities:
+            if name not in known:
+                report.add(
+                    ValidationIssue(
+                        severity=Severity.ERROR,
+                        code="principal.unknown_capability",
+                        message=f"principal {declared.id!r} is granted unknown capability {name!r}",
+                        path=loaded.path,
+                        key="capabilities",
+                        accepted=tuple(sorted(known)),
+                        remediation="Name a capability that exists, or remove the grant.",
+                    )
+                )
+                continue
+            granted.setdefault(name, []).append(declared.id)
+
+            # A capability that exists to record that a *person* decided cannot be held by
+            # an agent: granting it does not delegate the checkpoint, it deletes it.
+            if declared.kind != "person" and Capability(name) in PERSON_ONLY:
+                report.add(
+                    ValidationIssue(
+                        severity=Severity.ERROR,
+                        code="principal.capability_needs_person",
+                        message=(
+                            f"principal {declared.id!r} is a {declared.kind} and cannot hold "
+                            f"{name!r}"
+                        ),
+                        path=loaded.path,
+                        key="capabilities",
+                        remediation=(
+                            "This checkpoint exists to record that a person looked. Grant it "
+                            "to a person, or remove the checkpoint from `policy/` if the "
+                            "factory genuinely does not want it."
+                        ),
+                    )
+                )
+
+    if not definition.principals:
+        report.add(
+            ValidationIssue(
+                severity=Severity.WARNING,
+                code="factory.no_principals",
+                message="no principals are declared, so no human checkpoint can be cleared",
+                path=definition.root,
+                remediation=(
+                    "Add `principals/<id>.yaml` for the people who approve specs, answer "
+                    "questions, and adopt changes. Until then every checkpoint parks its "
+                    "work item unanswered."
+                ),
+            )
+        )
+        return
+
+    # A checkpoint routed to a capability nobody holds is a question nobody can answer, and
+    # FR-16.4 turns an unanswered question into a parked work item. Warn where the factory
+    # is one checkpoint away from a stall it cannot clear.
+    for capability in ("approve_spec", "answer_question", "adopt_definition_change"):
+        if capability not in granted:
+            report.add(
+                ValidationIssue(
+                    severity=Severity.WARNING,
+                    code="principal.unheld_capability",
+                    message=f"no principal holds {capability!r}",
+                    path=definition.root,
+                    remediation=(
+                        f"Grant {capability} to someone. A checkpoint answered by a "
+                        "capability nobody holds parks the work item and never clears."
+                    ),
+                )
+            )
+
+    # FR-25.3 needs two distinct approvers from distinct groups for a self-referential
+    # change. One holder cannot satisfy it, and finding that out at approval time means
+    # finding it out when the work is already blocked.
+    approvers = granted.get("approve_self_referential_change", [])
+    if len(approvers) == 1:
+        report.add(
+            ValidationIssue(
+                severity=Severity.WARNING,
+                code="principal.insufficient_approvers",
+                message=(
+                    "only one principal holds approve_self_referential_change; FR-25.3 "
+                    "requires two, from outside the proposer's group"
+                ),
+                path=definition.root,
+                remediation=(
+                    "Grant it to a second principal in a different group. With one holder, "
+                    "any self-referential change they propose can never be approved."
+                ),
+            )
+        )
 
 
 def _check_secrets_declared(definition: Definition, report: ValidationReport) -> None:

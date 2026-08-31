@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from software_factory.definition.models import Stage
+from software_factory.identity import Capability, Decision
 from software_factory.orchestrator import (
     DEFAULT_NON_SKIPPABLE,
     DEFAULT_TRANSITIONS,
@@ -38,6 +39,20 @@ def item(stage: Stage = Stage.INTAKE, **kwargs) -> WorkItem:
     }
     base.update(kwargs)
     return WorkItem(**base)  # type: ignore[arg-type]
+
+
+def approval(capability: Capability, subject: str = "") -> Decision:
+    """A decision a `Directory` would have produced. Tests state the authority explicitly.
+
+    Building one here rather than a whole directory keeps these tests about the stage
+    machine; `tests/test_identity.py` is where the grant itself is checked.
+    """
+    return Decision(
+        principal_id="human:maintainer",
+        capability=capability,
+        subject=subject,
+        rationale="approved for this test",
+    )
 
 
 @pytest.fixture
@@ -111,7 +126,7 @@ def test_a_human_can_approve_skipping_review(machine: StageMachine) -> None:
         Stage.HANDOFF,
         actor="human:maintainer",
         reason="documentation-only change",
-        human_approved_skip=True,
+        approval=approval(Capability.SKIP_STAGE),
     )
 
     assert isinstance(moved, Transition)
@@ -196,7 +211,10 @@ def test_a_human_can_cancel_from_any_stage(machine: StageMachine) -> None:
         work = item(stage)
 
         cancelled = machine.cancel(
-            work, actor="human:maintainer", reason="no longer needed", human_approved=True
+            work,
+            actor="human:maintainer",
+            reason="no longer needed",
+            approval=approval(Capability.CANCEL_WORK, work.id),
         )
 
         assert isinstance(cancelled, Transition)
@@ -206,7 +224,12 @@ def test_a_human_can_cancel_from_any_stage(machine: StageMachine) -> None:
 def test_cancelling_a_terminal_item_is_refused(machine: StageMachine) -> None:
     work = item(Stage.CANCELLED)
 
-    refused = machine.cancel(work, actor="human:a", reason="again", human_approved=True)
+    refused = machine.cancel(
+        work,
+        actor="human:a",
+        reason="again",
+        approval=approval(Capability.CANCEL_WORK, work.id),
+    )
 
     assert isinstance(refused, TransitionRefused)
     assert refused.code == "stage.terminal"

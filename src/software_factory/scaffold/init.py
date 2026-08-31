@@ -75,6 +75,9 @@ def init_factory(
         "automations/labeled-issue/automation.md": templates.AUTOMATION.format(
             owner=owner, repo=repo
         ),
+        f"principals/{owner}.yaml": templates.PRINCIPAL_OWNER.format(owner=owner),
+        "principals/second-reviewer.yaml": templates.PRINCIPAL_REVIEWER,
+        "principals/conductor.yaml": templates.PRINCIPAL_CONDUCTOR,
         "policy/stages.yaml": templates.STAGES_POLICY,
         "policy/gates.yaml": templates.GATES_POLICY,
         "policy/budgets.yaml": templates.BUDGETS_POLICY,

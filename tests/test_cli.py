@@ -558,3 +558,27 @@ def test_spec_induct_on_an_empty_directory_is_not_an_error(tmp_path: Path) -> No
 
     assert result.exit_code == 0
     assert payload(result.output)["induction"]["proposed"] == 0
+
+
+def test_principals_reports_who_may_decide_what(tmp_path: Path) -> None:
+    """The security answer to "who can approve, override, widen, or stop?" -- from the
+    definition, because that is the only place a grant is reviewable (FR-25.2)."""
+    runner.invoke(app, ["init", str(tmp_path), "--name", "ref", "--owner", "amaya"])
+
+    result = runner.invoke(app, ["principals", str(tmp_path), "--json"])
+    body = payload(result.output)
+
+    by_id = {p["id"]: p for p in body["principals"]}
+    assert "approve_spec" in by_id["amaya"]["capabilities"]
+    assert by_id["conductor"]["kind"] == "agent"
+    assert "approve_spec" not in by_id["conductor"]["capabilities"]
+
+
+def test_principals_names_the_capabilities_nobody_holds(tmp_path: Path) -> None:
+    """A checkpoint answered by a capability nobody holds parks its work item and never
+    clears, so an operator needs to see the hole before they hit it."""
+    runner.invoke(app, ["init", str(tmp_path), "--name", "ref", "--owner", "amaya"])
+
+    body = payload(runner.invoke(app, ["principals", str(tmp_path), "--json"]).output)
+
+    assert "erase_data" in body["unheldCapabilities"]

@@ -401,3 +401,72 @@ to do, which is why prompts are safe to iterate on.
 **Policy is not enforcement.** The checkpoints in `policy/` are your team's workflow.
 Merge authority lives in your repository's branch protection, not here.
 """
+
+
+PRINCIPAL_OWNER = """\
+# The person this factory answers to.
+#
+# Authority is granted per capability, never per person-in-general (FR-25.2): `approve_spec`
+# and `erase_data` are different powers, and a role that bundles them is a role nobody can
+# reason about later. Start with the checkpoints you actually want and add the rest when a
+# specific decision needs them.
+#
+# `identities` map provider logins to this principal *explicitly*. An unmapped identity may
+# open an issue -- intake accepts work from anyone -- but may not make a decision. Guessing
+# that `git-host:{owner}` and `chat:{owner}` are the same person is exactly the guess that
+# turns an intake channel into an authorisation channel.
+id: {owner}
+kind: person
+displayName: {owner}
+groups: [maintainers]
+identities:
+  - git-host:{owner}
+capabilities:
+  - approve_spec
+  - answer_question
+  - adopt_definition_change
+  - approve_self_referential_change
+  - widen_blast_radius
+  - cancel_work
+  - skip_stage
+  - override_gate
+  - emergency_stop
+  - steer_run
+"""
+
+PRINCIPAL_REVIEWER = """\
+# A second approver, in a different group.
+#
+# FR-25.3: a self-referential change -- one that alters a scorer, a gate, or an eval --
+# needs two approvers from outside the proposer's group. The failure mode there is not
+# carelessness but capture, and a proposal that quietly widens what counts as success reads
+# perfectly well to one approver who shares the proposer's assumptions.
+#
+# Replace this with a real second person. Until you do, the two holders of
+# `approve_self_referential_change` are this placeholder and the owner -- enough to satisfy
+# the rule mechanically, and not enough to satisfy what the rule is for.
+id: second-reviewer
+kind: person
+displayName: Second reviewer
+groups: [reviewers]
+capabilities:
+  - approve_spec
+  - answer_question
+  - adopt_definition_change
+  - approve_self_referential_change
+"""
+
+PRINCIPAL_CONDUCTOR = """\
+# The conductor, as a principal.
+#
+# Agents are principals too: every decision is attributed (FR-25.4), and "the conductor
+# advanced this work item" is a decision. What an agent cannot hold is any capability whose
+# whole content is that a person looked -- `sf validate` refuses such a grant rather than
+# honouring it, because a factory that can configure its way out of its own checkpoints has
+# none.
+id: conductor
+kind: agent
+displayName: Conductor
+capabilities:
+  - steer_run
+"""

@@ -820,6 +820,63 @@ def gates(as_json: JsonOpt = False) -> None:
 
 
 @app.command()
+def principals(root: RootArg = Path(), as_json: JsonOpt = False) -> None:
+    """Who this factory recognises, and what each of them may decide.
+
+    The security answer to "who can approve, override, widen, or stop?" -- computed from the
+    definition, because that is the only place a capability grant can be reviewed by
+    somebody other than the person who wrote it (FR-25.2).
+    """
+    from software_factory.identity.loading import directory_from
+    from software_factory.identity.principals import Capability
+
+    try:
+        definition = load_strict(root)
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    book = directory_from(definition)
+    rows = [
+        {
+            "id": p.id,
+            "kind": p.kind.value,
+            "displayName": p.display_name,
+            "groups": sorted(p.groups),
+            "capabilities": sorted(c.value for c in p.capabilities),
+            "identities": sorted(p.identities),
+            "active": p.active,
+        }
+        for p in book.all()
+    ]
+    unheld = sorted(c.value for c in Capability if not book.holders(c))
+
+    if as_json:
+        _emit({"ok": True, "principals": rows, "unheldCapabilities": unheld})
+        raise typer.Exit(EXIT_OK)
+
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("principal", "kind", "groups", "may decide"):
+        table.add_column(column, overflow="fold")
+    for row in rows:
+        name = str(row["id"]) + ("" if row["active"] else " [dim](inactive)[/]")
+        table.add_row(
+            name,
+            str(row["kind"]),
+            ", ".join(row["groups"]) or "[dim]none[/]",  # type: ignore[arg-type]
+            ", ".join(row["capabilities"]) or "[dim]nothing[/]",  # type: ignore[arg-type]
+        )
+    console.print(table)
+    if unheld:
+        console.print(
+            f"\n[yellow]No principal holds:[/] {', '.join(unheld)}.\n"
+            "A checkpoint answered by a capability nobody holds parks its work item "
+            "and never clears."
+        )
+    raise typer.Exit(EXIT_OK)
+
+
+@app.command()
 def stages(as_json: JsonOpt = False) -> None:
     """Print the default stage graph and which stages cannot be skipped."""
     from software_factory.orchestrator import DEFAULT_NON_SKIPPABLE, DEFAULT_TRANSITIONS

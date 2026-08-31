@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from software_factory.definition.models import Stage
+from software_factory.identity.principals import Capability, Decision
 from software_factory.memory.records import utc_now
 from software_factory.spec.units import TrustClass
 
@@ -253,12 +254,18 @@ class StageMachine:
         reason: str,
         evidence: tuple[str, ...] = (),
         basis_trust: TrustClass = TrustClass.INTERNAL,
-        human_approved_skip: bool = False,
+        approval: Decision | None = None,
     ) -> Transition | TransitionRefused:
         """Move a work item, or refuse with the reason.
 
         Three refusals matter: an illegal transition, a skip of a non-skippable stage,
         and a routing decision justified only by untrusted input.
+
+        ``approval`` carries a human's decision to skip a non-skippable stage. It is a
+        :class:`Decision`, not a boolean: a boolean says *that* something was approved and
+        a Decision says who approved it, under which capability, against what evidence --
+        and only a `Directory` that holds the grant can produce one. `human_approved_skip=True`
+        was a claim any caller could make about a human who may not exist.
         """
         if item.terminal:
             return TransitionRefused(
@@ -295,16 +302,19 @@ class StageMachine:
         )
         skipped = self.skipped_between(measured_from, to_stage)
         blocked_skips = tuple(s for s in skipped if s in self.non_skippable)
-        if blocked_skips and not human_approved_skip:
-            names = ", ".join(s.value for s in blocked_skips)
-            return TransitionRefused(
-                "stage.non_skippable",
-                f"moving to {to_stage.value} would skip {names}",
-                (
-                    f"{names} cannot be skipped on an agent's authority. A human must approve "
-                    "it, and the approval is recorded against their identity."
-                ),
-            )
+        if blocked_skips:
+            refusal = _requires(approval, Capability.SKIP_STAGE, item.id)
+            if refusal is not None:
+                names = ", ".join(s.value for s in blocked_skips)
+                return TransitionRefused(
+                    "stage.non_skippable",
+                    f"moving to {to_stage.value} would skip {names}",
+                    (
+                        f"{names} cannot be skipped on an agent's authority. A principal "
+                        f"holding {Capability.SKIP_STAGE.value} must approve it, and the "
+                        f"approval is recorded against their identity. ({refusal})"
+                    ),
+                )
 
         transition = Transition(
             from_stage=item.stage,
@@ -350,28 +360,29 @@ class StageMachine:
         *,
         actor: str,
         reason: str,
-        human_approved: bool = False,
+        approval: Decision | None = None,
     ) -> Transition | TransitionRefused:
         """Cancel from any stage. Available to a human (PRD FR-4.8), and only to a human.
 
         The docstring said "always available to a human" and the body checked nothing, so
         an agent could cancel any work item from any stage -- a one-call route around every
         gate in the graph, in the one component that reads attacker-controlled text.
-        `human_approved` is the same flag `advance` already uses for a skip, so the two
+        ``approval`` is the same :class:`Decision` `advance` takes for a skip, so the two
         human-authority decisions are expressed the same way and recorded the same way.
         """
         if item.terminal:
             return TransitionRefused(
                 "stage.terminal", f"{item.id} is already {item.stage.value}", "Nothing to do."
             )
-        if not human_approved:
+        refusal = _requires(approval, Capability.CANCEL_WORK, item.id)
+        if refusal is not None:
             return TransitionRefused(
                 "stage.cancel_needs_human",
                 f"cancelling {item.id} is a human decision",
                 (
                     "Cancellation ends the work with no verification and no handoff, so it "
-                    "is not an agent's to make. A human must approve it, and the approval "
-                    "is recorded against their identity."
+                    f"is not an agent's to make. A principal holding "
+                    f"{Capability.CANCEL_WORK.value} must approve it. ({refusal})"
                 ),
             )
         transition = Transition(
@@ -384,6 +395,28 @@ class StageMachine:
         item.history.append(transition)
         item.stage = Stage.CANCELLED
         return transition
+
+
+def _requires(approval: Decision | None, capability: Capability, subject: str) -> str | None:
+    """``None`` when the decision authorises this, otherwise why it does not.
+
+    Checking the *capability*, not merely the presence of a decision: an approval to answer
+    a question is not an approval to cancel the work, and a check that accepted any decision
+    would let the weakest capability a factory grants stand in for the strongest.
+    """
+    if approval is None:
+        return "no approval was supplied"
+    if approval.capability is not capability:
+        return (
+            f"{approval.principal_id!r} exercised {approval.capability.value}, "
+            f"which does not authorise {capability.value}"
+        )
+    if approval.subject not in ("", subject):
+        return (
+            f"the approval names {approval.subject!r}, not {subject!r}; an approval is for "
+            "one decision, not a token to reuse"
+        )
+    return None
 
 
 def validate_graph(

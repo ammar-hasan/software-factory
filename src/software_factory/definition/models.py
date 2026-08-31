@@ -294,6 +294,42 @@ class Ladder(Strict):
         raise KeyError(name)
 
 
+class PrincipalDefinition(Strict):
+    """``principals/<id>.yaml`` -- one actor this factory recognises (FR-25.1, FR-25.2).
+
+    Authority is configuration for the same reason everything else here is: a repository
+    review is the only place a capability grant can be seen by someone other than the person
+    who made it.
+    """
+
+    id: Name
+    kind: Literal["person", "agent", "automation", "plane"] = "person"
+    display_name: str | None = Field(default=None, alias="displayName")
+    groups: tuple[Name, ...] = ()
+    capabilities: tuple[str, ...] = ()
+    identities: tuple[str, ...] = ()
+    """Provider identities as ``provider:handle``, e.g. ``git-host:amaya``.
+
+    Explicit rather than inferred. An identity the factory has not been told about may
+    trigger intake -- anyone can open an issue -- but may not make a decision, and guessing
+    that `git-host:amaya` and `chat:amaya` are the same person is exactly the guess that
+    turns an intake channel into an authorisation channel.
+    """
+    active: bool = True
+
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
+    @model_validator(mode="after")
+    def _identities_are_qualified(self) -> Self:
+        for identity in self.identities:
+            if ":" not in identity or identity.startswith(":") or identity.endswith(":"):
+                raise ValueError(
+                    f"identity {identity!r} must be `provider:handle`; a bare handle cannot "
+                    "be resolved, because the same name on two providers is two people"
+                )
+        return self
+
+
 class FactoryDocument(Strict):
     """``factory.yaml`` -- the root document (FR-2.1)."""
 

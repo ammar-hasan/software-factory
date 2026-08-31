@@ -42,6 +42,9 @@ class EntryType(enum.StrEnum):
     SKILL_LIFECYCLE = "skill.lifecycle"
     SPEC_DELTA = "spec.delta"
     HUMAN_DECISION = "human.decision"
+    CHECKPOINT_OPENED = "checkpoint.opened"
+    CHECKPOINT_ESCALATED = "checkpoint.escalated"
+    CHECKPOINT_RESOLVED = "checkpoint.resolved"
     BUDGET_EVENT = "budget.event"
 
 
