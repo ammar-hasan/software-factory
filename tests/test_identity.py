@@ -577,7 +577,9 @@ def test_skipping_review_needs_a_decision_not_a_boolean() -> None:
     refused = machine.advance(work, Stage.HANDOFF, actor="conductor", reason="looks done")
     assert isinstance(refused, TransitionRefused)
     assert refused.code == "stage.non_skippable"
-    assert Blocker  # the blocker enum is what a caller records next
+    assert (
+        Blocker.AWAITING_HUMAN.value == "awaiting_human"
+    )  # the blocker enum is what a caller records next
 
     wrong = Decision(
         principal_id="amaya",
@@ -592,8 +594,11 @@ def test_skipping_review_needs_a_decision_not_a_boolean() -> None:
     assert "does not authorise" in still_refused.remediation
 
 
-def test_an_approval_for_one_work_item_does_not_authorise_another() -> None:
-    """An approval is for one decision, not a token to reuse."""
+def test_an_approval_naming_another_work_item_does_not_authorise_this_one() -> None:
+    """An approval is for one decision, not a token to reuse.
+
+    A *mismatched* subject only. The empty subject -- which the machine read as a wildcard for every work item -- is covered by `test_i1_an_approval_with_no_subject_authorises_nothing`.
+    """
     from software_factory.definition.models import Stage
     from software_factory.orchestrator import StageMachine, TransitionRefused
     from software_factory.orchestrator.workitem import SourceContext, WorkItem

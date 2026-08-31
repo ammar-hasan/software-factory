@@ -156,10 +156,19 @@ def test_author_event_and_provider_are_filterable() -> None:
 
 def test_overlapping_filters_are_reported_conservatively() -> None:
     """FR-18.4 requires lint to report overlap. A false report costs a reader thirty seconds
-    and a missed one costs every matching event twice."""
+    and a missed one costs every matching event twice.
+
+    The three original assertions all fell in the region where the function was correct. A
+    negative filter admits everything except what it names -- the widest thing a key can say
+    -- and was being read as the narrowest, so it overlapped nothing, itself included.
+    """
     assert overlapping_keys({"label": "bug"}, {"label": ["bug", "security"]})
     assert not overlapping_keys({"label": "bug"}, {"label": "security"})
     assert overlapping_keys({"label": "bug"}, {"branch": "main"})
+
+    assert overlapping_keys({"branch": {"not_in": ["main"]}}, {"branch": "feature/x"})
+    assert not overlapping_keys({"branch": {"not_in": ["main"]}}, {"branch": "main"})
+    assert overlapping_keys({"branch": {"not_in": ["main"]}}, {"branch": {"not_in": ["main"]}})
 
 
 # ------------------------------------------------------------------------- adapters
@@ -468,6 +477,16 @@ def test_a_forged_fingerprint_cannot_suppress_a_real_alert() -> None:
     from software_factory.economics import fingerprint_of
 
     assert fingerprint_of("deploy failed", "payments") != fingerprint_of("deploy failedpayments")
+
+    # The other half, which was untested: `fingerprint_of` strips and lowercases every part,
+    # so these are deliberately *equal*. That is the design -- a recurring alert with
+    # inconsistent casing is the same alert -- but it means an adapter putting
+    # attacker-influenced text in a part hands over a way to make a real alert read as a
+    # duplicate. Asserted so the property is a decision on the record rather than an
+    # accident nobody looked at.
+    assert fingerprint_of("  Deploy Failed ", "PAYMENTS") == fingerprint_of(
+        "deploy failed", "payments"
+    )
 
 
 def test_a_failure_signature_is_not_forgeable_across_field_boundaries() -> None:

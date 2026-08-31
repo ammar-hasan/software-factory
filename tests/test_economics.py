@@ -61,9 +61,12 @@ def test_a_cap_warns_before_it_acts() -> None:
     assert state.accepts_new_work
 
 
-def test_at_the_cap_intake_stops_and_running_work_finishes() -> None:
+def test_the_cap_state_says_intake_stops_and_running_work_finishes() -> None:
     """Killing in-flight runs at the cap discards everything already spent on them, which
-    makes the cap cost more than not having one."""
+    makes the cap cost more than not having one.
+
+    A property on an enum member, which is all this checks. The system behaviour the old name asserted is proved by `test_a_factory_past_its_halt_threshold_refuses_to_start_work` -- and until that existed nothing in `src/` read either property, so the sentence this was named for was false while it passed.
+    """
     cap = SpendCap(scope="factory:payments", limit_units=100)
 
     state = cap.state_for(100)
@@ -308,8 +311,11 @@ def test_waiting_improves_an_items_position() -> None:
     assert schedule.next(now=now).id == "old-low"
 
 
-def test_a_recently_queued_low_item_still_waits() -> None:
-    """The fix must not invert priority outright."""
+def test_a_freshly_queued_low_item_waits_behind_a_fresh_high_one() -> None:
+    """The fix must not invert priority outright.
+
+    Both ageing terms are zero here, which is the one configuration in which ageing cannot invert anything -- so this provided no coverage of the bound it claimed to defend. `test_i11_an_aged_routine_item_does_not_outrank_a_fresh_incident` covers that.
+    """
     now = utc_now()
     schedule = Scheduler()
     schedule.enqueue(queued("fresh-low", priority=Priority.LOW, queued_at=now))

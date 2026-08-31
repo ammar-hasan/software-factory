@@ -124,10 +124,68 @@ def test_a_signature_whose_details_diverge_splits() -> None:
 
 def test_failures_with_no_detail_are_not_scattered() -> None:
     """Absence of text is not evidence of a different cause, and treating it as such would
-    scatter every failure whose gate reported a bare verdict."""
+    scatter every failure whose gate reported a bare verdict.
+
+    Five detail-free failures return at `len(detailed) < 2`, so this exercises the early
+    return and never the branch it appears to be about. The three tests below reach the
+    real one -- which a line-level trace showed the suite never executed at all, which is
+    how the signature instability in N3 survived.
+    """
     clusters = cluster_failures([failure(f"r{i}") for i in range(5)])
 
     assert len(clusters) == 1
+
+
+def test_cohering_details_stay_in_one_cluster() -> None:
+    """The `return [members]` path when the details all agree, previously unreached."""
+    clusters = cluster_failures(
+        [failure(f"r{i}", detail="unicode decode error in the csv importer") for i in range(4)]
+    )
+
+    assert len(clusters) == 1
+    assert clusters[0].size == 4
+
+
+def test_a_bare_failure_joins_a_split_group_rather_than_forming_its_own() -> None:
+    """The branch that mixes detail-free failures into split groups.
+
+    Never executed by the suite before, which is why nobody saw that it re-sorted the groups
+    and therefore re-keyed their signatures -- discarding every standing rejection.
+    """
+    encoding = [
+        failure(f"e{i}", detail="unicode decode error in the csv importer") for i in range(4)
+    ]
+    timeouts = [
+        failure(f"t{i}", detail="connection timed out talking to the registry") for i in range(3)
+    ]
+
+    clusters = cluster_failures([*encoding, *timeouts, failure("bare", detail="")])
+
+    assert len(clusters) == 2
+    largest = max(clusters, key=lambda c: c.size)
+    assert any(f.run_id == "bare" for f in largest.failures)
+    assert largest.size == 5
+
+
+def test_a_bare_failure_does_not_change_the_other_clusters_signature() -> None:
+    """The consequence that made the previous branch worth reaching."""
+    encoding = [
+        failure(f"e{i}", detail="unicode decode error in the csv importer") for i in range(4)
+    ]
+    timeouts = [
+        failure(f"t{i}", detail="connection timed out talking to the registry") for i in range(3)
+    ]
+
+    def timeout_signature(failures: list[Failure]) -> str:
+        return next(
+            c.signature
+            for c in cluster_failures(failures)
+            if any(f.run_id.startswith("t") for f in c.failures)
+        )
+
+    assert timeout_signature([*encoding, *timeouts]) == timeout_signature(
+        [*encoding, *timeouts, failure("bare", detail="")]
+    )
 
 
 def test_a_cluster_counts_distinct_work_items() -> None:
@@ -369,7 +427,7 @@ def adopted(index: int, effect: float | None) -> ProposalRecord:
     )
 
 
-def test_a_loop_whose_adopted_changes_move_nothing_switches_itself_off() -> None:
+def test_a_loop_whose_adopted_changes_move_nothing_reports_that_it_should_stop() -> None:
     """FR-14.7a.4. A loop that cannot show it works is a defect and has to show as one."""
     state = LoopState(records=[adopted(i, 0.001) for i in range(4)])
 

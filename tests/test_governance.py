@@ -120,11 +120,20 @@ def tombstoner() -> Callable[[Artifact], None]:
 
 
 def test_an_artifact_past_its_retention_expires() -> None:
+    """The destructor is observed, not merely supplied.
+
+    This called `sweep` with no destructor at all and asserted `report.acted`: nothing was
+    tombstoned, `old.tombstoned` was still False, and the test's name said an artifact
+    expired. Passing a no-op destructor would fix the signature and keep the hole, so what
+    the destructor *received* is what is asserted.
+    """
     retention = Retention()
     old = artifact("t1", DataClass.TRANSCRIPT, age_days=45)
+    tombstoned: list[str] = []
 
-    report = retention.sweep([old], tombstone=tombstoner())
+    report = retention.sweep([old], tombstone=lambda a: tombstoned.append(a.id))
 
+    assert tombstoned == ["t1"]
     assert report.expired == ["t1"]
     assert report.acted
 
@@ -298,13 +307,18 @@ def test_a_legal_hold_blocks_erasure_and_the_report_says_so() -> None:
 def test_an_erasure_report_renders_every_outcome() -> None:
     retention = Retention()
 
+    destroyed: list[str] = []
     body = retention.erase(
         "amaya",
         [artifact("t1", DataClass.TRANSCRIPT, subjects=frozenset({"amaya"}))],
         requested_by="human:dpo",
-        destroy=tombstoner(),
+        destroy=lambda a: destroyed.append(a.id),
     ).as_dict()
 
+    # The receipt is shaped to be handed to a data subject. It asserted `complete: true` and
+    # `erased: ["t1"]` for a call with no destructor at all -- a deletion that did not
+    # occur, blessed as the specified rendering.
+    assert destroyed == ["t1"]
     assert body["subject"] == "amaya"
     assert body["complete"] is True
     assert body["erased"] == ["t1"]
@@ -353,8 +367,11 @@ def test_segments_chain_across_the_boundary(tmp_path: Path) -> None:
     manifest.verify()
 
 
-def test_altering_an_earlier_segment_breaks_every_later_digest(tmp_path: Path) -> None:
-    """Exactly as altering an earlier entry changes every later entry's hash."""
+def test_altering_a_non_final_segment_breaks_every_later_digest(tmp_path: Path) -> None:
+    """Exactly as altering an earlier entry changes every later entry's hash.
+
+    The final segment is the case the chain cannot cover, and it is checked by `test_i4_the_last_segment_is_anchored_in_the_ledger` -- not here. This name used to promise "every later digest", which a reader takes as the guarantee.
+    """
     ledger = filled_ledger(tmp_path / "ledger.jsonl", 25)
     manifest = Manifest(path=tmp_path / "segments.jsonl")
     seal(ledger, manifest, size=10)

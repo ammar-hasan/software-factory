@@ -158,6 +158,41 @@ def test_compaction_is_deterministic() -> None:
     assert compacted() == compacted()
 
 
+def test_compaction_is_deterministic_across_processes() -> None:
+    """Determinism *within* one process is not the property a replay needs.
+
+    Calling the same function twice in one interpreter shares that interpreter's hash seed,
+    so it cannot see the class of non-determinism that matters here -- and the digest is
+    what a replay compares. A subprocess with a different `PYTHONHASHSEED` can.
+    """
+    import os
+    import subprocess
+    import sys
+
+    script = (
+        "from software_factory.definition.models import Stage;"
+        "from software_factory.harness.conversation import "
+        "ConversationState, Note, NoteKind, compact;"
+        "s = ConversationState(work_item_id='wi-1', agent='builder');"
+        "[s.add(Note(kind=NoteKind.DECISION, text=f'd{i}', run_id=f'r{i}', "
+        "stage=Stage.BUILD)) for i in range(20)];"
+        "compact(s, run_id='run-2');"
+        "print(s.digest())"
+    )
+    digests = {
+        subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        ).stdout.strip()
+        for seed in ("0", "1", "random")
+    }
+
+    assert len(digests) == 1, digests
+
+
 def test_the_summary_says_that_notes_were_compacted_away() -> None:
     """A reader who cannot see that something was dropped will read the summary as
     complete."""
@@ -206,3 +241,20 @@ def test_resuming_changes_nothing() -> None:
 def test_every_note_kind_has_a_budget(kind: NoteKind) -> None:
     """A kind with no budget silently takes the default, which is a policy nobody wrote."""
     assert kind in KIND_BUDGET
+
+
+@pytest.mark.parametrize("kind", list(NoteKind))
+def test_a_partial_budget_falls_back_to_the_declared_one(kind: NoteKind) -> None:
+    """The docstring above names the silent-default hazard and never exercised the path
+    where it is actually taken.
+
+    `compact` read `budget.get(kind, 10)`, so a caller overriding one kind got 10 for every
+    other -- a number matching none of the declared budgets, quietly rewriting the policy
+    for the kinds they did not mention.
+    """
+    declared = KIND_BUDGET[kind]
+    carried = state(*(note(kind, f"n{i}") for i in range(declared)))
+
+    # An override for a *different* kind must leave this one at its declared budget.
+    other = next(k for k in NoteKind if k is not kind)
+    assert compact(carried, run_id="run-2", budget={other: 1}) is None

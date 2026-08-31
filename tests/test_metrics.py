@@ -38,8 +38,14 @@ def run_started(subject: str, **payload):
     return (EntryType.RUN_STARTED, subject, payload)
 
 
-def gate(subject: str, name: str, outcome: str):
-    return (EntryType.GATE_EVALUATED, subject, {"gate": name, "outcome": outcome})
+def gate(subject: str, name: str, outcome: str, stage: str = "BUILD"):
+    """A gate evaluation. `stage` is part of the de-duplication key.
+
+    It used to be absent from every fixture here, so the only case exercised was the one
+    where de-duplication is right -- and the cross-stage case, where the same key discarded
+    a genuine failure at a later stage, was never constructed.
+    """
+    return (EntryType.GATE_EVALUATED, subject, {"gate": name, "outcome": outcome, "stage": stage})
 
 
 def transition(subject: str, to: str, **payload):
@@ -92,7 +98,13 @@ def test_a_measure_renders_its_caveats() -> None:
 
 def test_run_counts_separate_work_from_measurement(tmp_path: Path) -> None:
     """FR-15.5. A factory whose run count doubled because it started benchmarking has not
-    doubled its output, and one total cannot say so."""
+    doubled its output, and one total cannot say so.
+
+    This synthesises `purpose` values no writer in the system produces, so it proves the
+    fold can split and not that the split ever happens. That gap is real and is why
+    `RunCounts.as_dict` now says so when nothing in the window declared a purpose other than
+    work -- see `test_run_counts_say_when_no_run_declared_a_purpose_other_than_work`.
+    """
     ledger = ledger_with(
         tmp_path,
         run_started("r1", agent="builder", stage="BUILD", tier="local-small"),
@@ -208,6 +220,27 @@ def test_the_gate_pass_rate_counts_first_attempts_only(tmp_path: Path) -> None:
     assert measure.sample == 2
 
 
+def test_the_same_gate_at_a_later_stage_is_a_separate_attempt(tmp_path: Path) -> None:
+    """The case the fixture above could not construct.
+
+    Several gates legitimately run at more than one stage, and de-duplicating without the
+    stage discarded the later evaluations as repeats -- so a pass at BUILD hid a failure at
+    REVIEW and the pair reported a 100% pass rate. The first evaluation is also the one most
+    likely to have passed, which makes the bias one-directional.
+    """
+    ledger = ledger_with(
+        tmp_path,
+        gate("wi-1", "secret-clean", "pass", stage="BUILD"),
+        gate("wi-1", "secret-clean", "fail", stage="REVIEW"),
+    )
+
+    measure = compute(ledger.read()).measure("gate_pass_rate")
+
+    assert measure is not None
+    assert measure.value == 0.5
+    assert measure.sample == 2
+
+
 def test_no_gates_in_the_window_is_insufficient_data_not_zero(tmp_path: Path) -> None:
     ledger = ledger_with(tmp_path, run_started("r1"))
 
@@ -237,7 +270,13 @@ def test_the_rework_rate_counts_work_items_not_transitions(tmp_path: Path) -> No
 
 def test_changes_opened_counts_a_work_item_once(tmp_path: Path) -> None:
     """A change updated four times is one change; counting updates would make a factory look
-    more productive for revising more."""
+    more productive for revising more.
+
+    The HANDOFF transition synthesised here is one the coordinator did not write, so this
+    passed while the metric never computed on real data. `_default_path` now ends at
+    HANDOFF and `test_a_work_item_runs_all_the_way_to_handoff` proves the real path reaches
+    it; this stays as the unit check on the de-duplication itself.
+    """
     ledger = ledger_with(
         tmp_path,
         transition("wi-1", "HANDOFF"),

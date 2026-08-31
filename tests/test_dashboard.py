@@ -223,6 +223,22 @@ def dashboard(tmp_path: Path):
         server.server_close()
 
 
+def test_the_dashboard_can_reach_its_own_api(dashboard: str) -> None:
+    """The suite had no test that the client could load data at all.
+
+    It checked the HTML for external URLs and never checked the one request the page
+    actually makes -- which the CSP served alongside it forbade, so the entire client was
+    inert under an enforcing browser and nothing here would have noticed.
+    """
+    with urlopen(f"{dashboard}/") as response:
+        policy = response.headers["Content-Security-Policy"]
+    with urlopen(f"{dashboard}/api/overview") as response:
+        body = json.loads(response.read())
+
+    assert "connect-src 'self'" in policy, "the page cannot fetch from its own origin"
+    assert "current" in body
+
+
 def test_the_dashboard_serves_a_page_with_no_external_resources(dashboard: str) -> None:
     """No framework, no CDN, no build step. A dashboard needing `npm install` to look at a
     factory running offline on a laptop fails PR-2 on the first day somebody tries it."""

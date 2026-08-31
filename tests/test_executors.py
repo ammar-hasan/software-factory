@@ -33,14 +33,26 @@ def policy(workspace: Path, **kwargs) -> SandboxPolicy:
 # ------------------------------------------------------------------------ image pinning
 
 
-def test_an_unpinned_image_is_refused() -> None:
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "ghcr.io/acme/builder:latest",
+        "ghcr.io/acme/builder",
+        # Both original examples contain a `/`, which is what the old check actually keyed
+        # on -- so a bare `ubuntu`, the commonest unpinned reference there is, passed the
+        # validator and this test would not have noticed. `registry.local:5000/app` is the
+        # other shape it got wrong, reading the registry port as a version tag.
+        "ubuntu",
+        "python",
+        "registry.local:5000/app",
+        "ghcr.io/acme/builder:",
+    ],
+)
+def test_an_unpinned_image_is_refused(reference: str) -> None:
     """`latest` is a different image on different days, so a run that reproduces today and
     not tomorrow has no bug to find."""
     with pytest.raises(ValueError, match="not pinned"):
-        ContainerImage("ghcr.io/acme/builder:latest")
-
-    with pytest.raises(ValueError, match="not pinned"):
-        ContainerImage("ghcr.io/acme/builder")
+        ContainerImage(reference)
 
 
 def test_a_version_tag_is_accepted_and_a_digest_is_preferred() -> None:
@@ -74,6 +86,26 @@ def test_a_container_executor_finds_a_runtime_when_one_exists(
     executor = ContainerExecutor(policy(tmp_path), ContainerImage("ghcr.io/acme/builder:1.0"))
 
     assert executor.runtime == "/usr/bin/podman"
+
+
+def test_detection_requires_a_reachable_daemon_not_a_binary_on_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real `_detect_runtime` was never executed by any test.
+
+    Every caller monkeypatched it to a literal path, so the function that confused presence
+    with capability -- returning whatever `shutil.which` found -- had no coverage at all.
+    """
+    from software_factory.runtime import executors as module
+
+    monkeypatch.setattr(module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(module, "_daemon_reachable", lambda _runtime: False)
+
+    assert module._detect_runtime() is None
+
+    monkeypatch.setattr(module, "_daemon_reachable", lambda runtime: runtime.endswith("docker"))
+
+    assert module._detect_runtime() == "/usr/bin/docker"
 
 
 def test_a_container_executor_refuses_a_network_allowlist(tmp_path: Path) -> None:

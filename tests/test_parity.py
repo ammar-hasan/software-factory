@@ -115,31 +115,86 @@ def structural_executors(tmp_path: Path) -> dict[str, Executor]:
 
 def test_every_executor_satisfies_the_same_protocol(tmp_path: Path) -> None:
     """FR-20.8's promotion path is a lie if selecting a different executor means calling a
-    different interface."""
+    different interface.
+
+    `isinstance` against a `runtime_checkable` Protocol checks for attribute *names* only,
+    so an executor whose `run` took different parameters would satisfy it. The signature is
+    compared instead, which is the thing a caller depends on.
+    """
+    import inspect
+
+    expected = inspect.signature(LocalExecutor.run)
     for name, executor in structural_executors(tmp_path).items():
         assert isinstance(executor, Executor), name
-        assert hasattr(executor, "policy"), name
+        assert inspect.signature(type(executor).run) == expected, name
 
 
 def test_every_executor_carries_the_same_policy(tmp_path: Path) -> None:
     """The policy is what `sf audit` reports. An executor that held a different one would
-    make the audit describe a run that did not happen."""
+    make the audit describe a run that did not happen.
+
+    Checking `policy.workspace` alone was the docstring describing the ssh worker and the
+    assertion not looking at it: its commands run in `remote_workspace`, which the policy
+    does not mention. So the *effective* directory is asserted too, and the ssh worker
+    declares its remote mapping rather than leaving the divergence unstated.
+    """
     for name, executor in structural_executors(tmp_path).items():
         assert executor.policy.workspace == tmp_path, name
+        if name == "ssh-worker":
+            # Named, not glossed over: this executor genuinely runs elsewhere, and the
+            # audit has to say so rather than reporting the local workspace.
+            assert executor.remote_workspace == "/srv/factory"
+
+
+class RecordingInner:
+    """Stands in for the composed `LocalExecutor`, so the wrappers can be exercised.
+
+    The two source-text assertions this replaces (`"command=tuple(command)" in source`,
+    `"_redact" not in source`) were substrings, not behaviour: the first would pass for the
+    string appearing in a comment and for a `run` that later overwrote `command`, and the
+    second would pass for an executor reimplementing redaction under another name. Swapping
+    the inner executor makes the wrapper observable with no daemon and no worker, which is
+    what let the real behaviour go unchecked in the first place.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[str], Path | None]] = []
+
+    def run(
+        self, command: list[str], *, timeout_s: int | None = None, cwd: Path | None = None
+    ) -> CommandResult:
+        self.calls.append((list(command), cwd))
+        return CommandResult(
+            command=tuple(command),
+            exit_code=0,
+            stdout="[redacted] output",
+            stderr="",
+            duration_s=0.1,
+            truncated=True,
+        )
 
 
 def test_every_executor_reports_the_command_the_caller_asked_for(tmp_path: Path) -> None:
     """A transcript full of `docker run --rm ...` or `ssh -o BatchMode=yes ...` tells a
     reader about the executor rather than about the work, and the executor is not what they
-    are debugging. Checked structurally here; the behavioural suite proves it end to end.
-    """
-    import inspect
+    are debugging."""
+    for name, executor in structural_executors(tmp_path).items():
+        if name == "local":
+            continue
+        inner = RecordingInner()
+        executor._inner = inner  # type: ignore[assignment]
 
-    from software_factory.runtime import executors as module
+        result = executor.run(["pytest", "-q"], cwd=tmp_path)
 
-    for name in ("ContainerExecutor", "SshWorkerExecutor"):
-        source = inspect.getsource(getattr(module, name).run)
-        assert "command=tuple(command)" in source, name
+        assert result.command == ("pytest", "-q"), name
+        # And the wrapper really did wrap: the inner saw the runtime invocation, not the
+        # caller's command, so the reported command is a deliberate rewrite rather than the
+        # wrapper having done nothing.
+        assert inner.calls[0][0] != ["pytest", "-q"], name
+        # Joined, because the two wrappers pass the command on differently: the container
+        # appends it as separate argv elements and the ssh worker quotes it into one remote
+        # shell string. Both must still carry it.
+        assert "pytest" in " ".join(inner.calls[0][0]), name
 
 
 def test_the_result_shape_is_identical_across_executors() -> None:
@@ -159,19 +214,24 @@ def test_the_result_shape_is_identical_across_executors() -> None:
     }
 
 
-def test_redaction_and_capping_are_shared_not_reimplemented() -> None:
+def test_redaction_and_capping_are_shared_not_reimplemented(tmp_path: Path) -> None:
     """Two executors that redact differently make "the same definition behaves the same
     everywhere" false in the direction hardest to notice: a secret leaking on one runner and
-    not another."""
-    import inspect
+    not another.
 
-    from software_factory.runtime import executors as module
+    Behavioural: the inner executor is what redacts and caps, so the wrapper must return the
+    inner's fields untouched. A wrapper that rebuilt the result -- under any name -- would
+    lose them here.
+    """
+    for name, executor in structural_executors(tmp_path).items():
+        if name == "local":
+            continue
+        executor._inner = RecordingInner()  # type: ignore[assignment]
 
-    for name in ("ContainerExecutor", "SshWorkerExecutor"):
-        source = inspect.getsource(getattr(module, name))
-        assert "self._inner" in source, f"{name} does not compose LocalExecutor"
-        assert "_redact" not in source, f"{name} reimplements redaction"
-        assert "_cap(" not in source, f"{name} reimplements capping"
+        result = executor.run(["pytest"], cwd=tmp_path)
+
+        assert result.stdout == "[redacted] output", name
+        assert result.truncated is True, f"{name} lost the inner executor's truncation flag"
 
 
 # ------------------------------------------------------------------ behavioural parity
@@ -259,15 +319,22 @@ def test_network_none_is_enforced_in_the_container(tmp_path: Path) -> None:
 
 def test_the_suite_states_what_it_could_not_verify() -> None:
     """FR-20.5 makes divergence a release blocker, which requires knowing what was actually
-    compared. A suite that skipped silently would leave a reader believing all three
-    executors were checked.
+    compared.
+
+    This used to build a list of string literals and assert they were non-empty -- it could
+    not fail under any condition, reported nothing to CI, and was the only place the ssh
+    worker's total absence from behavioural testing was "documented". That is the exact
+    shape the module docstring warns about, inside the test written to prevent it.
+
+    It now *skips* with the reason, so `pytest -rs` prints it and the CI job's summary step
+    surfaces it. A skip is visible; a passing assertion over string literals is not.
     """
     unverified = []
     if RUNTIME is None:
-        unverified.append("container (no usable runtime: no daemon reachable)")
-    unverified.append("ssh-worker (no reachable worker configured for this suite)")
+        unverified.append("container: no usable runtime (no daemon reachable)")
+    unverified.append("ssh-worker: no reachable worker is configured for this suite")
 
-    # Not a failure -- these are honest environmental limits. The assertion is that the
-    # limits are enumerable, so CI can report them rather than a green tick implying more
-    # than it means.
-    assert all(reason.strip() for reason in unverified)
+    if unverified:
+        pytest.skip(
+            "behavioural parity not verified for — " + "; ".join(unverified),
+        )
