@@ -732,3 +732,32 @@ def test_dash_on_a_missing_ledger_says_so(tmp_path: Path) -> None:
 
     assert result.exit_code != 0
     assert "no ledger" in result.output
+
+
+def test_audit_egress_reports_the_scaffold_as_offline_capable(tmp_path: Path) -> None:
+    """PR-2: local is the reference implementation, not a degraded mode. A scaffold that
+    reached the network on day one would make that false out of the box."""
+    runner.invoke(app, ["init", str(tmp_path), "--name", "ref", "--owner", "amaya"])
+
+    body = payload(runner.invoke(app, ["audit", str(tmp_path), "--egress", "--json"]).output)
+
+    assert body["egress"]["offlineCapable"] is True
+    assert body["egress"]["destinations"] == []
+
+
+def test_audit_egress_reports_what_it_cannot_determine(tmp_path: Path) -> None:
+    """FR-20.6. An egress report that silently omits what it cannot see is worse than none,
+    because it reads as a complete list."""
+    runner.invoke(app, ["init", str(tmp_path), "--name", "ref", "--owner", "amaya"])
+    path = tmp_path / "runners" / "default.yaml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "setupCommands: []", "setupCommands:\n  - pip install -e ."
+        ),
+        encoding="utf-8",
+    )
+
+    body = payload(runner.invoke(app, ["audit", str(tmp_path), "--egress", "--json"]).output)
+
+    assert body["egress"]["offlineCapable"] is False
+    assert any(d["certainty"] == "indeterminate" for d in body["egress"]["destinations"])

@@ -267,8 +267,59 @@ def plan(
     raise typer.Exit(EXIT_OK)
 
 
+def _report_egress(definition: Any, as_json: bool) -> None:
+    """FR-20.6: enumerate every outbound destination, including the ones that cannot be."""
+    from software_factory.definition.egress import Certainty, enumerate_egress
+
+    report = enumerate_egress(definition)
+
+    if as_json:
+        _emit({"ok": True, "egress": report.as_dict()})
+        raise typer.Exit(EXIT_OK)
+
+    if report.offline_capable:
+        console.print(
+            "[green]offline-capable[/] — nothing in this definition can reach the network."
+        )
+        raise typer.Exit(EXIT_OK)
+
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("destination", "certainty", "from", "why"):
+        table.add_column(column, overflow="fold")
+    for destination in report.destinations:
+        colour = {
+            Certainty.DECLARED: "",
+            Certainty.IMPLIED: "cyan",
+            Certainty.INDETERMINATE: "yellow",
+        }[destination.certainty]
+        marked = (
+            f"[{colour}]{destination.certainty.value}[/]" if colour else destination.certainty.value
+        )
+        table.add_row(destination.target, marked, destination.source, destination.detail)
+    console.print(table)
+
+    indeterminate = report.by_certainty(Certainty.INDETERMINATE)
+    if indeterminate:
+        console.print(
+            f"\n[yellow]{len(indeterminate)} destination(s) cannot be determined from the "
+            "definition.[/] An egress report that omitted them would read as a complete "
+            "list; inspect them directly to close the gap."
+        )
+    raise typer.Exit(EXIT_OK)
+
+
 @app.command()
-def audit(root: RootArg = Path(), as_json: JsonOpt = False) -> None:
+def audit(
+    root: RootArg = Path(),
+    egress_only: Annotated[
+        bool,
+        typer.Option(
+            "--egress",
+            help="Enumerate every outbound destination reachable from this definition.",
+        ),
+    ] = False,
+    as_json: JsonOpt = False,
+) -> None:
     """Report what every agent can reach, from the definition, without running anything.
 
     This is the security answer to "what is this factory able to do?" -- computed from
@@ -278,6 +329,10 @@ def audit(root: RootArg = Path(), as_json: JsonOpt = False) -> None:
         definition = load_strict(root)
     except FactoryError as exc:
         _fail(exc, as_json)
+        return
+
+    if egress_only:
+        _report_egress(definition, as_json)
         return
 
     rows: list[dict[str, Any]] = []
