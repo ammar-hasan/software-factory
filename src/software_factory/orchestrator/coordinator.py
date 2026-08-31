@@ -9,6 +9,7 @@ and record what happened.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,9 +31,19 @@ from software_factory.harness.awareness import (
 )
 from software_factory.harness.loop import Budget, RunResult, RunStatus, TurnLoop
 from software_factory.harness.routing import RoutingState, starting_tier
+from software_factory.harness.sections import (
+    conventions_builder,
+    hazards_builder,
+    open_questions_builder,
+    precedent_builder,
+    skills_builder,
+    spec_slice_builder,
+    terrain_builder,
+)
 from software_factory.harness.tools import BlastRadius, Grants
 from software_factory.ledger import EntryType, Ledger
 from software_factory.memory.records import utc_now
+from software_factory.memory.store import MemoryStore
 from software_factory.orchestrator.workitem import (
     Blocker,
     StageMachine,
@@ -44,6 +55,7 @@ from software_factory.providers.base import Provider
 from software_factory.runtime.executor import LocalExecutor, SandboxPolicy
 from software_factory.runtime.tools import build_registry
 from software_factory.runtime.workspace import Workspace, WorkspaceFactory
+from software_factory.skills.registry import SkillRegistry
 from software_factory.spec.units import SpecStore
 
 #: What each role must produce. Downstream stages consume validated structures, never
@@ -153,6 +165,9 @@ class Coordinator:
         workspaces: WorkspaceFactory,
         ledger: Ledger,
         spec: SpecStore | None = None,
+        memory: MemoryStore | None = None,
+        skills: SkillRegistry | None = None,
+        pack_budget_tokens: int = 6000,
         allow_unsandboxed: bool = False,
     ) -> None:
         self.definition = definition
@@ -160,6 +175,9 @@ class Coordinator:
         self.workspaces = workspaces
         self.ledger = ledger
         self.spec = spec or SpecStore()
+        self.memory = memory or MemoryStore(ledger.path.parent / "memory.jsonl")
+        self.skills = skills or _registry_from(definition)
+        self.pack_budget_tokens = pack_budget_tokens
         self.machine = StageMachine()
         self.allow_unsandboxed = allow_unsandboxed
 
@@ -295,7 +313,15 @@ class Coordinator:
             EntryType.RUN_FINISHED,
             actor=agent_name,
             subject=item.id,
-            payload={"stage": stage.value, "status": run.status.value, "reason": run.reason},
+            payload={
+                "stage": stage.value,
+                "status": run.status.value,
+                "reason": run.reason,
+                # Recorded so later runs can scope precedent to the same files. Without
+                # this, the precedent section degrades to "recent runs", which is noise.
+                "paths": sorted(workspace.changed_paths()),
+                "unknowns": (run.calibration.unknowns if run.calibration else []),
+            },
         )
 
         bundle = self._bundle(item, stage, run, workspace)
@@ -331,15 +357,26 @@ class Coordinator:
         registry: Any,
         grants: Grants,
     ) -> AwarenessPack:
-        budget = 6000
-        assembler = PackAssembler(role=role, budget_tokens=budget)
+        """Assemble the pack from deterministic sources.
+
+        Eight of the ten sections come from :mod:`software_factory.harness.sections` and
+        need no model: version history, the ledger, the spec, memory, and static
+        inspection. Only `conventions` may carry model-derived content, and every item
+        there cites the memory it came from.
+        """
+        assembler = PackAssembler(role=role, budget_tokens=self.pack_budget_tokens)
+        surface = workspace.changed_paths() or set(self._top_level(workspace))
+        scope_ref = self._repository_scope()
 
         assembler.register(
             SectionId.MISSION,
             lambda: (
                 [
                     Item(
-                        content=f"{item.title} — {stage.value} stage of work item {item.id}.",
+                        content=(
+                            f"{item.title} — {stage.value} stage of work item {item.id} "
+                            f"({item.work_class.value})."
+                        ),
                         citation=Citation(kind=CitationKind.WORK_ITEM, ref=item.id),
                         origin=Origin.HUMAN_AUTHORED,
                     )
@@ -347,36 +384,23 @@ class Coordinator:
                 None,
             ),
         )
-
-        surface = workspace.changed_paths() or set(self._top_level(workspace))
+        assembler.register(SectionId.SPEC_SLICE, spec_slice_builder(self.spec, surface))
+        assembler.register(SectionId.TERRAIN, terrain_builder(workspace.root, surface))
+        assembler.register(SectionId.PRECEDENT, precedent_builder(self.ledger, surface))
+        assembler.register(SectionId.HAZARDS, hazards_builder(workspace.root, self.ledger, surface))
         assembler.register(
-            SectionId.SPEC_SLICE,
-            lambda: (
-                [
-                    Item(
-                        content=f"{unit.id}: {unit.intent}",
-                        citation=Citation(kind=CitationKind.SPEC, ref=unit.id),
-                    )
-                    for unit in self.spec.slice_for(surface)
-                ],
-                None if self.spec.units else "no spec units defined yet",
+            SectionId.CONVENTIONS,
+            conventions_builder(
+                self.memory,
+                scope_ref=scope_ref,
+                query=f"{item.title} {item.request}",
+                surface=surface,
             ),
         )
-
         assembler.register(
-            SectionId.TERRAIN,
-            lambda: (
-                [
-                    Item(
-                        content=path,
-                        citation=Citation(kind=CitationKind.FILE, ref=path),
-                    )
-                    for path in sorted(self._top_level(workspace))[:40]
-                ],
-                None,
-            ),
+            SectionId.SKILLS,
+            skills_builder(self.skills, role=role, stage=stage, surface=surface, task=item.request),
         )
-
         assembler.register(
             SectionId.TOOLBELT,
             lambda: (
@@ -390,30 +414,38 @@ class Coordinator:
                 None,
             ),
         )
-
         assembler.register(
             SectionId.CONTRACT,
             lambda: (
                 [
                     Item(
-                        content=f"Required output schema: {STAGE_SCHEMAS.get(stage, {})}",
+                        content=(
+                            "Required output schema: "
+                            f"{json.dumps(STAGE_SCHEMAS.get(stage, {}), sort_keys=True)}"
+                        ),
                         citation=Citation(kind=CitationKind.POLICY, ref=f"schema:{stage.value}"),
                     )
                 ],
                 None,
             ),
         )
+        assembler.register(SectionId.OPEN_QUESTIONS, open_questions_builder(self.ledger, item.id))
 
         return assembler.assemble(
             Snapshot(
                 commit=workspace.head,
                 definition_revision=item.definition_revision,
-                memory_revision="none",
+                memory_revision=str(self.memory.stats().get("total", 0)),
                 ledger_seq=self.ledger.tail()[0],
-                skill_revision="none",
+                skill_revision=str(len(self.skills.all())),
                 assembled_at=utc_now(),
             )
         )
+
+    def _repository_scope(self) -> str:
+        """The memory scope key for this factory's first repository."""
+        repositories = self.definition.factory.repositories
+        return repositories[0].slug() if repositories else self.definition.factory.name
 
     @staticmethod
     def _top_level(workspace: Workspace) -> set[str]:
@@ -533,6 +565,39 @@ class Coordinator:
                 return findings[0].remediation
             return "review the failing gates"
         return outcome.run.reason or "investigate the run"
+
+
+def _registry_from(definition: Definition) -> SkillRegistry:
+    """Build a skill registry from the definition's skill files.
+
+    Without this the skills an operator wrote would sit on disk and never be offered,
+    which is a silent failure of exactly the kind this project is meant to avoid.
+    """
+    registry = SkillRegistry()
+    for agent in definition.agents.values():
+        for skill in agent.skills:
+            registry.add(_record(skill))
+    for skill in definition.skills.values():
+        registry.add(_record(skill))
+    return registry
+
+
+def _record(skill: Any) -> Any:
+    from software_factory.skills.registry import SkillRecord
+
+    return SkillRecord(
+        name=skill.name,
+        description=skill.definition.description,
+        body=skill.body,
+        status=skill.definition.status,
+        version=skill.definition.version,
+        roles=skill.definition.applies_to.roles,
+        stages=skill.definition.applies_to.stages,
+        surfaces=skill.definition.applies_to.surfaces,
+        owners=skill.definition.owners,
+        evals=skill.definition.evals,
+        sample_fraction=skill.definition.sample_fraction,
+    )
 
 
 def local_coordinator(
