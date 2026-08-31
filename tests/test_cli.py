@@ -582,3 +582,51 @@ def test_principals_names_the_capabilities_nobody_holds(tmp_path: Path) -> None:
     body = payload(runner.invoke(app, ["principals", str(tmp_path), "--json"]).output)
 
     assert "erase_data" in body["unheldCapabilities"]
+
+
+def test_spend_attributes_cost_by_cause_agent_and_stage(tmp_path: Path) -> None:
+    """Per-run budgets bound one agent. "Every run was within its limit" is the sentence
+    that precedes every surprise invoice (FR-26.1, FR-26.5)."""
+    from software_factory.ledger import EntryType, Ledger
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    for agent, cause, units in (
+        ("builder", "primary", 30),
+        ("builder", "retry", 8),
+        ("critic", "scoring", 4),
+    ):
+        ledger.append(
+            EntryType.MODEL_CALLED,
+            actor=agent,
+            subject="wi-1",
+            payload={
+                "costUnits": units,
+                "agent": agent,
+                "stage": "BUILD",
+                "cause": cause,
+                "workItem": "wi-1",
+            },
+        )
+
+    body = payload(
+        runner.invoke(app, ["spend", str(ledger.path), "--limit", "50", "--json"]).output
+    )["spend"]
+
+    assert body["spent"] == 42.0
+    assert body["state"] == "warning"
+    assert body["byCause"] == {"primary": 30.0, "retry": 8.0, "scoring": 4.0}
+    assert body["overheadFraction"] == pytest.approx(12 / 42, abs=1e-3)
+
+
+def test_spend_on_a_factory_that_has_not_run_says_so(tmp_path: Path) -> None:
+    """Zero is an answer, and "no attributed spend" is a different answer from "zero spent
+    on everything" -- the second would read as a factory running for free."""
+    from software_factory.ledger import EntryType, Ledger
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append(EntryType.RUN_STARTED, actor="conductor", subject="wi-1")
+
+    body = payload(runner.invoke(app, ["spend", str(ledger.path), "--json"]).output)["spend"]
+
+    assert body["spent"] == 0
+    assert body["byCause"] == {}

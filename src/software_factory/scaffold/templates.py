@@ -329,6 +329,25 @@ factory:
   tokens: 100000000
   onApproach: warn
   onReach: stop-intake
+
+# Admission control (FR-26.2). Without it, one busy source consumes the factory: a plain
+# priority queue hands the whole thing to whoever labels their work most urgently, which is
+# a property of that source's culture rather than of the work.
+scheduling:
+  maxConcurrentRuns: 8
+  maxConcurrentRunsPerAgent: 3
+  fairness: round-robin-by-source
+
+# Backpressure (FR-26.3). A failing deploy emitting thousands of alerts must not convert
+# directly into unbounded spend. Deduplication runs before rate limiting on purpose: a storm
+# of *identical* alerts would otherwise trip the breaker over work that was never real.
+intake:
+  dedupeWindow: 6h
+  perSource:
+    maxPerWindow: 30
+    window: 10m
+    breakerTrips: 3
+    breakerCooldown: 1h
 """
 
 MEMORY_POLICY = """\

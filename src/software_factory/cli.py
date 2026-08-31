@@ -15,6 +15,7 @@ import json
 import sys
 from collections import deque
 from contextlib import suppress
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -31,7 +32,7 @@ from software_factory.definition.validate import lint as run_lint
 from software_factory.definition.validate import unused_effects
 from software_factory.definition.validate import validate as run_validate
 from software_factory.errors import FactoryError, Severity, ValidationReport
-from software_factory.ledger import Ledger
+from software_factory.ledger import EntryType, Ledger
 from software_factory.providers.base import Provider
 from software_factory.runtime.tools import BUILTIN_TOOL_EFFECTS
 
@@ -815,6 +816,92 @@ def gates(as_json: JsonOpt = False) -> None:
     table.add_column("stages", overflow="fold")
     for name, stages in sorted(by_gate.items()):
         table.add_row(name, ", ".join(sorted(stages)) or "[dim]not scheduled[/]")
+    console.print(table)
+    raise typer.Exit(EXIT_OK)
+
+
+@app.command()
+def spend(
+    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    limit: Annotated[float, typer.Option("--limit", help="Cap in cost units.")] = 100.0,
+    period_hours: Annotated[int, typer.Option("--hours", help="Window to report over.")] = 24,
+    as_json: JsonOpt = False,
+) -> None:
+    """Spend against a cap, attributed by cause, agent, stage, and work item.
+
+    Per-run budgets bound one agent. A hundred runs each inside their budget is a hundred
+    budgets' worth of spend, and "every run was within its limit" is the sentence that
+    precedes every surprise invoice (FR-26.1).
+    """
+    from datetime import timedelta
+
+    from software_factory.economics import Cause, Charge, Ledgerless, SpendCap
+
+    ledger = Ledger(path)
+    try:
+        entries = list(ledger.read())
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    charges: list[Charge] = []
+    for entry in entries:
+        if entry.type is not EntryType.MODEL_CALLED:
+            continue
+        payload = entry.payload
+        units = float(payload.get("costUnits", 0.0) or 0.0)
+        if not units:
+            continue
+        raw_cause = str(payload.get("cause", Cause.PRIMARY.value))
+        charges.append(
+            Charge(
+                units=units,
+                work_item_id=str(payload.get("workItem", entry.subject)),
+                agent=str(payload.get("agent", "unknown")),
+                stage=str(payload.get("stage", "unknown")),
+                cause=Cause(raw_cause) if raw_cause in set(Cause) else Cause.PRIMARY,
+                at=datetime.fromisoformat(entry.ts.replace("Z", "+00:00")),
+                run_id=str(payload.get("run", "")),
+                tier=str(payload.get("tier", "")),
+            )
+        )
+
+    cap = SpendCap(scope=str(path), limit_units=limit, period=timedelta(hours=period_hours))
+    report = Ledgerless(cap).report(charges)
+
+    if as_json:
+        _emit({"ok": True, "spend": report.as_dict()})
+        raise typer.Exit(EXIT_OK)
+
+    colour = {
+        "ok": "green",
+        "warning": "yellow",
+        "intake_stopped": "yellow",
+        "halted": "red",
+    }[report.state.value]
+    console.print(
+        f"[{colour}]{report.state.value}[/] — {report.spent:.2f} of {report.limit:.2f} units "
+        f"({report.fraction:.0%}) over the last {period_hours}h"
+    )
+    if not charges:
+        console.print(
+            "[dim]No attributed spend in the window. `MODEL_CALLED` entries carry "
+            "`costUnits`; a factory that has not run yet has none.[/]"
+        )
+        raise typer.Exit(EXIT_OK)
+
+    console.print(f"[dim]overhead (not primary work): {report.overhead_fraction:.0%}[/]\n")
+    table = Table(show_header=True, header_style="bold", box=None)
+    table.add_column("breakdown")
+    table.add_column("units", justify="right")
+    for label, values in (
+        ("by cause", report.by_cause),
+        ("by agent", report.by_agent),
+        ("by stage", report.by_stage),
+    ):
+        table.add_row(f"[bold]{label}[/]", "")
+        for key, value in sorted(values.items(), key=lambda pair: -pair[1]):
+            table.add_row(f"  {key}", f"{value:.2f}")
     console.print(table)
     raise typer.Exit(EXIT_OK)
 
