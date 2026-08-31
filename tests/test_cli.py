@@ -791,3 +791,140 @@ def test_every_gate_explains_what_it_establishes() -> None:
 
     for name, gate in BASELINE_GATES.items():
         assert gate.__doc__ and gate.__doc__.strip(), f"{name} has no docstring"
+
+
+def test_intake_starts_work_for_a_matching_event(tmp_path: Path) -> None:
+    """FR-18.10: every capability reachable through an integration must also be reachable
+    through `sf`, so a fully local factory loses convenience and nothing else."""
+    runner.invoke(
+        app, ["init", str(tmp_path), "--name", "ref", "--owner", "amaya", "--repo", "service"]
+    )
+
+    body = payload(
+        runner.invoke(
+            app,
+            [
+                "intake",
+                str(tmp_path),
+                "--provider",
+                "git-host",
+                "--event",
+                "issue_labeled",
+                "--author",
+                "amaya",
+                "-a",
+                "repos=amaya/service",
+                "-a",
+                "labels=factory-ready",
+                "--json",
+            ],
+        ).output
+    )
+
+    assert [o["kind"] for o in body["outcomes"]] == ["started"]
+    assert body["outcomes"][0]["agent"] == "conductor"
+
+
+def test_intake_refuses_an_unmapped_author_by_default(tmp_path: Path) -> None:
+    """FR-18.6. An automation accepting anyone is a choice an operator makes deliberately,
+    not one they get by not thinking about it."""
+    runner.invoke(
+        app, ["init", str(tmp_path), "--name", "ref", "--owner", "amaya", "--repo", "service"]
+    )
+
+    body = payload(
+        runner.invoke(
+            app,
+            [
+                "intake",
+                str(tmp_path),
+                "--provider",
+                "git-host",
+                "--event",
+                "issue_labeled",
+                "--author",
+                "stranger",
+                "-a",
+                "repos=amaya/service",
+                "-a",
+                "labels=factory-ready",
+                "--json",
+            ],
+        ).output
+    )
+
+    assert body["outcomes"][0]["code"] == "intake.unknown_author"
+    assert "principals" in body["outcomes"][0]["remediation"]
+
+
+def test_intake_ignores_an_event_nothing_matches(tmp_path: Path) -> None:
+    """Most events are not for this factory, and treating them as errors makes every
+    unrelated push an incident."""
+    runner.invoke(app, ["init", str(tmp_path), "--name", "ref", "--owner", "amaya"])
+
+    body = payload(
+        runner.invoke(
+            app,
+            ["intake", str(tmp_path), "--provider", "git-host", "--event", "push", "--json"],
+        ).output
+    )
+
+    assert body["outcomes"][0]["kind"] == "ignored"
+
+
+def test_serve_publishes_the_tool_surface_with_its_guidance(tmp_path: Path) -> None:
+    """FR-19.9: a calling agent picks up the correct workflow without an operator explaining
+    it. A schema says what is accepted; guidance says what to do with it."""
+    runner.invoke(app, ["init", str(tmp_path), "--name", "ref", "--owner", "amaya"])
+
+    body = payload(runner.invoke(app, ["serve", str(tmp_path), "--json"]).output)
+
+    by_name = {t["name"]: t for t in body["tools"]}
+    assert "never touches your files" in by_name["factory.pick_up"]["guidance"]
+    assert by_name["factory.hand_back"]["external"] is True
+
+
+def test_improve_clusters_repeated_gate_failures(tmp_path: Path) -> None:
+    """Diagnosing one failure costs a run; diagnosing forty instances of one failure costs
+    forty runs and produces one answer (FR-14.2)."""
+    from software_factory.ledger import EntryType, Ledger
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    for index in range(4):
+        ledger.append(
+            EntryType.GATE_EVALUATED,
+            actor="builder",
+            subject=f"wi-{index}",
+            payload={
+                "gate": "tests-pass",
+                "outcome": "fail",
+                "stage": "BUILD",
+                "workItem": f"wi-{index}",
+            },
+        )
+
+    body = payload(runner.invoke(app, ["improve", str(ledger.path), "--json"]).output)
+
+    assert body["failures"] == 4
+    assert len(body["clusters"]) == 1
+    assert body["clusters"][0]["size"] == 4
+
+
+def test_improve_says_nothing_repeats_rather_than_reporting_none(tmp_path: Path) -> None:
+    """A one-off has no pattern to generalise from, and a proposal drawn from one instance
+    is a proposal fitted to one instance -- but the failure still happened, and reporting
+    zero failures would say otherwise."""
+    from software_factory.ledger import EntryType, Ledger
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append(
+        EntryType.GATE_EVALUATED,
+        actor="builder",
+        subject="wi-1",
+        payload={"gate": "tests-pass", "outcome": "fail", "stage": "BUILD"},
+    )
+
+    body = payload(runner.invoke(app, ["improve", str(ledger.path), "--json"]).output)
+
+    assert body["failures"] == 1
+    assert body["clusters"] == []

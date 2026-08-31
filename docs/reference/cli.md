@@ -16,6 +16,9 @@ cannot be scripted, and PR-2 makes the local path the reference one.
 | `sf schema` | Print the JSON Schema for a definition file kind. Offline, unauthenticated. |
 | `sf work` | Run one work item end to end, locally. |
 | `sf gates` | List the baseline gates and which stages they run at. |
+| `sf intake` | Put one event through intake and report what it would start. |
+| `sf serve` | Print the factory's tool surface, so a coding agent can work with it (FR-19). |
+| `sf improve` | Cluster recent failures into the patterns worth diagnosing (FR-14.2, step one). |
 | `sf metrics` | Metrics for a window, folded from the ledger. |
 | `sf dash` | Serve the dashboard from the local ledger. |
 | `sf spend` | Spend against a cap, attributed by cause, agent, stage, and work item. |

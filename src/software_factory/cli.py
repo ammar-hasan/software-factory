@@ -876,6 +876,262 @@ def gates(as_json: JsonOpt = False) -> None:
 
 
 @app.command()
+def intake(
+    root: RootArg = Path(),
+    provider: Annotated[
+        str, typer.Option("--provider", help="Event provider, e.g. git-host.")
+    ] = "cli",
+    event: Annotated[str, typer.Option("--event", help="Event name, e.g. issue.labelled.")] = "",
+    author: Annotated[str, typer.Option("--author", help="Provider handle of the author.")] = "",
+    ref: Annotated[str, typer.Option("--ref", help="Where a reply goes.")] = "local",
+    title: Annotated[str, typer.Option("--title")] = "",
+    attribute: Annotated[
+        list[str] | None,
+        typer.Option("--attribute", "-a", help="key=value, repeatable. Filters match these."),
+    ] = None,
+    as_json: JsonOpt = False,
+) -> None:
+    """Put one event through intake and report what it would start.
+
+    FR-18.10 requires local parity: every capability reachable through an integration must
+    also be reachable through `sf`, so a fully local factory loses convenience and nothing
+    else. This is that path, and it is also how an operator checks a filter without waiting
+    for the event it is meant to catch.
+    """
+    from software_factory.intake import FactoryEvent, Ignored, Origin, Provider, Started
+    from software_factory.intake import Refused as IntakeRefused
+    from software_factory.intake.events import event_identity
+    from software_factory.intake.loading import pipeline_from
+
+    try:
+        definition = load_strict(root)
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    if provider not in set(Provider):
+        console.print(
+            f"[red]unknown provider {provider!r}[/]  "
+            f"known: {', '.join(sorted(p.value for p in Provider))}"
+        )
+        raise typer.Exit(EXIT_UNUSABLE)
+
+    attributes: dict[str, Any] = {}
+    for pair in attribute or []:
+        key, _, value = pair.partition("=")
+        if not key or not value:
+            console.print(f"[red]--attribute expects key=value, got {pair!r}[/]")
+            raise typer.Exit(EXIT_UNUSABLE)
+        # A repeated key becomes a list, because that is what an event with several labels
+        # looks like and a filter matches such an attribute by intersection.
+        existing = attributes.get(key)
+        if existing is None:
+            attributes[key] = value
+        elif isinstance(existing, list):
+            existing.append(value)
+        else:
+            attributes[key] = [existing, value]
+
+    pipeline = pipeline_from(definition)
+    outcomes = pipeline.receive(
+        FactoryEvent(
+            id=event_identity(Provider(provider), ref, event, title),
+            provider=Provider(provider),
+            event=event,
+            origin=Origin(provider=Provider(provider), ref=ref),
+            title=title,
+            author=author,
+            attributes=attributes,
+        )
+    )
+
+    if as_json:
+        _emit(
+            {
+                "ok": True,
+                "outcomes": [
+                    {
+                        "kind": type(o).__name__.lower(),
+                        "automation": getattr(o, "automation", None),
+                        "agent": getattr(o, "agent", None),
+                        "code": getattr(o, "code", None),
+                        "message": getattr(o, "message", None),
+                        "remediation": getattr(o, "remediation", None),
+                        "reason": getattr(o, "reason", None),
+                    }
+                    for o in outcomes
+                ],
+            }
+        )
+        raise typer.Exit(EXIT_OK)
+
+    for outcome in outcomes:
+        if isinstance(outcome, Started):
+            console.print(f"[green]starts[/] {outcome.automation} → agent {outcome.agent}")
+        elif isinstance(outcome, Ignored):
+            console.print(
+                f"[dim]ignored[/] — {outcome.reason}. Most events are not for this factory; "
+                "this is not an error."
+            )
+        elif isinstance(outcome, IntakeRefused):
+            console.print(f"[yellow]refused[/] {outcome.code}: {outcome.message}")
+            console.print(f"  [dim]{outcome.remediation}[/]")
+    raise typer.Exit(EXIT_OK)
+
+
+@app.command()
+def serve(root: RootArg = Path(), as_json: JsonOpt = False) -> None:
+    """Print the factory's tool surface, so a coding agent can work with it (FR-19).
+
+    The surface itself is transport-free: MCP, a local socket (FR-19.8) and a direct call
+    are three bindings of the same handlers. This prints the published schemas and guidance
+    so a calling agent picks up the correct workflow without an operator explaining it
+    (FR-19.9).
+
+    It lists the surface rather than binding a socket, because the work items a running
+    factory holds live in the orchestrator's state and this command has none. A `--ledger`
+    option here would be an option that does nothing, which is the shape of promise this
+    project keeps finding unkept elsewhere.
+    """
+    from software_factory.factory_tools import FactoryToolServer
+
+    try:
+        definition = load_strict(root)
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    server = FactoryToolServer(factory_name=definition.factory.name)
+    specs = server.specs()
+
+    if as_json:
+        _emit(
+            {
+                "ok": True,
+                "factory": definition.factory.name,
+                "tools": [
+                    {
+                        "name": spec.name,
+                        "description": spec.description,
+                        "inputSchema": spec.input_schema,
+                        "guidance": spec.guidance,
+                        "external": spec.external,
+                    }
+                    for spec in specs
+                ],
+            }
+        )
+        raise typer.Exit(EXIT_OK)
+
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("tool", "external", "what it does"):
+        table.add_column(column, overflow="fold")
+    for spec in specs:
+        table.add_row(
+            spec.name,
+            "[yellow]yes[/]" if spec.external else "",
+            spec.description + (f"\n[dim]{spec.guidance}[/]" if spec.guidance else ""),
+        )
+    console.print(table)
+    console.print(
+        "\n[dim]Tools marked external produce something outside the factory and take a "
+        "lease: picking a work item up does not claim it, but doing something visible to it "
+        "twice produces two of the artifact.[/]"
+    )
+    raise typer.Exit(EXIT_OK)
+
+
+@app.command()
+def improve(
+    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    min_size: Annotated[
+        int, typer.Option("--min-size", help="Failures needed before a cluster is worth a run.")
+    ] = 3,
+    as_json: JsonOpt = False,
+) -> None:
+    """Cluster recent failures into the patterns worth diagnosing (FR-14.2, step one).
+
+    Clustering first is economic: diagnosing one failure costs a run, and diagnosing forty
+    instances of one failure costs forty runs and produces one answer. This reports the
+    clusters; proposing against one is a run, and adopting a proposal is a human decision
+    that needs two approvers when it touches a scorer, a gate, or an eval (FR-25.3).
+    """
+    from software_factory.improvement import Failure, cluster_failures
+
+    ledger = Ledger(path)
+    try:
+        entries = list(ledger.read())
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    failures = [
+        Failure(
+            run_id=str(entry.payload.get("run", entry.subject)),
+            work_item_id=str(entry.payload.get("workItem", entry.subject)),
+            stage=str(entry.payload.get("stage", "unknown")),
+            agent=str(entry.actor),
+            gate=str(entry.payload.get("gate", "")),
+            failure_class=str(entry.payload.get("outcome", "")),
+            detail=str(entry.payload.get("detail", "")),
+            at=datetime.fromisoformat(entry.ts.replace("Z", "+00:00")),
+        )
+        for entry in entries
+        if entry.type is EntryType.GATE_EVALUATED and entry.payload.get("outcome") == "fail"
+    ]
+
+    clusters = cluster_failures(failures, min_size=min_size)
+
+    if as_json:
+        _emit(
+            {
+                "ok": True,
+                "failures": len(failures),
+                "clusters": [
+                    {
+                        "signature": c.signature,
+                        "size": c.size,
+                        "workItems": list(c.work_items),
+                        "stage": c.stage,
+                        "agent": c.agent,
+                        "describe": c.describe(),
+                    }
+                    for c in clusters
+                ],
+            }
+        )
+        raise typer.Exit(EXIT_OK)
+
+    if not failures:
+        console.print("[dim]No gate failures in this ledger. Nothing to improve from.[/]")
+        raise typer.Exit(EXIT_OK)
+    if not clusters:
+        console.print(
+            f"[dim]{len(failures)} failure(s), none repeating {min_size} times or more.[/]\n"
+            "A one-off has no pattern to generalise from, and a proposal drawn from one "
+            "instance is a proposal fitted to one instance."
+        )
+        raise typer.Exit(EXIT_OK)
+
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("signature", "failures", "work items", "pattern"):
+        table.add_column(column, overflow="fold")
+    for cluster in clusters:
+        table.add_row(
+            cluster.signature,
+            str(cluster.size),
+            str(len(cluster.work_items)),
+            cluster.failures[0].describe(),
+        )
+    console.print(table)
+    console.print(
+        "\n[dim]Work items matter more than failure count: forty failures across two items "
+        "is a flaky pair, six across six is a pattern.[/]"
+    )
+    raise typer.Exit(EXIT_OK)
+
+
+@app.command()
 def metrics(
     path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
     days: Annotated[int, typer.Option("--days", help="Window to report over.")] = 7,
