@@ -820,6 +820,118 @@ def gates(as_json: JsonOpt = False) -> None:
     raise typer.Exit(EXIT_OK)
 
 
+@app.command()
+def metrics(
+    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    days: Annotated[int, typer.Option("--days", help="Window to report over.")] = 7,
+    integration: Annotated[
+        list[str] | None,
+        typer.Option("--integration", help="An integration this factory has, e.g. git-host."),
+    ] = None,
+    as_json: JsonOpt = False,
+) -> None:
+    """Metrics for a window, folded from the ledger.
+
+    A metric that needs an integration this factory does not have is reported as
+    *unavailable with a reason*, never as zero (FR-15.5): "changes merged: 0" reads as a
+    factory that merges nothing, and "unavailable -- no git-host adapter" reads as a factory
+    nobody has told about its git host. Those are different situations.
+    """
+    from datetime import timedelta
+
+    from software_factory.observability import Availability, Window, compute
+
+    ledger = Ledger(path)
+    try:
+        entries = list(ledger.read())
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    report = compute(
+        entries,
+        window=Window.last(timedelta(days=days)),
+        integrations=frozenset(integration or []),
+    )
+
+    if as_json:
+        _emit({"ok": True, "metrics": report.as_dict()})
+        raise typer.Exit(EXIT_OK)
+
+    runs = report.runs
+    console.print(
+        f"[bold]{runs.total}[/] run(s) over {days}d — "
+        f"{runs.work} work, {runs.evaluation} evaluation, {runs.benchmark} benchmark, "
+        f"{runs.improvement} improvement"
+    )
+    if runs.total:
+        console.print(
+            f"[dim]{runs.measurement_share:.0%} of runs are the factory measuring itself; "
+            "a rising total with flat output can be measurement rather than work.[/]\n"
+        )
+
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("metric", "value", "note"):
+        table.add_column(column, overflow="fold")
+    for measure in report.measures:
+        if measure.availability is not Availability.AVAILABLE:
+            table.add_row(
+                measure.name,
+                f"[yellow]{measure.availability.value}[/]",
+                measure.reason,
+            )
+            continue
+        note = ""
+        if measure.estimate:
+            note = f"estimate; excludes {', '.join(measure.excludes)}"
+        elif measure.sample:
+            note = f"n={measure.sample}"
+        table.add_row(measure.name, f"{measure.value:g} {measure.unit}".strip(), note)
+    console.print(table)
+    raise typer.Exit(EXIT_OK)
+
+
+@app.command()
+def dash(
+    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port")] = 8787,
+    integration: Annotated[
+        list[str] | None, typer.Option("--integration", help="An integration this factory has.")
+    ] = None,
+) -> None:
+    """Serve the dashboard from the local ledger.
+
+    Local-first and read-mostly (FR-15.8): no framework, no CDN, no build step, and bound to
+    loopback. A dashboard needing `npm install` to look at a factory running offline on a
+    laptop fails PR-2 on the first day somebody tries it, and one reachable from the network
+    has published a factory's whole history to whoever can reach the port.
+
+    Steering a live run is a *decision* channel and therefore authenticated and
+    capability-checked (FR-25.5), so this server does not offer one.
+    """
+    from software_factory.observability.dash import serve
+
+    if not path.exists():
+        console.print(f"[red]no ledger at {path}[/]")
+        raise typer.Exit(EXIT_UNUSABLE)
+
+    server = serve(
+        path,
+        host=host,
+        port=port,
+        integrations=frozenset(integration or []),
+        ready=lambda url: console.print(f"dashboard on {url}  [dim](ctrl-c to stop)[/]"),
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        console.print("\nstopped")
+    finally:
+        server.server_close()
+    raise typer.Exit(EXIT_OK)
+
+
 govern_app = typer.Typer(
     help="Data classification, retention, and ledger segmentation.", no_args_is_help=True
 )

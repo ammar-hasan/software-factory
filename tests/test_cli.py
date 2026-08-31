@@ -675,3 +675,60 @@ def test_govern_seal_on_a_short_ledger_says_so(tmp_path: Path) -> None:
 
     assert body["sealed"] == []
     assert body["sealedThrough"] == 0
+
+
+def test_metrics_reports_unavailable_rather_than_zero(tmp_path: Path) -> None:
+    """FR-15.5. "changes merged: 0" reads as a factory that merges nothing; "unavailable --
+    no git-host adapter" reads as a factory nobody has told about its git host."""
+    from software_factory.ledger import EntryType, Ledger
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append(
+        EntryType.RUN_STARTED, actor="builder", subject="r1", payload={"agent": "builder"}
+    )
+
+    body = payload(runner.invoke(app, ["metrics", str(ledger.path), "--json"]).output)["metrics"]
+
+    merged = next(m for m in body["measures"] if m["name"] == "changes_merged")
+    assert merged["value"] is None
+    assert merged["availability"] == "unavailable"
+    assert "git-host" in merged["reason"]
+
+
+def test_metrics_stops_reporting_unavailable_once_the_integration_exists(tmp_path: Path) -> None:
+    from software_factory.ledger import EntryType, Ledger
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append(EntryType.RUN_STARTED, actor="builder", subject="r1", payload={})
+
+    body = payload(
+        runner.invoke(
+            app, ["metrics", str(ledger.path), "--integration", "git-host", "--json"]
+        ).output
+    )["metrics"]
+
+    assert not any(m["name"] == "changes_merged" for m in body["measures"])
+
+
+def test_metrics_separates_work_from_measurement(tmp_path: Path) -> None:
+    """A rising run count with flat output can be measurement activity rather than work."""
+    from software_factory.ledger import EntryType, Ledger
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append(EntryType.RUN_STARTED, actor="builder", subject="r1", payload={})
+    ledger.append(
+        EntryType.RUN_STARTED, actor="critic", subject="r2", payload={"purpose": "benchmark"}
+    )
+
+    body = payload(runner.invoke(app, ["metrics", str(ledger.path), "--json"]).output)["metrics"]
+
+    assert body["runs"]["work"] == 1
+    assert body["runs"]["benchmark"] == 1
+    assert body["runs"]["measurementShare"] == 0.5
+
+
+def test_dash_on_a_missing_ledger_says_so(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["dash", str(tmp_path / "absent.jsonl")])
+
+    assert result.exit_code != 0
+    assert "no ledger" in result.output
