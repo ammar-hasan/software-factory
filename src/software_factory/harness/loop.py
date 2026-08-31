@@ -167,11 +167,15 @@ class TurnLoop:
     max_turns: int = 40
     per_mtok_in: float = 0.0
     per_mtok_out: float = 0.0
+    _violation_mark: int = 0
 
     def run(self) -> RunResult:
         messages = self._compose()
         result = RunResult(status=RunStatus.COMPLETED, transcript=messages)
         warned = False
+        # Registries are shared between runs and their violation list is cumulative, so
+        # this run only ever considers violations recorded after it started.
+        self._violation_mark = self.registry.violation_mark()
 
         for _turn in range(self.max_turns):
             breach = self.budget.exceeded(result.spend)
@@ -296,7 +300,7 @@ class TurnLoop:
                 )
             )
 
-        escalating = self.registry.escalating_violations()
+        escalating = self.registry.escalating_violations(since=self._violation_mark)
         if escalating:
             result.violations.extend(f"{v.tool}: {v.reason}" for v in escalating)
             return False

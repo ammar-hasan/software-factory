@@ -491,8 +491,9 @@ class Coordinator:
         workspace: Workspace,
     ) -> GateContext:
         violations: dict[ViolationClass, int] = {}
-        if registry.escalating_violations():
-            violations[ViolationClass.ESCALATING] = len(registry.escalating_violations())
+        escalating = registry.escalating_violations()
+        if escalating:
+            violations[ViolationClass.ESCALATING] = len(escalating)
         return GateContext(
             stage=stage.value,
             work_class=item.work_class.value,

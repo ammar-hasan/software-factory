@@ -100,13 +100,23 @@ class SandboxPolicy:
         return any(_is_within(resolved, allowed.resolve()) for allowed in candidates)
 
     def classify_write(self, path: Path) -> ViolationClass | None:
-        """``None`` when the write is inside the contract."""
+        """``None`` when the write is inside the contract.
+
+        The tolerated-path check resolves first and compares component-wise. A bare
+        ``startswith`` on the unresolved string classified ``/tmp/../etc/passwd`` as
+        benign, and ``/tmpevil/x`` as inside ``/tmp`` -- so a write outside the contract
+        needed one ``..`` to become invisible to the gate.
+        """
         if self.is_writable(path):
             return None
-        text = str(path)
-        expanded = [str(Path(p).expanduser()) for p in self.tolerated_writes]
-        if any(text.startswith(prefix) for prefix in expanded):
-            return ViolationClass.BENIGN
+        resolved = path.resolve()
+        for tolerated in self.tolerated_writes:
+            try:
+                allowed = Path(tolerated).expanduser().resolve()
+            except OSError:  # pragma: no cover - unresolvable tolerated path
+                continue
+            if resolved == allowed or _is_within(resolved, allowed):
+                return ViolationClass.BENIGN
         return ViolationClass.BLOCKED
 
     def environment(self) -> dict[str, str]:
@@ -167,6 +177,19 @@ class LocalExecutor:
                     "--allow-unsandboxed to run without confinement and accept the risk."
                 ),
             )
+        if policy.network is NetworkPolicy.ALLOWLIST:
+            # Per-host egress filtering is not implemented by this executor. Refusing is
+            # the only honest option: silently treating an allowlist as open egress while
+            # `sf audit` reports it as a control is worse than not offering it, because
+            # the operator would be reading a guarantee that does not exist.
+            raise ExecutorError(
+                "the local executor cannot enforce a per-host network allowlist",
+                remediation=(
+                    "Set `network: none` to deny egress, or `network: open` to accept "
+                    "unrestricted egress deliberately. Per-host filtering needs the "
+                    "container executor."
+                ),
+            )
 
     def run(
         self, command: list[str], *, timeout_s: int | None = None, cwd: Path | None = None
@@ -200,8 +223,8 @@ class LocalExecutor:
                 preexec_fn=self._limits if os.name == "posix" else None,
             )
             duration = time.monotonic() - started
-            stdout, out_truncated = self._cap(completed.stdout)
-            stderr, err_truncated = self._cap(completed.stderr)
+            stdout, out_truncated = self._cap(self._redact(completed.stdout))
+            stderr, err_truncated = self._cap(self._redact(completed.stderr))
             return CommandResult(
                 command=tuple(command),
                 exit_code=completed.returncode,
@@ -212,8 +235,8 @@ class LocalExecutor:
             )
         except subprocess.TimeoutExpired as expired:
             duration = time.monotonic() - started
-            stdout, _ = self._cap(_decode(expired.stdout))
-            stderr, _ = self._cap(_decode(expired.stderr))
+            stdout, _ = self._cap(self._redact(_decode(expired.stdout)))
+            stderr, _ = self._cap(self._redact(_decode(expired.stderr)))
             return CommandResult(
                 command=tuple(command),
                 exit_code=124,
@@ -287,6 +310,14 @@ class LocalExecutor:
         resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         os.setsid()
+
+    def _redact(self, text: str) -> str:
+        """Strip declared secret values from output before anyone sees it.
+
+        Applied at capture, not at read: a transcript, an evidence bundle and a log all
+        read from here, and redacting at each of them would eventually miss one.
+        """
+        return redact(text, self.policy.secrets)
 
     def _cap(self, text: str) -> tuple[str, bool]:
         """Truncate output, and say so. Silent truncation is a defect (HARNESS.md T-6)."""

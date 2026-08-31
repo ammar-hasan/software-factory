@@ -59,17 +59,25 @@ class MemoryStore:
     # ------------------------------------------------------------------- lifecycle
 
     def load(self) -> None:
-        """Rebuild the index by replaying the log. Idempotent."""
+        """Rebuild the index by replaying the log. Idempotent.
+
+        A malformed line in the middle is tampering and raises. An incomplete *final*
+        line is a torn tail -- a crash or a full disk mid-write -- and is skipped, because
+        otherwise one such event takes the whole memory fabric offline permanently.
+        """
         self._memories = {}
         if self.path.exists():
-            for number, line in enumerate(
-                self.path.read_text(encoding="utf-8").splitlines(), start=1
-            ):
+            raw = self.path.read_text(encoding="utf-8")
+            lines = raw.splitlines()
+            complete = raw.endswith("\n")
+            for number, line in enumerate(lines, start=1):
                 if not line.strip():
                     continue
                 try:
                     record = json.loads(line)
                 except json.JSONDecodeError as exc:
+                    if number == len(lines) and not complete:
+                        break  # torn tail, not tampering
                     raise MemoryStoreError(
                         f"{self.path}:{number}: malformed memory record: {exc}",
                         remediation=(
@@ -80,12 +88,32 @@ class MemoryStore:
                 self._apply(record)
         self._loaded = True
 
+    def torn_tail(self) -> bool:
+        """True when the log ends mid-line, i.e. a write did not complete."""
+        if not self.path.exists() or self.path.stat().st_size == 0:
+            return False
+        with self.path.open("rb") as handle:
+            handle.seek(-1, 2)
+            return handle.read(1) != b"\n"
+
     def _apply(self, record: dict[str, Any]) -> None:
+        """Fold one log record into the index.
+
+        Erased records are stubs by design (:meth:`erase` rewrites them in place), so
+        they carry an id and a digest and nothing else. They are skipped rather than
+        parsed -- there is deliberately nothing left to parse.
+        """
         op = record.get("op")
+        payload = record.get("memory") or {}
+
         if op == "delete":
-            self._memories.pop(str(record["memory"]["id"]), None)
+            self._memories.pop(str(payload.get("id", "")), None)
             return
-        memory = Memory.from_dict(record["memory"])
+        if op == "erased" or payload.get("erased"):
+            self._memories.pop(str(payload.get("id", "")), None)
+            return
+
+        memory = Memory.from_dict(payload)
         self._memories[memory.id] = memory
 
     def _ensure_loaded(self) -> None:
@@ -105,35 +133,90 @@ class MemoryStore:
             "at": memory.updated_at.isoformat(),
             "memory": memory.as_dict(),
         }
-        with self._locked(), self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        with self._locked():
+            if self.torn_tail():
+                self._truncate_torn_unlocked()
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
         self._memories[memory.id] = memory
         return memory
 
-    def erase(self, memory_id: str, *, actor: str, reason: str) -> None:
-        """Destroy a memory's content, leaving the mutation record (FR-15.10b).
+    def _truncate_torn_unlocked(self) -> None:
+        """Drop an incomplete final line so the log can be written again."""
+        raw = self.path.read_bytes()
+        cut = raw.rfind(b"\n")
+        with self.path.open("wb") as handle:
+            handle.write(raw[: cut + 1] if cut != -1 else b"")
+            handle.flush()
+            os.fsync(handle.fileno())
 
-        Erasure is by reference: the log keeps the fact that something was erased, by
-        whom and why, and destroys what it pointed at. This is what makes deletion
-        possible at all in an append-only design.
+    def erase(self, memory_id: str, *, actor: str, reason: str) -> None:
+        """Destroy a memory's content, keeping the record that it existed and was erased.
+
+        Appending a tombstone is not erasure: the original record, with its full content
+        and provenance, stays in a file whose whole selling point is that it is greppable.
+        For a subject-erasure request that is the difference between compliance and a
+        false claim of it.
+
+        So this rewrites the log under the lock, replacing every record for this memory
+        with a redacted stub, then appends the tombstone saying who erased it and why.
+        The rewrite is atomic: a temp file, fsync, then :func:`os.replace`.
         """
         self._ensure_loaded()
         existing = self._memories.get(memory_id)
         if existing is None:
             return
-        tombstone = {
-            "op": "delete",
-            "actor": actor,
-            "reason": reason,
-            "at": utc_now().isoformat(),
-            "memory": {"id": memory_id, "digest": existing.digest()},
-        }
-        with self._locked(), self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(tombstone, separators=(",", ":"), sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+
+        digest = existing.digest()
+        temporary = self.path.with_suffix(self.path.suffix + ".erase")
+
+        with self._locked():
+            if self.torn_tail():
+                self._truncate_torn_unlocked()
+
+            with temporary.open("w", encoding="utf-8") as out:
+                if self.path.exists():
+                    for line in self.path.read_text(encoding="utf-8").splitlines():
+                        if not line.strip():
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if str(record.get("memory", {}).get("id")) == memory_id:
+                            record["memory"] = {
+                                "id": memory_id,
+                                "digest": digest,
+                                "erased": True,
+                            }
+                            record["op"] = "erased"
+                        out.write(json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n")
+                out.write(
+                    json.dumps(
+                        {
+                            "op": "delete",
+                            "actor": actor,
+                            "reason": reason,
+                            "at": utc_now().isoformat(),
+                            "memory": {"id": memory_id, "digest": digest, "erased": True},
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+                out.flush()
+                os.fsync(out.fileno())
+
+            temporary.replace(self.path)
+            directory = os.open(str(self.path.parent), os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+
         self._memories.pop(memory_id, None)
 
     # --------------------------------------------------------------------- reading

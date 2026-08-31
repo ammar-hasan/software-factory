@@ -237,8 +237,18 @@ class ToolRegistry:
                 "This is a defect in the tool, not in your request. Try a different approach.",
             )
 
-    def escalating_violations(self) -> list[Violation]:
-        return [v for v in self.violations if v.escalating]
+    def escalating_violations(self, *, since: int = 0) -> list[Violation]:
+        """Escalating violations recorded after index ``since``.
+
+        Runs share a registry, and the violation list is cumulative, so a loop that asked
+        "were there any?" terminated every later run for the first run's violation -- and
+        leaked its text into their results. Callers pass the mark they took at start.
+        """
+        return [v for v in self.violations[since:] if v.escalating]
+
+    def violation_mark(self) -> int:
+        """The current violation count, to be passed back as ``since``."""
+        return len(self.violations)
 
     def render_toolbelt(self, grants: Grants) -> list[str]:
         """One line per granted tool, with its signature and an example."""

@@ -240,12 +240,17 @@ def test_the_environment_is_an_allowlist(tmp_path: Path) -> None:
     assert "absent" in result.stdout
 
 
-def test_declared_secrets_reach_the_command(tmp_path: Path) -> None:
-    result = executor(tmp_path, secrets={"SF_TOKEN": "value-123"}).run(
+def test_declared_secrets_reach_the_command_but_not_the_captured_output(
+    tmp_path: Path,
+) -> None:
+    """Both halves matter: the command can use it, and nobody reading output can see it."""
+    result = executor(tmp_path, secrets={"SF_TOKEN": "value-1234567890"}).run(
         [sys.executable, "-c", "import os; print(os.environ.get('SF_TOKEN', 'absent'))"]
     )
 
-    assert "value-123" in result.stdout
+    assert "absent" not in result.stdout
+    assert "value-1234567890" not in result.stdout
+    assert "<SF_TOKEN:redacted>" in result.stdout
 
 
 def test_proxy_variables_are_stripped_when_no_network_is_granted(tmp_path: Path) -> None:

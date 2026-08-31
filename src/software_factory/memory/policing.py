@@ -22,6 +22,7 @@ from software_factory.memory.records import (
 )
 from software_factory.memory.similarity import containment, jaccard, negates
 from software_factory.memory.store import MemoryStore
+from software_factory.spec.units import derived_trust
 
 DUPLICATE_MERGE_THRESHOLD = 0.8
 CONSOLIDATION_CONTAINMENT = 0.9
@@ -162,13 +163,19 @@ def consolidate(store: MemoryStore) -> PolicyReport:
     is what makes consolidation safe to run automatically.
     """
     report = PolicyReport()
-    by_scope: dict[tuple[str, str], list[Memory]] = {}
+    # Cluster within a lane *and* a trust class, never across either. Clustering across
+    # them let an untrusted candidate absorb and archive a canon memory, or let a canon
+    # memory swallow untrusted provenance and an attacker-set confidence -- promotion
+    # into canon is supposed to be earned, and consolidation must not be a side door.
+    by_group: dict[tuple[str, str, str, str], list[Memory]] = {}
     for memory in store.all():
         if memory.lane not in (Lane.CANDIDATE, Lane.CANON) or memory.quarantined:
             continue
-        by_scope.setdefault((memory.scope.value, memory.scope_ref), []).append(memory)
+        by_group.setdefault(
+            (memory.scope.value, memory.scope_ref, memory.lane.value, memory.trust.value), []
+        ).append(memory)
 
-    for group in by_scope.values():
+    for group in by_group.values():
         clusters = _cluster(group)
         for cluster in clusters:
             if len(cluster) < 2:
@@ -228,6 +235,8 @@ def _merge(cluster: list[Memory], store: MemoryStore) -> Memory:
     survivor.evidence = tuple(sorted(evidence))
     survivor.parents = tuple(sorted(parents))
     survivor.supersedes = tuple(sorted(supersedes))
+    # Trust is monotone downward even within a group: a merge can only ever lower it.
+    survivor.trust = derived_trust(*(m.trust for m in cluster))
     survivor.confidence = max(m.confidence for m in cluster)
     survivor.created_at = min(m.created_at for m in cluster)
     survivor.helped_count = sum(m.helped_count for m in cluster)

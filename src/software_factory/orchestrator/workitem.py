@@ -140,6 +140,8 @@ class WorkItem:
     stage: Stage = Stage.INTAKE
     blocker: Blocker | None = None
     blocker_action: str = ""
+    parked_at: Stage | None = None
+    """The stage this item was at when it was blocked, so resuming measures skips from it."""
     depends_on: tuple[str, ...] = ()
     history: list[Transition] = field(default_factory=list)
     created_at: datetime = field(default_factory=utc_now)
@@ -184,6 +186,22 @@ class WorkItem:
         }
 
 
+#: The order stages are considered to occur in, for deciding what a transition skipped.
+#: Explicit rather than derived from the transition table's key order: a security control
+#: must not depend on dict literal ordering, and a factory declaring its own graph
+#: (FR-4.2a) would otherwise silently change which stages are skippable.
+DEFAULT_ORDER: tuple[Stage, ...] = (
+    Stage.INTAKE,
+    Stage.TRIAGE,
+    Stage.DESIGN,
+    Stage.BUILD,
+    Stage.REVIEW,
+    Stage.VERIFY,
+    Stage.HANDOFF,
+    Stage.COMPLETE,
+)
+
+
 @dataclass(slots=True)
 class StageMachine:
     """Enforces the stage graph and the skip policy."""
@@ -192,17 +210,20 @@ class StageMachine:
         default_factory=lambda: dict(DEFAULT_TRANSITIONS)
     )
     non_skippable: frozenset[Stage] = DEFAULT_NON_SKIPPABLE
+    order: tuple[Stage, ...] = DEFAULT_ORDER
 
     def legal(self, from_stage: Stage, to_stage: Stage) -> bool:
         return to_stage in self.transitions.get(from_stage, frozenset())
 
     def skipped_between(self, from_stage: Stage, to_stage: Stage) -> tuple[Stage, ...]:
-        """Stages passed over by going straight from one stage to another."""
-        # Annotated because the `is not` guard narrows the comprehension's element
-        # type to a literal union that then rejects an ordinary Stage in `index`.
-        order: list[Stage] = [
-            s for s in self.transitions if s not in TERMINAL and s is not Stage.BLOCKED
-        ]
+        """Stages passed over by going straight from one stage to another.
+
+        ``from_stage`` must be a positioned stage. Leaving ``BLOCKED`` is measured from
+        the stage the item was parked at, not from ``BLOCKED`` itself -- otherwise
+        "park it, then hand it off" walks straight past review with an empty skip list,
+        which is exactly the primitive the non-skippable rule exists to prevent.
+        """
+        order = list(self.order)
         try:
             start, end = order.index(from_stage), order.index(to_stage)
         except ValueError:
@@ -255,7 +276,12 @@ class StageMachine:
                 ),
             )
 
-        skipped = self.skipped_between(item.stage, to_stage)
+        # Resuming from BLOCKED is measured from where the item was parked. Without this
+        # the skip list is empty and the non-skippable check never runs.
+        measured_from = (
+            item.parked_at if item.stage is Stage.BLOCKED and item.parked_at else item.stage
+        )
+        skipped = self.skipped_between(measured_from, to_stage)
         blocked_skips = tuple(s for s in skipped if s in self.non_skippable)
         if blocked_skips and not human_approved_skip:
             names = ", ".join(s.value for s in blocked_skips)
@@ -283,6 +309,7 @@ class StageMachine:
         if to_stage is not Stage.BLOCKED:
             item.blocker = None
             item.blocker_action = ""
+            item.parked_at = None
         return transition
 
     def block(
@@ -295,12 +322,14 @@ class StageMachine:
                 f"blocking {item.id} without saying what would unblock it",
                 "State the exact action needed. A blocker nobody can act on is a dead end.",
             )
+        parked_at = item.stage
         transition = self.advance(
             item, Stage.BLOCKED, actor=actor, reason=f"{blocker.value}: {action}"
         )
         if isinstance(transition, Transition):
             item.blocker = blocker
             item.blocker_action = action
+            item.parked_at = parked_at
         return transition
 
     def cancel(self, item: WorkItem, *, actor: str, reason: str) -> Transition | TransitionRefused:
@@ -322,7 +351,9 @@ class StageMachine:
 
 
 def validate_graph(
-    transitions: dict[Stage, frozenset[Stage]], non_skippable: frozenset[Stage]
+    transitions: dict[Stage, frozenset[Stage]],
+    non_skippable: frozenset[Stage],
+    order: tuple[Stage, ...] | None = None,
 ) -> list[str]:
     """Check a custom stage graph against the two invariants that are actually derived.
 
@@ -337,6 +368,26 @@ def validate_graph(
             "no stage is marked non-skippable; at least one verification stage must precede "
             "handoff, or routing can be talked out of every check"
         )
+
+    # Non-skippability is enforced by the skip check, which measures a transition against
+    # the declared order. A stage missing from that order is invisible to the check, so
+    # its declaration would be a promise nothing keeps.
+    positioned = set(order or DEFAULT_ORDER)
+    for stage in sorted(non_skippable, key=lambda s: s.value):
+        if stage not in positioned:
+            problems.append(
+                f"{stage.value} is declared non-skippable but is absent from the stage order, "
+                "so no transition can be measured against it"
+            )
+
+    for stage in sorted(transitions, key=lambda s: s.value):
+        if stage in TERMINAL or stage is Stage.BLOCKED:
+            continue
+        if stage not in positioned:
+            problems.append(
+                f"{stage.value} appears in the transition table but not in the stage order, "
+                "so transitions across it are unmeasured"
+            )
 
     reachable = {Stage.INTAKE}
     frontier = [Stage.INTAKE]

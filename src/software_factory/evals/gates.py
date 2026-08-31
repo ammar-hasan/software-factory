@@ -557,7 +557,26 @@ def run_gates(
     gates = gates or BASELINE_GATES
     stage = stage or ctx.stage
     report = GateReport(stage=stage)
-    for name in STAGE_GATES.get(stage, ()):
+
+    names = STAGE_GATES.get(stage)
+    if names is None:
+        # A stage with no declared gate set is an error, never a clean pass. The absence
+        # of gates for HANDOFF -- the last point anything could be caught -- previously
+        # reported `blocked=False`, which inverts this module's own rule that a gate
+        # which cannot run returns ERROR.
+        report.results.append(
+            GateResult(
+                "stage-gates",
+                GateOutcome.ERROR,
+                detail=(
+                    f"no gate set is declared for stage {stage!r}; known stages: "
+                    + ", ".join(sorted(STAGE_GATES))
+                ),
+            )
+        )
+        return report
+
+    for name in names:
         gate = gates.get(name)
         if gate is None:
             report.results.append(GateResult(name, GateOutcome.ERROR, detail="gate not registered"))

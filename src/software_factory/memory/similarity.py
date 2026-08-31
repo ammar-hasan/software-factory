@@ -81,6 +81,10 @@ stopword list that eats the negation makes every contradiction look like a dupli
 
 _WORD = re.compile(r"[a-z0-9_]+")
 
+#: Words that flip a claim's meaning. Never filtered out, at any length: this module's
+#: job includes telling "X must happen" from "X must not happen".
+_NEGATORS = frozenset({"not", "never", "no", "without", "avoid", "cannot", "neither"})
+
 
 def tokens(text: str) -> set[str]:
     """Content words, lowercased, with stopwords and one-character noise removed."""
@@ -89,7 +93,10 @@ def tokens(text: str) -> set[str]:
         for word in _WORD.findall(text.lower())
         # Numbers are kept at any length: "retry after 3s" and "retry after 30s" are
         # different claims, and dropping short numeric tokens makes them identical.
-        if word not in _STOPWORDS and (len(word) > 2 or word.isdigit())
+        # Negators are kept at any length too: the length filter was silently eating
+        # "no", which made every contradiction phrased with it invisible to admission
+        # control and to the policy pass.
+        if word not in _STOPWORDS and (len(word) > 2 or word.isdigit() or word in _NEGATORS)
     }
 
 
@@ -113,7 +120,6 @@ def containment(left: str, right: str) -> float:
     return len(a & b) / min(len(a), len(b))
 
 
-_NEGATORS = frozenset({"not", "never", "no", "without", "avoid", "cannot", "neither"})
 _ANTONYMS: tuple[tuple[str, str], ...] = (
     ("always", "never"),
     ("enable", "disable"),

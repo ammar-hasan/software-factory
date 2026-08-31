@@ -234,6 +234,12 @@ def impact_of(delta: SpecDelta, units: dict[str, SpecUnit]) -> ImpactReport:
 def apply_delta(delta: SpecDelta, units: dict[str, SpecUnit]) -> dict[str, SpecUnit]:
     """Apply a delta, returning a new unit map. Atomic: validate before calling.
 
+    Every write goes back through ``SpecUnit`` validation rather than ``model_copy``.
+    Bypassing the validators let a REANCHOR to an empty tuple leave an ACTIVE unit with
+    no anchors, which ``evaluate()`` then reports as ``AGREED`` -- permanently satisfying
+    the spec gate for that unit. Units are keyed by their own id, so a SUPERSEDE cannot
+    write a successor under its predecessor's key.
+
     The input map is never mutated, so a caller that discovers a problem mid-apply still
     has the original (living-spec.md S-14).
     """
@@ -242,21 +248,29 @@ def apply_delta(delta: SpecDelta, units: dict[str, SpecUnit]) -> dict[str, SpecU
         match change.kind:
             case ChangeKind.ADD | ChangeKind.MODIFY:
                 if change.unit is not None:
-                    result[change.unit_id] = change.unit
+                    result[change.unit.id] = _revalidated(change.unit)
             case ChangeKind.SUPERSEDE:
                 if change.unit is not None:
                     old = result.get(change.unit_id)
                     if old is not None:
-                        result[change.unit_id] = old.model_copy(
-                            update={"status": UnitStatus.DEPRECATED}
-                        )
-                    result[change.unit.id] = change.unit
+                        result[change.unit_id] = _revalidated(old, status=UnitStatus.DEPRECATED)
+                    result[change.unit.id] = _revalidated(change.unit)
             case ChangeKind.RETIRE:
                 old = result.get(change.unit_id)
                 if old is not None:
-                    result[change.unit_id] = old.model_copy(update={"status": UnitStatus.RETIRED})
+                    result[change.unit_id] = _revalidated(old, status=UnitStatus.RETIRED)
             case ChangeKind.REANCHOR:
                 old = result.get(change.unit_id)
                 if old is not None:
-                    result[change.unit_id] = old.model_copy(update={"implements": change.anchors})
+                    result[change.unit_id] = _revalidated(old, implements=change.anchors)
     return result
+
+
+def _revalidated(unit: SpecUnit, **updates: object) -> SpecUnit:
+    """Apply updates through full validation.
+
+    ``model_copy`` skips validators, which is how an active unit ended up anchorless.
+    """
+    data = unit.model_dump()
+    data.update(updates)
+    return SpecUnit.model_validate(data)

@@ -52,6 +52,11 @@ class Ledger:
         appending between our calls cannot fork the chain.
         """
         with self._locked():
+            if self.torn_tail():
+                # A previous write did not complete. Dropping the fragment is the only way
+                # the log can ever be written again, and it is safe: an incomplete line
+                # was never a sealed entry.
+                self._truncate_torn_unlocked()
             seq, prev_hash = self._tail_unlocked()
             entry = LedgerEntry(
                 seq=seq + 1,
@@ -74,24 +79,36 @@ class Ledger:
         return self.read()
 
     def read(self) -> Iterator[LedgerEntry]:
-        """Yield every entry in order. Raises :class:`LedgerError` on a malformed line."""
+        """Yield every entry in order.
+
+        A malformed line in the *middle* is tampering and raises. A malformed *final*
+        line with no trailing newline is a torn tail -- a crash or a full disk between
+        write and flush -- and is skipped, because the alternative is that one such event
+        makes the ledger permanently unreadable and therefore permanently unwritable.
+        Use :meth:`repair` to drop it, and :meth:`torn_tail` to detect it.
+        """
         if not self.path.exists():
             return
-        with self.path.open("r", encoding="utf-8") as handle:
-            for number, line in enumerate(handle, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    yield LedgerEntry.from_json(line)
-                except (ValueError, KeyError) as exc:
-                    raise LedgerError(
-                        f"{self.path}:{number}: malformed ledger entry: {exc}",
-                        remediation=(
-                            "The ledger is append-only and must not be edited. Restore it from "
-                            "backup, or `sf ledger verify` to find the first divergence."
-                        ),
-                    ) from exc
+        raw = self.path.read_text(encoding="utf-8")
+        lines = raw.splitlines()
+        complete = raw.endswith("\n")
+
+        for number, line in enumerate(lines, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                yield LedgerEntry.from_json(stripped)
+            except (ValueError, KeyError) as exc:
+                if number == len(lines) and not complete:
+                    return  # torn tail: incomplete final write, not tampering
+                raise LedgerError(
+                    f"{self.path}:{number}: malformed ledger entry: {exc}",
+                    remediation=(
+                        "The ledger is append-only and must not be edited. Restore it from "
+                        "backup, or `sf ledger verify` to find the first divergence."
+                    ),
+                ) from exc
 
     def query(
         self,
@@ -153,10 +170,54 @@ class Ledger:
             expected_seq += 1
             prev_hash = entry.hash
 
+        if self.torn_tail():
+            raise LedgerError(
+                f"{self.path}: the final entry is incomplete (a write did not finish)",
+                remediation=(
+                    "This is a torn tail, not tampering. `sf ledger repair` drops the "
+                    "fragment; the entries before it verify."
+                ),
+            )
+
     def is_empty(self) -> bool:
         return not self.path.exists() or self.path.stat().st_size == 0
 
+    def torn_tail(self) -> bool:
+        """True when the file ends mid-line, i.e. a write did not complete."""
+        if not self.path.exists() or self.path.stat().st_size == 0:
+            return False
+        with self.path.open("rb") as handle:
+            handle.seek(-1, 2)
+            return handle.read(1) != b"\n"
+
+    def repair(self) -> int:
+        """Truncate a torn tail back to the last complete line. Returns bytes dropped.
+
+        Only ever removes an incomplete final line. A malformed *complete* line is
+        tampering and this will not touch it.
+        """
+        with self._locked():
+            if not self.torn_tail():
+                return 0
+            raw = self.path.read_bytes()
+            cut = raw.rfind(b"\n")
+            keep = raw[: cut + 1] if cut != -1 else b""
+            dropped = len(raw) - len(keep)
+            with self.path.open("wb") as handle:
+                handle.write(keep)
+                handle.flush()
+                os.fsync(handle.fileno())
+            return dropped
+
     # ------------------------------------------------------------------ internal
+
+    def _truncate_torn_unlocked(self) -> None:
+        raw = self.path.read_bytes()
+        cut = raw.rfind(b"\n")
+        with self.path.open("wb") as handle:
+            handle.write(raw[: cut + 1] if cut != -1 else b"")
+            handle.flush()
+            os.fsync(handle.fileno())
 
     def _tail_unlocked(self) -> tuple[int, str]:
         last: LedgerEntry | None = None
