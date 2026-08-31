@@ -327,3 +327,121 @@ def test_the_task_reaches_the_model_as_untrusted(definition, repo: Path, tmp_pat
     coordinator(definition, repo, tmp_path, provider).run(item(WorkClass.CHORE))
 
     assert 'untrusted="true"' in provider.calls[0][-1].content
+
+
+# ------------------------------------------------- the ledger the dashboard reads
+
+
+def test_a_real_run_produces_a_readable_dashboard(definition, repo: Path, tmp_path: Path) -> None:
+    """The integration that makes the observability layer real rather than a module nobody
+    feeds.
+
+    Metrics are a fold over the ledger (FR-15.2), so a coordinator that does not write the
+    entries they fold on gives a dashboard that reports an empty factory -- and "0 runs" on a
+    factory that just ran is worse than no dashboard, because somebody will believe it.
+    """
+    from datetime import timedelta
+
+    from software_factory.observability import Window, compute
+
+    provider = StubProvider([says(triage_output()), says(build_output()), says(review_output())])
+    work = item()
+    local_coordinator(
+        definition,
+        repo=repo,
+        state_dir=tmp_path / "state",
+        provider=provider,
+        allow_unsandboxed=True,
+    ).run(work)
+
+    ledger = Ledger(tmp_path / "state" / "ledger.jsonl")
+    report = compute(list(ledger.read()), window=Window.last(timedelta(hours=1)))
+
+    assert report.runs.total >= 1
+    assert report.runs.work >= 1
+    assert report.runs.by_agent, "runs are not attributed to an agent"
+    assert report.runs.by_stage, "runs are not attributed to a stage"
+
+
+def test_a_real_run_produces_attributable_spend(definition, repo: Path, tmp_path: Path) -> None:
+    """FR-26.5. Without MODEL_CALLED entries the economics layer reads an empty ledger and
+    reports a factory running for free, which is the most flattering possible wrong answer."""
+    from software_factory.economics import Cause, Charge, Ledgerless, SpendCap
+
+    provider = StubProvider([says(triage_output()), says(build_output()), says(review_output())])
+    local_coordinator(
+        definition,
+        repo=repo,
+        state_dir=tmp_path / "state",
+        provider=provider,
+        allow_unsandboxed=True,
+    ).run(item())
+
+    ledger = Ledger(tmp_path / "state" / "ledger.jsonl")
+    charges = [
+        Charge(
+            units=float(e.payload.get("costUnits", 0.0) or 0.0),
+            work_item_id=str(e.payload["workItem"]),
+            agent=str(e.payload["agent"]),
+            stage=str(e.payload["stage"]),
+            cause=Cause(str(e.payload.get("cause", "primary"))),
+        )
+        for e in ledger.read()
+        if e.type is EntryType.MODEL_CALLED
+    ]
+
+    assert charges, "no model call was recorded"
+    report = Ledgerless(SpendCap(scope="test", limit_units=1000)).report(charges)
+    assert report.by_agent
+    assert report.by_stage
+    assert set(report.by_cause) <= {c.value for c in Cause}
+
+
+def test_the_run_inspector_can_reconstruct_a_real_run(
+    definition, repo: Path, tmp_path: Path
+) -> None:
+    """The ledger is what survives. An inspector that cannot rebuild a real run from it is
+    one that only works on runs nobody needs to inspect."""
+    from software_factory.observability import run_inspector
+
+    provider = StubProvider([says(triage_output()), says(build_output()), says(review_output())])
+    work = item()
+    local_coordinator(
+        definition,
+        repo=repo,
+        state_dir=tmp_path / "state",
+        provider=provider,
+        allow_unsandboxed=True,
+    ).run(work)
+
+    entries = list(Ledger(tmp_path / "state" / "ledger.jsonl").read())
+    body = run_inspector(entries, work.id)
+
+    assert body.get("error") is None
+    assert body["gates"], "no gate outcomes reached the inspector"
+    assert body["costUnits"] >= 0
+
+
+def test_a_transition_records_whether_it_went_backwards(
+    definition, repo: Path, tmp_path: Path
+) -> None:
+    """Metric O-8. A transition record saying only where the item ended up cannot answer
+    "did this go backwards"."""
+    provider = StubProvider([says(triage_output()), says(build_output()), says(review_output())])
+    local_coordinator(
+        definition,
+        repo=repo,
+        state_dir=tmp_path / "state",
+        provider=provider,
+        allow_unsandboxed=True,
+    ).run(item())
+
+    transitions = [
+        e
+        for e in Ledger(tmp_path / "state" / "ledger.jsonl").read()
+        if e.type is EntryType.WORK_ITEM_TRANSITION
+    ]
+
+    assert transitions
+    assert all("backwards" in e.payload for e in transitions)
+    assert all("to" in e.payload for e in transitions)

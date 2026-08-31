@@ -221,11 +221,20 @@ class Coordinator:
             outcome.diff = workspace.diff()
             outcome.changed_paths = tuple(sorted(workspace.changed_paths()))
         finally:
+            # `to` and `backwards` are what the rework rate and the changes-opened count
+            # fold on. A transition record that says only where the item ended up cannot
+            # answer "did this go backwards", which is metric O-8.
             self.ledger.append(
                 EntryType.WORK_ITEM_TRANSITION,
                 actor="coordinator",
                 subject=item.id,
-                payload={"stage": item.stage.value, "blocker": item.blocker},
+                payload={
+                    "stage": item.stage.value,
+                    "to": item.stage.value,
+                    "blocker": item.blocker,
+                    "backwards": item.returned_to_earlier_stage() > 0,
+                    "workClass": item.work_class.value,
+                },
             )
         return outcome
 
@@ -291,11 +300,21 @@ class Coordinator:
             else RoutingState(ladder=self._synthetic_ladder(), current="local-small")
         )
 
+        # `agent` and `purpose` are what `observability.metrics` folds on. Without them the
+        # dashboard reports every run under the actor string and cannot separate work from
+        # measurement -- and FR-15.5's "a rising run count with flat output can be
+        # measurement activity" becomes unanswerable.
         self.ledger.append(
             EntryType.RUN_STARTED,
             actor=agent_name,
             subject=item.id,
-            payload={"stage": stage.value, "tier": routing.current},
+            payload={
+                "stage": stage.value,
+                "tier": routing.current,
+                "agent": agent_name,
+                "purpose": "work",
+                "workItem": item.id,
+            },
         )
 
         loop = TurnLoop(
@@ -311,6 +330,34 @@ class Coordinator:
             output_schema=STAGE_SCHEMAS.get(stage),
         )
         run = loop.run()
+
+        # The entry `sf spend` and `cost_per_change` fold on. Without it the whole economics
+        # layer reads an empty ledger and reports a factory running for free, which is the
+        # most flattering possible wrong answer.
+        active_tier = routing.ladder.tiers[routing.ladder.index_of(routing.current)]
+        self.ledger.append(
+            EntryType.MODEL_CALLED,
+            actor=agent_name,
+            subject=item.id,
+            payload={
+                "stage": stage.value,
+                "agent": agent_name,
+                "tier": routing.current,
+                "model": active_tier.model,
+                "workItem": item.id,
+                "run": item.id,
+                # Repairs are counted apart from primary work: a factory spending a third of
+                # its budget on repair has a different problem from one spending it on
+                # scoring, and one number cannot say which (FR-26.5).
+                "cause": "repair" if run.repair_attempts else "primary",
+                "inputTokens": run.spend.tokens,
+                "costUnits": round(run.spend.cost_units, 6),
+                "providerLatencySeconds": round(run.spend.provider_latency_s, 3),
+                "wallClockSeconds": round(run.spend.elapsed_s, 3),
+                "turns": run.spend.turns,
+                "toolCalls": run.spend.tool_calls,
+            },
+        )
 
         self.ledger.append(
             EntryType.RUN_FINISHED,
