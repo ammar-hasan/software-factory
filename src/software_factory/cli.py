@@ -1342,13 +1342,25 @@ def govern_verify(
     path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
     as_json: JsonOpt = False,
 ) -> None:
-    """Verify the segment chain, which works over an archived prefix."""
+    """Verify the segment chain, and each sealed range against the entries still present.
+
+    The chain check alone establishes that the manifest is internally consistent, which
+    reads far stronger than it is: the entries it describes could have been rewritten
+    underneath it. Where the entries are present they are re-hashed. Where they are not --
+    an archived prefix, the case this whole mechanism exists for -- the output says so by
+    name, rather than reporting a check it did not perform.
+    """
     from software_factory.governance import Manifest
+    from software_factory.ledger import Ledger
 
     manifest_path = path.with_suffix(path.suffix + ".segments")
     manifest = Manifest.load(manifest_path)
     try:
-        manifest.verify()
+        if path.exists():
+            report = manifest.verify_against(Ledger(path))
+        else:
+            manifest.verify()
+            report = None
     except FactoryError as exc:
         _fail(exc, as_json)
         return
@@ -1359,6 +1371,7 @@ def govern_verify(
                 "ok": True,
                 "segments": len(manifest.segments),
                 "sealedThrough": manifest.sealed_through,
+                "verification": report.as_dict() if report else {"chainOnly": "all"},
             }
         )
         raise typer.Exit(EXIT_OK)
@@ -1366,6 +1379,13 @@ def govern_verify(
         f"[green]verified[/] — {len(manifest.segments)} segment(s), "
         f"sealed through entry {manifest.sealed_through}"
     )
+    if report is None:
+        console.print("[yellow]the ledger was not present; the segment chain only[/]")
+    elif report.chain_only:
+        console.print(
+            f"[yellow]segments {sorted(report.chain_only)} were checked as chain links "
+            "only — their entries are not present, so their contents were not verified[/]"
+        )
     raise typer.Exit(EXIT_OK)
 
 

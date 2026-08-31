@@ -41,11 +41,16 @@ def item(stage: Stage = Stage.INTAKE, **kwargs) -> WorkItem:
     return WorkItem(**base)  # type: ignore[arg-type]
 
 
-def approval(capability: Capability, subject: str = "") -> Decision:
+def approval(capability: Capability, subject: str) -> Decision:
     """A decision a `Directory` would have produced. Tests state the authority explicitly.
 
     Building one here rather than a whole directory keeps these tests about the stage
     machine; `tests/test_identity.py` is where the grant itself is checked.
+
+    `subject` has no default. It used to default to `""`, which the machine read as "any
+    work item" -- so this helper was quietly minting the wildcard token that made
+    `test_an_approval_for_one_work_item_does_not_authorise_another` pass while the hole it
+    was named for stayed open.
     """
     return Decision(
         principal_id="human:maintainer",
@@ -126,7 +131,7 @@ def test_a_human_can_approve_skipping_review(machine: StageMachine) -> None:
         Stage.HANDOFF,
         actor="human:maintainer",
         reason="documentation-only change",
-        approval=approval(Capability.SKIP_STAGE),
+        approval=approval(Capability.SKIP_STAGE, work.id),
     )
 
     assert isinstance(moved, Transition)

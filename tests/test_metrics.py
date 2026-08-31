@@ -222,7 +222,7 @@ def test_changes_opened_counts_a_work_item_once(tmp_path: Path) -> None:
         transition("wi-2", "HANDOFF"),
     )
 
-    measure = compute(ledger.read()).measure("changes_opened")
+    measure = compute(ledger.read(), integrations=frozenset({"git-host"})).measure("changes_opened")
 
     assert measure is not None
     assert measure.value == 2.0

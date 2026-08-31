@@ -21,6 +21,7 @@ from software_factory.governance.segments import (
     Manifest,
     Segment,
     SegmentError,
+    VerificationReport,
     seal,
 )
 
@@ -39,6 +40,7 @@ __all__ = [
     "SegmentError",
     "Sensitivity",
     "SweepReport",
+    "VerificationReport",
     "classes_holding",
     "classification_for",
     "seal",

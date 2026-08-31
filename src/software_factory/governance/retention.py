@@ -96,15 +96,34 @@ class SweepReport:
 
     already_tombstoned: list[str] = field(default_factory=list)
 
+    examined: int = 0
+    """How many artifacts this pass actually looked at.
+
+    `Retention` enumerates nothing; it reports over the list it was handed. Without this,
+    a sweep of an empty list and a sweep that cleared the estate produce reports a reader
+    cannot tell apart.
+    """
+
+    dry_run: bool = False
+
     @property
     def acted(self) -> bool:
-        return bool(self.expired)
+        """True only when something was really destroyed.
+
+        This used to be `bool(self.expired)`, which was True for a sweep given no
+        destructor at all -- a positive assertion of deletion that nothing established, in
+        a report shaped to be shown to an auditor.
+        """
+        return bool(self.expired) and not self.dry_run
 
     def as_dict(self) -> dict[str, object]:
         return {
             "expired": sorted(self.expired),
             "held": [{"artifact": a, "hold": h} for a, h in sorted(self.held)],
             "alreadyTombstoned": sorted(self.already_tombstoned),
+            "examined": self.examined,
+            "dryRun": self.dry_run,
+            "acted": self.acted,
         }
 
 
@@ -126,11 +145,25 @@ class ErasureReport:
 
     blocked_by_hold: list[tuple[str, str]] = field(default_factory=list)
 
+    examined: int = 0
+    """How many artifacts were inspected to reach this answer.
+
+    A receipt handed to a data subject or a regulator that says `complete: true` over a
+    list nobody enumerated is not an answer. This is the qualifier that makes the claim
+    readable: complete *with respect to* these artifacts.
+    """
+
+    dry_run: bool = False
+
     @property
     def complete(self) -> bool:
-        """True only when nothing was blocked. Unerasable classes do not block completion --
-        they are a stated property of the design, not a failure of this request."""
-        return not self.blocked_by_hold
+        """True only when something was examined, destroyed for real, and nothing blocked.
+
+        Unerasable classes do not block completion -- they are a stated property of the
+        design, not a failure of this request. An empty artifact list does: a request that
+        looked at nothing has not been satisfied, it has been skipped.
+        """
+        return bool(self.examined) and not self.blocked_by_hold and not self.dry_run
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -138,6 +171,8 @@ class ErasureReport:
             "requestedBy": self.requested_by,
             "at": self.at.isoformat(),
             "complete": self.complete,
+            "examined": self.examined,
+            "dryRun": self.dry_run,
             "erased": sorted(self.erased),
             "unerasable": [{"artifact": a, "why": w} for a, w in sorted(self.unerasable)],
             "blockedByHold": [{"artifact": a, "hold": h} for a, h in sorted(self.blocked_by_hold)],
@@ -195,17 +230,30 @@ class Retention:
         self,
         artifacts: list[Artifact],
         *,
-        tombstone: Callable[[Artifact], None] | None = None,
+        tombstone: Callable[[Artifact], None] | None,
         now: datetime | None = None,
+        dry_run: bool = False,
     ) -> SweepReport:
         """Expire what is due, keeping what a hold covers.
 
         The hold check runs *before* the expiry check on purpose: a sweep that deletes and
         then notices the hold has already destroyed the thing the hold existed to preserve.
+
+        `tombstone` is required rather than optional. As an optional argument the report
+        said `acted: True` for a caller who never passed one, and the first production use
+        of an API like this is overwhelmingly likely to be the one that omits the callback.
+        Audit-only is still available, but it has to be asked for by name: `dry_run=True`,
+        which the report then carries so `acted` is False by construction.
         """
+        if tombstone is None and not dry_run:
+            raise ValueError(
+                "sweep needs a `tombstone` callable, or `dry_run=True` to say it should "
+                "destroy nothing; a sweep with neither reports deletions it did not make"
+            )
         now = now or utc_now()
-        report = SweepReport()
+        report = SweepReport(dry_run=dry_run)
         for artifact in sorted(artifacts, key=lambda a: a.id):
+            report.examined += 1
             if artifact.tombstoned:
                 report.already_tombstoned.append(artifact.id)
                 continue
@@ -216,7 +264,7 @@ class Retention:
             rule = self.classification.get(artifact.data_class)
             if rule is None or not rule.expires_at_age(artifact.age(now)):
                 continue
-            if tombstone is not None:
+            if not dry_run and tombstone is not None:
                 tombstone(artifact)
             report.expired.append(artifact.id)
         return report
@@ -227,18 +275,36 @@ class Retention:
         artifacts: list[Artifact],
         *,
         requested_by: str,
-        destroy: Callable[[Artifact], None] | None = None,
+        destroy: Callable[[Artifact], None] | None,
         now: datetime | None = None,
+        dry_run: bool = False,
     ) -> ErasureReport:
         """Destroy everything erasable for one subject, and report what remains.
 
         A legal hold *blocks* an erasure rather than overriding it, and the report says so.
         The two obligations genuinely conflict, and resolving that conflict silently -- in
         either direction -- is worse than naming it for the person who has to.
+
+        `destroy` is required for the reason given on `sweep`: the receipt this produces is
+        shaped to be handed to a data subject, and one that asserts deletion nothing
+        performed is worse than no receipt.
         """
-        report = ErasureReport(subject=subject, requested_by=requested_by, at=now or utc_now())
+        if destroy is None and not dry_run:
+            raise ValueError(
+                "erase needs a `destroy` callable, or `dry_run=True`; an erasure receipt "
+                "that asserts deletion nothing performed is worse than no receipt"
+            )
+        report = ErasureReport(
+            subject=subject, requested_by=requested_by, at=now or utc_now(), dry_run=dry_run
+        )
         for artifact in sorted(artifacts, key=lambda a: a.id):
             if subject not in artifact.subjects:
+                continue
+            report.examined += 1
+            if artifact.tombstoned:
+                # `sweep` already skips these. Not skipping them here destroyed a body
+                # retention had destroyed already and reported it as freshly erased,
+                # inflating the receipt with work nobody did.
                 continue
             hold = self.holding(artifact)
             if hold is not None:
@@ -257,7 +323,7 @@ class Retention:
                     )
                 )
                 continue
-            if destroy is not None:
+            if not dry_run and destroy is not None:
                 destroy(artifact)
             report.erased.append(artifact.id)
         return report

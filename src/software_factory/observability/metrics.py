@@ -199,10 +199,19 @@ class Report:
 #: generic "unavailable", and so adding an integration does not mean hunting for the metrics
 #: it unblocks.
 REQUIRES_INTEGRATION: dict[str, str] = {
+    "changes_opened": "git-host",
     "changes_merged": "git-host",
     "autonomy": "git-host",
     "cycle_time_to_merge": "git-host",
 }
+"""Metrics that cannot be observed from the ledger alone.
+
+`changes_opened` belongs here for the same reason as the other three, and its absence was
+the sharper bug: it reported `0 changes` as an *established* value, directly beneath three
+measures correctly saying that reporting zero would read as a factory producing none.
+Opening a change is an act on a git host; a local run reaching HANDOFF is not evidence one
+happened.
+"""
 
 
 def compute(
@@ -226,8 +235,9 @@ def compute(
         _escalation_rate(in_window, runs.total),
         _rework_rate(in_window),
         _cost_per_change(in_window),
-        _changes_opened(in_window),
     ]
+    if "git-host" in integrations:
+        measures.append(_changes_opened(in_window))
 
     for name, integration in sorted(REQUIRES_INTEGRATION.items()):
         if integration not in integrations:
@@ -292,13 +302,23 @@ def _gate_pass_rate(entries: list[LedgerEntry]) -> Measure:
 
     First attempt only: a gate that passes on the fourth try has still failed, and counting
     every attempt would let a factory improve this number by retrying more.
+
+    Keyed by *stage* as well as work item and gate. Several gates legitimately run at more
+    than one stage, and without the stage in the key the later evaluations were discarded
+    as repeats of the first -- so a `secret-clean` pass at BUILD hid a `secret-clean`
+    failure at REVIEW and the pair reported as a 100% pass rate. The first evaluation is
+    also the one most likely to have passed, which makes the bias one-directional.
     """
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     passed = attempted = 0
     for entry in entries:
         if entry.type is not EntryType.GATE_EVALUATED:
             continue
-        key = (str(entry.subject), str(entry.payload.get("gate", "")))
+        key = (
+            str(entry.subject),
+            str(entry.payload.get("gate", "")),
+            str(entry.payload.get("stage", "")),
+        )
         if key in seen:
             continue
         seen.add(key)

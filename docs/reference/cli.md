@@ -28,7 +28,7 @@ cannot be scripted, and PR-2 makes the local path the reference one.
 | `sf doctor` | Report what works in this environment and what does not (FR-28.1). |
 | `sf govern classes` | What each persisted class can contain, how long it is kept, and why. |
 | `sf govern seal` | Seal complete ledger segments so an archived prefix stays verifiable. |
-| `sf govern verify` | Verify the segment chain, which works over an archived prefix. |
+| `sf govern verify` | Verify the segment chain, and each sealed range against the entries still present. |
 | `sf ledger tail` | Show the most recent entries. |
 | `sf ledger verify` | Verify sequence, chaining, and per-entry hashes. Names the first divergence. |
 | `sf memory blast` | What invalidating this memory would affect. |

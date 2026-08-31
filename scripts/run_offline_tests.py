@@ -91,7 +91,7 @@ def _deny_resolution(*args: object, **_kwargs: object) -> None:
     )
 
 
-def _guarded_create_connection(address: object, *args: object, **kwargs: object) -> object:
+def _guarded_create_connection(address: object, *_a: object, **_kw: object) -> object:
     """`create_connection` resolves before it connects, so it needs its own guard.
 
     Left to the resolution guard it would fail with a DNS error even for a loopback

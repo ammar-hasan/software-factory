@@ -115,17 +115,27 @@ def test_no_network_maps_to_the_runtimes_own_enforcement(tmp_path: Path) -> None
 
 def test_secrets_are_passed_by_environment_not_on_the_command_line(tmp_path: Path) -> None:
     """A secret on a command line is visible in the host's process list to anyone who can
-    run `ps`, and redaction at capture does not reach that."""
+    run `ps`, and redaction at capture does not reach that.
+
+    This test used to assert `SF_TOKEN=` appeared in the argv -- the leak itself, written
+    down as the requirement, under a name saying the opposite. `--env NAME` without a value
+    is the form that reads the value from the docker client's own environment, which the
+    inner executor already sets.
+    """
+    secret = "value-1234567890"
     executor = ContainerExecutor(
-        policy(tmp_path, secrets={"SF_TOKEN": "value-1234567890"}),
+        policy(tmp_path, secrets={"SF_TOKEN": secret}),
         ContainerImage("ghcr.io/acme/builder:1.0"),
         runtime="/usr/bin/docker",
     )
 
     wrapped = executor._wrap(["pytest"], cwd=None)
 
-    assert "--env" in wrapped
-    assert any(part.startswith("SF_TOKEN=") for part in wrapped)
+    passed = [wrapped[i + 1] for i, part in enumerate(wrapped) if part == "--env"]
+    assert "SF_TOKEN" in passed
+    assert not any(secret in part for part in wrapped), wrapped
+    # The value has to reach the container by some route, and the environment is it.
+    assert executor.policy.environment()["SF_TOKEN"] == secret
 
 
 # ------------------------------------------------------------------------- ssh worker

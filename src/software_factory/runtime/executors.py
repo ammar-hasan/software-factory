@@ -175,11 +175,16 @@ class ContainerExecutor:
         ]
         if self.policy.network is NetworkPolicy.NONE:
             args += ["--network", "none"]
-        for name, value in sorted(self.policy.environment().items()):
-            # Values are passed through the environment rather than the command line: a
-            # secret on a command line is visible in the host's process list to anyone who
-            # can run `ps`, and redaction at capture does not reach that.
-            args += ["--env", f"{name}={value}"]
+        for name in sorted(self.policy.environment()):
+            # `--env NAME` without a value: docker reads the value from its own environment,
+            # which the inner executor already sets from the same policy. The form with the
+            # value -- `--env NAME=secret` -- puts it in the host's process list, where
+            # anyone who can run `ps` reads it and redaction at capture never reaches.
+            #
+            # The comment saying so was here before the code did. That is the failure worth
+            # naming: a stated control is not a control, and the test named for this
+            # property asserted the leak.
+            args += ["--env", name]
         for writable in self.policy.writable_paths:
             if Path(writable) != self.policy.workspace:
                 args += ["--volume", f"{writable}:{writable}"]

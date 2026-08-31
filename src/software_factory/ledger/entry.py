@@ -46,6 +46,7 @@ class EntryType(enum.StrEnum):
     CHECKPOINT_ESCALATED = "checkpoint.escalated"
     CHECKPOINT_RESOLVED = "checkpoint.resolved"
     BUDGET_EVENT = "budget.event"
+    SEGMENT_SEALED = "segment.sealed"
 
 
 def utc_now() -> str:

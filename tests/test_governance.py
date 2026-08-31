@@ -9,6 +9,7 @@ job retention was about to redo.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 
@@ -108,11 +109,21 @@ def artifact(artifact_id: str, data_class: DataClass, *, age_days: float = 0, **
     return Artifact(**base)  # type: ignore[arg-type]
 
 
+def tombstoner() -> Callable[[Artifact], None]:
+    """A destructor that does nothing but exist.
+
+    `sweep` and `erase` now require one. Passing this rather than omitting it is the whole
+    point of the change: a caller who omits the destructor used to get a report asserting
+    deletions that never happened, and several tests here were the ones blessing it.
+    """
+    return lambda _artifact: None
+
+
 def test_an_artifact_past_its_retention_expires() -> None:
     retention = Retention()
     old = artifact("t1", DataClass.TRANSCRIPT, age_days=45)
 
-    report = retention.sweep([old])
+    report = retention.sweep([old], tombstone=tombstoner())
 
     assert report.expired == ["t1"]
     assert report.acted
@@ -121,7 +132,10 @@ def test_an_artifact_past_its_retention_expires() -> None:
 def test_an_artifact_within_its_retention_is_kept() -> None:
     retention = Retention()
 
-    assert retention.sweep([artifact("t1", DataClass.TRANSCRIPT, age_days=5)]).expired == []
+    kept = retention.sweep(
+        [artifact("t1", DataClass.TRANSCRIPT, age_days=5)], tombstone=None, dry_run=True
+    )
+    assert kept.expired == []
 
 
 def test_a_class_with_no_retention_never_expires_on_age() -> None:
@@ -129,7 +143,10 @@ def test_a_class_with_no_retention_never_expires_on_age() -> None:
     would fight it."""
     retention = Retention()
 
-    assert retention.sweep([artifact("m1", DataClass.MEMORY, age_days=3650)]).expired == []
+    kept = retention.sweep(
+        [artifact("m1", DataClass.MEMORY, age_days=3650)], tombstone=None, dry_run=True
+    )
+    assert kept.expired == []
 
 
 def test_retention_removes_bodies_and_the_record_survives() -> None:
@@ -148,7 +165,7 @@ def test_an_already_tombstoned_artifact_is_not_expired_twice() -> None:
     retention = Retention()
     already = artifact("e1", DataClass.EVIDENCE, age_days=400, tombstoned=True)
 
-    report = retention.sweep([already])
+    report = retention.sweep([already], tombstone=tombstoner())
 
     assert report.expired == []
     assert report.already_tombstoned == ["e1"]
@@ -171,7 +188,7 @@ def test_a_hold_suspends_retention_for_its_subjects() -> None:
     retention = Retention(holds=[hold()])
     old = artifact("t1", DataClass.TRANSCRIPT, age_days=400, subjects=frozenset({"amaya"}))
 
-    report = retention.sweep([old])
+    report = retention.sweep([old], tombstone=tombstoner())
 
     assert report.expired == []
     assert report.held == [("t1", "h1")]
@@ -182,7 +199,9 @@ def test_a_hold_is_reported_not_silent() -> None:
     retention = Retention(holds=[hold()])
     old = artifact("t1", DataClass.TRANSCRIPT, age_days=400, subjects=frozenset({"amaya"}))
 
-    assert retention.sweep([old]).as_dict()["held"] == [{"artifact": "t1", "hold": "h1"}]
+    assert retention.sweep([old], tombstone=tombstoner()).as_dict()["held"] == [
+        {"artifact": "t1", "hold": "h1"}
+    ]
 
 
 def test_a_hold_covers_artifacts_created_after_it_was_placed() -> None:
@@ -191,26 +210,26 @@ def test_a_hold_covers_artifacts_created_after_it_was_placed() -> None:
     retention = Retention(holds=[hold()])
     later = artifact("t2", DataClass.TRANSCRIPT, age_days=400, subjects=frozenset({"amaya"}))
 
-    assert retention.sweep([later]).held == [("t2", "h1")]
+    assert retention.sweep([later], tombstone=tombstoner()).held == [("t2", "h1")]
 
 
 def test_a_hold_does_not_cover_an_unrelated_subject() -> None:
     retention = Retention(holds=[hold(subjects=("bo",))])
     old = artifact("t1", DataClass.TRANSCRIPT, age_days=400, subjects=frozenset({"amaya"}))
 
-    assert retention.sweep([old]).expired == ["t1"]
+    assert retention.sweep([old], tombstone=tombstoner()).expired == ["t1"]
 
 
 def test_lifting_a_hold_lets_retention_resume() -> None:
     retention = Retention(holds=[hold()])
     old = artifact("t1", DataClass.TRANSCRIPT, age_days=400, subjects=frozenset({"amaya"}))
-    assert retention.sweep([old]).held
+    assert retention.sweep([old], tombstone=tombstoner()).held
 
     lifted = retention.lift_hold("h1", by="human:counsel")
 
     assert lifted is not None
     assert not lifted.active
-    assert retention.sweep([old]).expired == ["t1"]
+    assert retention.sweep([old], tombstone=tombstoner()).expired == ["t1"]
 
 
 def test_a_duplicate_hold_id_is_refused() -> None:
@@ -252,6 +271,7 @@ def test_an_unerasable_class_does_not_make_the_request_incomplete() -> None:
         "amaya",
         [artifact("l1", DataClass.LEDGER, subjects=frozenset({"amaya"}))],
         requested_by="human:dpo",
+        destroy=tombstoner(),
     )
 
     assert report.complete
@@ -267,6 +287,7 @@ def test_a_legal_hold_blocks_erasure_and_the_report_says_so() -> None:
         "amaya",
         [artifact("t1", DataClass.TRANSCRIPT, subjects=frozenset({"amaya"}))],
         requested_by="human:dpo",
+        destroy=tombstoner(),
     )
 
     assert not report.complete
@@ -281,6 +302,7 @@ def test_an_erasure_report_renders_every_outcome() -> None:
         "amaya",
         [artifact("t1", DataClass.TRANSCRIPT, subjects=frozenset({"amaya"}))],
         requested_by="human:dpo",
+        destroy=tombstoner(),
     ).as_dict()
 
     assert body["subject"] == "amaya"

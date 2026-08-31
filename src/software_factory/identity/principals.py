@@ -270,6 +270,16 @@ class Directory:
                     )
                 ),
             )
+        if not subject.strip():
+            return Refused(
+                "identity.no_subject",
+                f"{principal_id!r} exercised {capability.value} against no subject",
+                (
+                    "Name what is being decided -- a work item id, a delta id, a run id. "
+                    "A decision with no subject is not an approval of anything; it is a "
+                    "token that authorises everything, permanently."
+                ),
+            )
         if not rationale.strip():
             return Refused(
                 "identity.no_rationale",

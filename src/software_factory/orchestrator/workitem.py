@@ -420,9 +420,15 @@ def _requires(approval: Decision | None, capability: Capability, subject: str) -
             f"{approval.principal_id!r} exercised {approval.capability.value}, "
             f"which does not authorise {capability.value}"
         )
-    if approval.subject not in ("", subject):
+    if approval.subject != subject:
+        # The empty string used to be accepted here as "any subject", which made a single
+        # decision a standing authority over every work item, with no expiry and no
+        # single-use property. A scope-wide authority is a different thing from an
+        # approval and belongs in its own named capability, where `sf principals` shows
+        # it, rather than hidden in an empty field.
+        named = approval.subject or "nothing"
         return (
-            f"the approval names {approval.subject!r}, not {subject!r}; an approval is for "
+            f"the approval names {named!r}, not {subject!r}; an approval is for "
             "one decision, not a token to reuse"
         )
     return None
