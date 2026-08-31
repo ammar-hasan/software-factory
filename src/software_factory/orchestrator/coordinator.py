@@ -116,6 +116,29 @@ STAGE_SCHEMAS: dict[Stage, dict[str, Any]] = {
             "calibration": {"type": "object"},
         },
     },
+    Stage.VERIFY: {
+        "type": "object",
+        "required": ["verdict", "evidence", "calibration"],
+        "properties": {
+            "verdict": {"type": "string"},
+            "evidence": {"type": "array"},
+            "calibration": {"type": "object"},
+        },
+    },
+    # HANDOFF had no schema, and a stage with no schema produces no validated output and
+    # therefore no calibration -- so `calibration-present` failed at the one stage whose
+    # output leaves the machine. The two halves of that gap were separate: the default path
+    # never reached HANDOFF, so nothing ever ran into it.
+    Stage.HANDOFF: {
+        "type": "object",
+        "required": ["summary", "calibration"],
+        "properties": {
+            "summary": {"type": "string"},
+            "branch": {"type": "string"},
+            "changeRef": {"type": "string"},
+            "calibration": {"type": "object"},
+        },
+    },
 }
 
 ROLE_FOR_STAGE: dict[Stage, AgentRole] = {
@@ -253,12 +276,33 @@ class Coordinator:
                     self._block(item, Blocker.BUDGET_EXCEEDED, refusal)
                     break
 
+                came_from = item.stage
                 moved = self.machine.advance(
                     item, stage, actor="coordinator", reason=f"entering {stage.value}"
                 )
                 if not isinstance(moved, Transition):
                     self._block(item, Blocker.GATE_FAILED_TERMINAL, moved.message)
                     break
+
+                # One entry per move, at the point the move happens. A single entry written
+                # in `finally` recorded only where the item ended up, so the intermediate
+                # moves never reached the ledger at all -- FR-15.2's "all derived state is
+                # rebuildable from the ledger" was false for the stage machine -- and it set
+                # `stage` and `to` to the same value, so it could not answer "where did this
+                # come from" either.
+                self.ledger.append(
+                    EntryType.WORK_ITEM_TRANSITION,
+                    actor="coordinator",
+                    subject=item.id,
+                    payload={
+                        "from": came_from.value,
+                        "to": item.stage.value,
+                        "stage": item.stage.value,
+                        "skipped": [s.value for s in moved.skipped],
+                        "backwards": item.returned_to_earlier_stage() > 0,
+                        "workClass": item.work_class.value,
+                    },
+                )
 
                 stage_outcome = self._run_stage(item, stage, workspace)
                 outcome.stages.append(stage_outcome)
@@ -281,9 +325,9 @@ class Coordinator:
             outcome.diff = workspace.diff()
             outcome.changed_paths = tuple(sorted(workspace.changed_paths()))
         finally:
-            # `to` and `backwards` are what the rework rate and the changes-opened count
-            # fold on. A transition record that says only where the item ended up cannot
-            # answer "did this go backwards", which is metric O-8.
+            # Where the item came to rest. The moves themselves are recorded as they
+            # happen, above; this one closes the run out, and is marked so a reader folding
+            # transitions does not count the last move twice.
             self.ledger.append(
                 EntryType.WORK_ITEM_TRANSITION,
                 actor="coordinator",
@@ -291,6 +335,7 @@ class Coordinator:
                 payload={
                     "stage": item.stage.value,
                     "to": item.stage.value,
+                    "terminal": True,
                     "blocker": item.blocker,
                     "backwards": item.returned_to_earlier_stage() > 0,
                     "workClass": item.work_class.value,
@@ -306,11 +351,16 @@ class Coordinator:
         Triage is skipped when the request already explains what is wrong and what to
         change; review never is (FR-3.3a).
         """
+        # Every path ends at HANDOFF. It did not, and the consequence was quiet: a factory
+        # that never reaches handoff opens no changes, so `changes_opened` and
+        # `cost_per_change` folded on a key nobody wrote and reported "no work item both
+        # incurred cost and reached handoff" -- which reads as an observation about
+        # throughput when it was a statement about a stage the path never included.
         if item.work_class is WorkClass.DEFECT and len(item.request) > 200:
-            return [Stage.TRIAGE, Stage.BUILD, Stage.REVIEW]
+            return [Stage.TRIAGE, Stage.BUILD, Stage.REVIEW, Stage.HANDOFF]
         if item.work_class in (WorkClass.FEATURE, WorkClass.REFACTOR):
-            return [Stage.TRIAGE, Stage.DESIGN, Stage.BUILD, Stage.REVIEW]
-        return [Stage.TRIAGE, Stage.BUILD, Stage.REVIEW]
+            return [Stage.TRIAGE, Stage.DESIGN, Stage.BUILD, Stage.REVIEW, Stage.HANDOFF]
+        return [Stage.TRIAGE, Stage.BUILD, Stage.REVIEW, Stage.HANDOFF]
 
     def _run_stage(self, item: WorkItem, stage: Stage, workspace: Workspace) -> StageOutcome:
         role = ROLE_FOR_STAGE.get(stage, AgentRole.CUSTOM)
@@ -428,6 +478,10 @@ class Coordinator:
                 # its budget on repair has a different problem from one spending it on
                 # scoring, and one number cannot say which (FR-26.5).
                 "cause": "repair" if run.repair_attempts else "primary",
+                # Whether the number above means anything. A tier with no declared price
+                # produces `costUnits: 0.0`, which is indistinguishable from a call that
+                # really was free unless the entry says which.
+                "priced": bool(active_tier.cost_per_mtok_in or active_tier.cost_per_mtok_out),
                 "inputTokens": run.spend.tokens,
                 "costUnits": round(run.spend.cost_units, 6),
                 "providerLatencySeconds": round(run.spend.provider_latency_s, 3),

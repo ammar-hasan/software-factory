@@ -977,3 +977,113 @@ def test_o4_the_probe_is_what_test_parity_already_knew_to_do() -> None:
 
     assert _daemon_reachable("/bin/false") is False
     assert _daemon_reachable("/nonexistent/binary") is False
+
+
+# ------------------------------------------------------------------- O5, O6, O7
+
+
+def test_o5_every_stage_move_is_recorded_with_where_it_came_from(tmp_path) -> None:
+    """One transition per `run()`, written in `finally` with `to` set to wherever the item
+    happened to end up.
+
+    So the intermediate moves (TRIAGE→BUILD→REVIEW) never reached the ledger at all --
+    FR-15.2's "all derived state is rebuildable from the ledger" was false for the stage
+    machine -- and `stage` and `to` held the same value, so the record could not answer
+    "where did it come from" either.
+    """
+    from software_factory.ledger import EntryType, Ledger
+    from software_factory.observability.metrics import compute
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    for source, target in (("INTAKE", "TRIAGE"), ("TRIAGE", "BUILD"), ("BUILD", "REVIEW")):
+        ledger.append(
+            EntryType.WORK_ITEM_TRANSITION,
+            actor="coordinator",
+            subject="wi-1",
+            payload={"from": source, "to": target, "backwards": False},
+        )
+
+    moves = [e for e in ledger.read() if e.type is EntryType.WORK_ITEM_TRANSITION]
+    assert [(e.payload["from"], e.payload["to"]) for e in moves] == [
+        ("INTAKE", "TRIAGE"),
+        ("TRIAGE", "BUILD"),
+        ("BUILD", "REVIEW"),
+    ]
+    assert compute(ledger.read()).measure("rework_rate").value == 0.0
+
+
+def test_o6_a_zero_cost_from_an_unpriced_ladder_is_not_reported_as_free(tmp_path) -> None:
+    """A zero meaning "nobody configured a price" rendered identically to a zero meaning
+    "this was free".
+
+    The `excludes` tuple listed four things the estimate left out and not the one that
+    produced the zero. The entry the comment says exists so economics does not "report a
+    factory running for free" was the path on which it did exactly that.
+    """
+    from software_factory.ledger import EntryType, Ledger
+    from software_factory.observability.metrics import Availability, compute
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    for stage in ("TRIAGE", "BUILD", "REVIEW"):
+        ledger.append(
+            EntryType.MODEL_CALLED,
+            actor="builder",
+            subject="wi-1",
+            payload={
+                "stage": stage,
+                "workItem": "wi-1",
+                "costUnits": 0.0,
+                "priced": False,
+                "tier": "local-small",
+            },
+        )
+    ledger.append(
+        EntryType.WORK_ITEM_TRANSITION,
+        actor="coordinator",
+        subject="wi-1",
+        payload={"from": "REVIEW", "to": "HANDOFF"},
+    )
+
+    measure = compute(ledger.read()).measure("cost_per_change")
+
+    assert measure.availability is Availability.INSUFFICIENT_DATA
+    assert "no tier declares a price" in measure.reason
+
+
+def test_o6_a_priced_ladder_still_produces_an_estimate(tmp_path) -> None:
+    from software_factory.ledger import EntryType, Ledger
+    from software_factory.observability.metrics import Availability, compute
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append(
+        EntryType.MODEL_CALLED,
+        actor="builder",
+        subject="wi-1",
+        payload={"workItem": "wi-1", "costUnits": 2.5, "priced": True, "stage": "BUILD"},
+    )
+    ledger.append(
+        EntryType.WORK_ITEM_TRANSITION,
+        actor="coordinator",
+        subject="wi-1",
+        payload={"from": "REVIEW", "to": "HANDOFF"},
+    )
+
+    measure = compute(ledger.read()).measure("cost_per_change")
+
+    assert measure.availability is Availability.AVAILABLE
+    assert measure.value == 2.5
+
+
+def test_o7_the_run_split_says_when_it_cannot_distinguish_measurement(tmp_path) -> None:
+    """Nothing anywhere wrote a `purpose` other than "work", so `measurementShare` was a
+    structural zero presented as an observation about the factory."""
+    from software_factory.ledger import EntryType, Ledger
+    from software_factory.observability.metrics import compute
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append(EntryType.RUN_STARTED, actor="builder", subject="r1", payload={"purpose": "work"})
+
+    runs = compute(ledger.read()).runs
+
+    assert runs.measurement_share == 0.0
+    assert "no run in this window declared" in str(runs.as_dict()["note"])

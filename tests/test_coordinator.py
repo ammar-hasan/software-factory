@@ -113,22 +113,71 @@ def coordinator(definition, repo: Path, tmp_path: Path, provider: StubProvider) 
 # ------------------------------------------------------------------------- end to end
 
 
-def test_a_work_item_runs_through_triage_build_and_review(
-    definition, repo: Path, tmp_path: Path
-) -> None:
-    """Chore-class work carries no regression-proven requirement, so it reaches review."""
-    provider = StubProvider([says(triage_output()), says(build_output()), says(review_output())])
+def test_a_work_item_runs_all_the_way_to_handoff(definition, repo: Path, tmp_path: Path) -> None:
+    """Chore-class work carries no regression-proven requirement, so it reaches handoff.
+
+    The path used to stop at REVIEW, which meant the factory never opened a change -- and
+    `changes_opened` and `cost_per_change` folded on a HANDOFF transition nobody wrote,
+    reporting "no work item both incurred cost and reached handoff" as though it were an
+    observation about throughput.
+    """
+    provider = StubProvider(
+        [
+            says(triage_output()),
+            says(build_output()),
+            says(review_output()),
+            says(stage_output(summary="Handed off.")),
+        ]
+    )
 
     outcome = coordinator(definition, repo, tmp_path, provider).run(
         item(WorkClass.CHORE, "Tidy the importer module docstring.")
     )
 
-    assert [s.stage for s in outcome.stages] == [Stage.TRIAGE, Stage.BUILD, Stage.REVIEW]
+    assert [s.stage for s in outcome.stages] == [
+        Stage.TRIAGE,
+        Stage.BUILD,
+        Stage.REVIEW,
+        Stage.HANDOFF,
+    ]
     assert all(s.advanced for s in outcome.stages), [
-        (s.stage.value, s.run.reason, [f.render() for f in s.gates.findings])
+        (s.stage.value, [r.gate for r in s.gates.results if r.blocks], s.gates.findings)
         for s in outcome.stages
     ]
-    assert outcome.item.stage is Stage.REVIEW
+    assert outcome.item.stage is Stage.HANDOFF
+
+
+def test_every_stage_move_reaches_the_ledger_with_where_it_came_from(
+    definition, repo: Path, tmp_path: Path
+) -> None:
+    """One entry per `run()` recorded only the final stage, so the moves in between were
+    never written. FR-15.2's "all derived state is rebuildable from the ledger" was false
+    for the stage machine."""
+    provider = StubProvider(
+        [
+            says(triage_output()),
+            says(build_output()),
+            says(review_output()),
+            says(stage_output(summary="Handed off.")),
+        ]
+    )
+    coordinator(definition, repo, tmp_path, provider).run(
+        item(WorkClass.CHORE, "Tidy the importer module docstring.")
+    )
+
+    ledger = Ledger(tmp_path / "state" / "ledger.jsonl")
+    moves = [
+        (e.payload["from"], e.payload["to"])
+        for e in ledger.read()
+        if e.type is EntryType.WORK_ITEM_TRANSITION and not e.payload.get("terminal")
+    ]
+
+    assert moves == [
+        ("INTAKE", "TRIAGE"),
+        ("TRIAGE", "BUILD"),
+        ("BUILD", "REVIEW"),
+        ("REVIEW", "HANDOFF"),
+    ]
 
 
 def test_a_defect_fix_without_a_regression_test_is_blocked_at_build(

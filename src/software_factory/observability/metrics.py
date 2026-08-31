@@ -151,6 +151,13 @@ class RunCounts:
             "note": (
                 "Run counts include evaluation, benchmark and improvement runs. A rising "
                 "total with flat output can be measurement activity rather than work."
+                if self.total > self.work
+                else (
+                    "Run counts include evaluation, benchmark and improvement runs, but no "
+                    "run in this window declared a purpose other than work — so a "
+                    "measurement share of zero here is the absence of measurement runs, "
+                    "not evidence that none were needed."
+                )
             ),
         }
 
@@ -389,12 +396,18 @@ def _cost_per_change(entries: list[LedgerEntry]) -> Measure:
     """
     per_item: dict[str, float] = {}
     handed_off: set[str] = set()
+    priced_any = False
     for entry in entries:
         if entry.type is EntryType.MODEL_CALLED:
             item = str(entry.payload.get("workItem", entry.subject))
             per_item[item] = per_item.get(item, 0.0) + float(
                 entry.payload.get("costUnits", 0.0) or 0
             )
+            # `priced` says whether the tier that served this call declared a price. A zero
+            # meaning "nobody configured a price" used to render identically to a zero
+            # meaning "this was free" -- and the `excludes` tuple listed four things the
+            # estimate left out, never the one that produced the zero.
+            priced_any = priced_any or bool(entry.payload.get("priced", True))
         elif entry.type is EntryType.WORK_ITEM_TRANSITION and entry.payload.get("to") == "HANDOFF":
             handed_off.add(str(entry.subject))
 
@@ -403,6 +416,12 @@ def _cost_per_change(entries: list[LedgerEntry]) -> Measure:
         return insufficient(
             "cost_per_change",
             "no work item both incurred cost and reached handoff in this window",
+        )
+    if not priced_any:
+        return insufficient(
+            "cost_per_change",
+            "no tier declares a price, so every recorded cost is zero by configuration "
+            "rather than by observation",
         )
     return Measure(
         name="cost_per_change",

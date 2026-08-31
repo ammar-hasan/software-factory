@@ -284,7 +284,10 @@ def test_gates_lists_every_baseline_gate_with_its_stages() -> None:
     assert result.exit_code == 0
     gates = payload(result.output)["gates"]
     assert gates["regression-proven"] == ["BUILD"]
-    assert set(gates["evidence-complete"]) == {"REVIEW", "VERIFY"}
+    assert set(gates["evidence-complete"]) == {"HANDOFF", "REVIEW", "VERIFY"}
+    # HANDOFF is where the work becomes externally visible, so the two gates about what
+    # leaves the machine run there whatever they said earlier.
+    assert set(gates["secret-clean"]) >= {"BUILD", "HANDOFF"}
 
 
 def test_memory_stats_reports_lane_counts(tmp_path: Path) -> None:

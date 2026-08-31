@@ -127,9 +127,19 @@ def test_run_counts_break_down_by_agent_stage_and_tier(tmp_path: Path) -> None:
 def test_run_counts_carry_the_note_about_measurement_activity(tmp_path: Path) -> None:
     """The dashboard must say so, per FR-15.5, and a note nobody carries is a note nobody
     renders."""
-    ledger = ledger_with(tmp_path, run_started("r1"))
+    ledger = ledger_with(tmp_path, run_started("r1"), run_started("r2", purpose="benchmark"))
 
     assert "measurement activity" in str(compute(ledger.read()).runs.as_dict()["note"])
+
+
+def test_run_counts_say_when_no_run_declared_a_purpose_other_than_work(tmp_path: Path) -> None:
+    """Nothing anywhere wrote a purpose other than "work", so `measurementShare` was a
+    structural zero presented as an observation about the factory."""
+    ledger = ledger_with(tmp_path, run_started("r1"))
+
+    note = str(compute(ledger.read()).runs.as_dict()["note"])
+
+    assert "no run in this window declared" in note
 
 
 # --------------------------------------------------------------------- missing adapters

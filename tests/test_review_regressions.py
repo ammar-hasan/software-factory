@@ -390,14 +390,30 @@ def test_c5_supersede_does_not_clobber_an_unrelated_unit() -> None:
 # ------------------------------------------------------------------------------- C6
 
 
-@pytest.mark.parametrize("stage", ["HANDOFF", "COMPLETE", "INTAKE", "build", "nonsense"])
+@pytest.mark.parametrize("stage", ["COMPLETE", "INTAKE", "build", "nonsense"])
 def test_c6_an_unmapped_stage_errors_rather_than_reporting_clean(stage: str) -> None:
-    """HANDOFF is the last point anything could be caught, and it ran zero gates."""
+    """A stage with no declared gate set is an error, never a clean pass.
+
+    HANDOFF used to be in this list. It was the original finding -- the last point anything
+    could be caught, running zero gates -- and erroring was the right *interim* answer while
+    nothing reached that stage. It now has a declared gate set, which is the real fix; see
+    `test_c6_handoff_now_has_a_declared_gate_set`.
+    """
     report = run_gates(GateContext(stage=stage, calibration=object()), stage=stage)
 
     assert report.blocked
     assert report.results[0].outcome is GateOutcome.ERROR
     assert "no gate set" in report.results[0].detail
+
+
+def test_c6_handoff_now_has_a_declared_gate_set() -> None:
+    """`secret-clean` runs again here rather than trusting BUILD's verdict: the diff at
+    handoff is not necessarily the diff that was built, and a credential leaving the
+    machine cannot be un-left."""
+    from software_factory.evals.gates import STAGE_GATES
+
+    assert "secret-clean" in STAGE_GATES["HANDOFF"]
+    assert "no-unreviewed-external" in STAGE_GATES["HANDOFF"]
 
 
 def test_c6_a_mapped_stage_still_runs_its_gates() -> None:

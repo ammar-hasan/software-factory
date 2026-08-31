@@ -577,6 +577,16 @@ STAGE_GATES: dict[str, tuple[str, ...]] = {
         "independent-review",
     ),
     "VERIFY": ("calibration-present", "blast-radius-clean", "evidence-complete"),
+    "HANDOFF": (
+        # The last point anything can be caught, and the first at which the work becomes
+        # externally visible. `secret-clean` runs again here rather than trusting BUILD's
+        # verdict: the diff at handoff is not necessarily the diff that was built, and a
+        # credential leaving the machine cannot be un-left.
+        "calibration-present",
+        "secret-clean",
+        "evidence-complete",
+        "no-unreviewed-external",
+    ),
 }
 
 
