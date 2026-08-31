@@ -6,7 +6,7 @@
 | Review type | Completeness — what is **absent**, not what is wrong |
 | Date | 2026-08-31 |
 | Method | Entity-lifecycle walk (§9.1) · operational walk · requirement-family sweep · parameter sweep · acceptance-criteria sweep · journey enumeration · failure-mode enumeration · deliverable sweep |
-| Result | **117 gaps** — 28 BLOCKING, 72 IMPORTANT, 17 NICE — plus **19 missing acceptance narratives** |
+| Result | **117 gaps** — 31 BLOCKING, 78 IMPORTANT, 8 NICE — plus **19 missing acceptance narratives** (AN-4 … AN-22) and 35 unhandled failure modes |
 
 > **How to read this.** Every row is phrased as a requirement that can be pasted into the PRD under an
 > ID that slots into the existing `FR-x.y` / `NFR-x.y` scheme. New families are proposed where no
@@ -1415,3 +1415,194 @@ FR-15.4 labels as estimates. Nothing declares whether caching exists, what its k
 with FR-9.1's determinism requirement, or how cached tokens are reported.
 *Proposed:* declare caching behaviour, its key derivation, its interaction with pack digests, and
 require cached versus uncached usage to be reported separately so cost trends are not confounded.
+
+---
+
+## 5. Requirements with no acceptance criteria
+
+§11.3 gives subsystem acceptance for seven subsystems. These P0 requirements have no stated way to
+determine whether they were met, and no test in §11.3, §12, or FR-20.5's conformance suite covers them.
+
+| Requirement | Why it is untestable as written | Proposed acceptance criterion |
+| --- | --- | --- |
+| FR-3.9 | "Precedence and delimiters must be specified and tested" — the specification it refers to does not exist in the document | Publish the composition order and delimiter grammar normatively; a conformance test asserts that a skill body, an untrusted pack item, and a task text cannot escape their delimiters, and that precedence conflicts resolve as specified |
+| FR-9.3 | "Deterministic-first … where possible" — "where possible" is unfalsifiable | Per pack section, declare the deterministic source and the permitted model-generated fallback; a test asserts each section's provenance labelling and that no section silently substitutes a model for its declared tool |
+| FR-9.4 | "Uncited assertions are forbidden" — nothing checks it | A pack validator rejects any pack item without a resolvable citation; the test injects an uncited item and asserts assembly fails |
+| FR-9.7 | Role "weighting" is prose, so conformance is a matter of opinion | Numeric weights in configuration (FR-9.14) with a test asserting the Critic's pack contains no Builder transcript content — the one part of FR-9.7 that *is* checkable and is untested |
+| FR-11.9 | "Small-model scaffolding" has no definition of decomposition, no step-size rule, and no measurable trigger | Declare the scaffolding transformation precisely; §11.2's AC-4 ablation extends to scaffolding, so its contribution is measured rather than assumed |
+| FR-12.6 | "Stated affirmatively" is a stylistic property | Assert equivalence between the rendered contract and the enforced contract (FR-12.9), and measure the intended effect: speculative-branch usage rate as a metric |
+| FR-13.14 | "Everything offline" — FR-20.5's suite covers executors, not scorers and benchmarks | Extend the conformance suite to run a full scorer pass and a full benchmark suite against a local endpoint with the network disabled, asserting identical outcomes |
+| FR-14.8 | "A loop whose adopted proposals do not move outcomes is itself a defect" — no threshold, no window | Declare the effect size and window at which the loop is declared defective, and what the factory does then (suspend the loop, notify) |
+| FR-15.7 | "Steerable" runs: no semantics for what a mid-run message does to budget, pack, or determinism | Define mid-run injection as a recorded event that appends to the conversation, counts against budget, and invalidates the run's replay determinism claim explicitly |
+| FR-16.5 | "Attributable" has no target artifact or format | The commit-trailer and manifest format of FR-27.2, with a test asserting attribution survives the repository's squash or rebase policy |
+| FR-17.3 | "Redacted at every output boundary" — boundaries are not enumerated | Enumerate the boundaries (transcript, log, evidence, comment, tracker update, metrics export, support bundle, backup) and test each with a planted secret |
+| FR-19.9 | "Publishes its own usage guidance … so a calling agent picks up the correct workflow" — no way to tell whether it worked | An eval: an external agent given only the tool surface completes a declared handoff task without operator instruction, at a declared success rate |
+| FR-2.9 | "Documented, deterministic merge order" — not documented here | Publish the merge order; a test asserts `sf plan --explain` names the supplying file for every resolved value across a three-level extension chain |
+| NFR-5.3 | "Deterministic core: identical inputs produce identical non-model outputs" — "non-model outputs" is not defined, and pack assembly reads wall-clock-dependent inputs (freshness, decay) | Define the determinism boundary explicitly, including how time-dependent inputs are pinned for replay; the pack-digest test in §11.3 must pin the clock |
+
+---
+
+## 6. Missing user journeys
+
+§4.3 provides three narratives (AN-1 defect→change, AN-2 offline solo, AN-3 proving an improvement).
+They cover the happy path for two personas. U1 (Factory Operator), U3 (Engineering Manager) and U4
+(Security/Compliance Reviewer) have no narrative at all, though all three are named personas with
+named jobs. Nineteen realistic scenarios are uncovered; **support status** says whether the PRD as
+written could carry the narrative.
+
+| ID | Narrative | Support status |
+| --- | --- | --- |
+| **AN-4** | **Onboarding a legacy repository** with no tests, no spec, and 12 years of history: the operator runs init, the factory reports its capability profile, proposes a validation harness and induced draft spec units, and states which gates are degraded until they land | **Unsupported** — FR-24.1 absent; FR-5.12 covers only the spec half, at P1 |
+| **AN-5** | **Upgrading the factory** across a schema change with 30 work items in flight and two remote workers | **Unsupported** — FR-23.2, FR-23.3, FR-23.4 absent |
+| **AN-6** | **Provider outage mid-run**: a build run loses its endpoint at turn 40; the operator wants the partial work, not a lost day | Partial — FR-11.10 types the failure, NFR-1.4 promises a partial bundle; resume-versus-restart is undefined (FR-17.14) |
+| **AN-7** | **Base branch moved**: the change no longer applies; the factory rebases, re-runs gates, and reports what changed | **Unsupported** — FR-25.1 absent |
+| **AN-8** | **Human takes over**: an engineer pulls a work item into their own agent, pushes a branch, and hands it back while a factory run is still live | Partial — FR-19.4–19.6 cover mechanics; duplicate-work detection and reconciliation absent (FR-19.10) |
+| **AN-9** | **Secret leaked into a diff**: `secret-clean` fires after the change was already pushed; rotation, purge from transcripts and evidence, and identification of every run that held it | **Unsupported** — no incident response (NFR-9.7), no erasure (FR-27.3), FR-17.10 is P1 |
+| **AN-10** | **Budget exhausted mid-period**: the factory hits its monthly cap with 40 items queued | **Unsupported** — FR-29.1 absent; per-run budgets do not compose |
+| **AN-11** | **Reviewer rejects the change** with six inline comments and asks for revisions; three rounds follow | Partial — FR-3.7 and FR-4.5 give continuity; nothing maps review comments to findings, re-stages, or bounds revision rounds |
+| **AN-12** | **Same defect reported twice** through chat and the tracker within an hour | **Unsupported** — FR-4.5/FR-18.7 dedupe redeliveries of one event, not two events describing one problem (FR-4.11) |
+| **AN-13** | **A feature spanning three weeks** produced as a stack of five reviewable changes with a moving base | **Unsupported** — FR-25.2 absent |
+| **AN-14** | **Promotion from laptop to team server**: FR-20.8 promises "changing executor and storage settings only"; the operator must also move the ledger, memory, and evidence without losing history | Partial — FR-20.8 states the goal; no migration, backup, or restore procedure exists to achieve it (NFR-9.1, FR-23.4) |
+| **AN-15** | **An engineer leaves**: their pending approvals, personal memories, owned skills and spec areas | **Unsupported** — FR-26.3 absent |
+| **AN-16** | **Disk loss on the coordinator**: what is recoverable, from what, and how long it takes | **Unsupported** — NFR-9.1, NFR-9.2 absent |
+| **AN-17** | **Compliance review** (U4's job, JTBD-8): an auditor establishes what data the factory holds, where it went, who approved what, and what an agent could reach — from the repository plus one report, as §4.1 promises | Partial — FR-17.7 covers agent reachability; human authority (FR-26.1), data map (FR-27.5), and retention evidence are missing, so the promise in U4's success criterion is not met |
+| **AN-18** | **Quarterly ROI review** (U3's job, JTBD-5): the manager defends the numbers when asked what changed and whether the comparison is valid across a model swap | Partial — FR-15.3 supplies metrics; comparability across model, rubric, and definition changes is unhandled (FR-2.11, FR-11.13, FR-13.15) |
+| **AN-19** | **Monorepo change** touching three packages in two languages with different owners and validation | **Unsupported** — FR-24.2, FR-24.4 absent |
+| **AN-20** | **Dependency upgrade** proposed by a hygiene agent (an explicit FR-3.8 use case): lockfile regenerated, vulnerabilities and licences checked | **Unsupported** — FR-24.5, FR-27.1 absent |
+| **AN-21** | **Decommissioning a factory** after a reorganisation: draining, exporting, and releasing the handle | **Unsupported** — FR-1.7 absent |
+| **AN-22** | **An outside contributor adds an executor** for their own compute and runs the conformance suite against it | **Unsupported** — FR-8.2's executor set is closed; FR-28.1 absent; NFR-12.1 absent |
+
+*Proposed:* add AN-4, AN-7, AN-9, AN-10, AN-17 and AN-18 to §4.3 for v1 — each exercises a persona or a
+requirement family the current three narratives never touch — and use the remainder as the acceptance
+scenarios for the requirement families proposed in §3.
+
+---
+
+## 7. Failure modes with no specified behaviour
+
+PR-9 ("Degrade, don't fail") is the governing principle and is honoured in the paths the PRD anticipates
+— provider unavailable (FR-11.10), adapter unhealthy (FR-18.9), sandbox unavailable (FR-8.7), recording
+unavailable (FR-22.3), integration missing (FR-15.5). These paths have no specified behaviour at all.
+
+| # | Failure | Specified? | Governing gap |
+| --- | --- | --- | --- |
+| 1 | Executor dies mid-run; coordinator holds the run open forever | No | FR-8.12 |
+| 2 | Host disk fills while the ledger is being appended | No | NFR-9.3 |
+| 3 | Ledger hash chain breaks (corruption or tampering) — detected by `sf ledger verify`, then nothing | Detection only | NFR-9.2, FR-15.13 |
+| 4 | Two coordinators open one state directory | No | NFR-9.4 |
+| 5 | External action executed but its outcome never observed (recorded-before-execution per NFR-1.2, then the process dies) | Partial | FR-17.14 |
+| 6 | Base branch advances or is force-pushed under a live work item | No | FR-25.1, FR-25.4 |
+| 7 | Push denied by branch protection after all work is complete | No | FR-25.4 |
+| 8 | Repository token revoked or expired mid-run | No | FR-17.12 |
+| 9 | Provider silently changes the model behind an alias, invalidating every baseline | No | FR-11.13 |
+| 10 | Model returns a schema-valid but semantically empty result repeatedly | Partial (FR-11.8 bounds repairs; no terminal behaviour) | FR-13.18 |
+| 11 | Conductor conversation exceeds the context window on a long work item | No | FR-3.14 |
+| 12 | Index missing, stale, or corrupt at pack assembly | Partial (FR-9.9 says "refreshed or excluded"; refresh cost and failure unhandled) | FR-24.3 |
+| 13 | Memory store corrupted by unclean shutdown | No | FR-6.17 |
+| 14 | Evidence artifact missing or digest-mismatched when a reviewer opens it | No | FR-22.9 |
+| 15 | Retention deletes evidence a sealed claim depends on | No — actively breaks INV-6 | FR-15.11 |
+| 16 | Intake storm: 10,000 events in a minute | No | FR-18.16 |
+| 17 | Events arriving while the factory is down; missed cron schedules | No | FR-18.15 |
+| 18 | Webhook delivered by an unauthenticated or replaying sender | No | FR-18.17 |
+| 19 | Local model endpoint saturated by ten concurrent runs | No | FR-29.2 |
+| 20 | Gate check itself errors (as distinct from failing) | No — no `error` outcome exists | FR-13.18 |
+| 21 | Test suite is flaky; `tests-pass` is neither reliably green nor reliably red | No | FR-13.16 |
+| 22 | Scorer judge unavailable; sampled runs queue indefinitely | No | NFR-9.5 |
+| 23 | Improvement loop opens proposals faster than humans close them | Partial (FR-14.6 caps open proposals with no value) | FR-14.11 |
+| 24 | Skill merge/split proposals oscillate between two configurations | No | FR-7.16 |
+| 25 | Definition activated while runs are in flight | No | FR-2.11, FR-2.12 |
+| 26 | Clock skew between coordination and execution planes | No | FR-15.14 |
+| 27 | Laptop sleeps for 8 hours mid-run; wall-clock budget consumed by sleeping | No | FR-15.14 |
+| 28 | Two factories in one tree both act on one repository (FR-1.4 lints; runtime collision unhandled) | Lint only | NFR-9.4, FR-8.13 |
+| 29 | Checkpoint notification delivery fails; the human is never asked | No | FR-16.8 |
+| 30 | Cancellation arrives during an `external` write | No | FR-17.14 |
+| 31 | `sf init` run against an existing or partial factory | No | FR-20.11 |
+| 32 | Untrusted instructions arrive inside a pack section rather than inline | Partial (FR-17.5 covers delivery; pack items carry no trust class) | FR-17.13 |
+| 33 | Secret declared by an agent but absent from the backing store at dispatch | No | FR-17.12 |
+| 34 | Work item blocked on a person who has left the organisation | No | FR-4.13, FR-26.3 |
+| 35 | Change exceeds the reviewable size for the Critic's context | No | FR-9.15 |
+
+---
+
+## 8. Open-source deliverable gaps
+
+The PRD asks for two project-level artifacts: an Apache-2.0 licence with a NOTICE file and dependency
+licence reporting (NFR-8.1), and documentation generated from the same schemas that validate
+(NFR-4.3). Everything else a usable open-source project needs is unrequested. New family **NFR-12**.
+
+**NFR-12.1 (P0) — BLOCKING — Contribution and governance.**
+No contributing guide, no code of conduct, no maintainer list, no decision or proposal process, no
+issue triage policy, and no public roadmap. §12's milestones assume a team that already knows how to
+work together; an open-source project's first external contributor has nowhere to start. *Proposed:*
+CONTRIBUTING (build, test, conformance suite, review expectations), CODE_OF_CONDUCT, a maintainers file
+with areas of ownership matching the subsystem split in NFR-5.1, a written decision process for
+proposals that change requirements (the ADR path this repository already implies), and a triage policy
+with response-time expectations.
+
+**NFR-12.2 (P0) — BLOCKING — Security policy and disclosure.**
+A project that holds credentials, executes untrusted repository content, and mediates model access has
+no SECURITY policy, no private disclosure channel, no severity classification, no fix and advisory
+timeline, and no supported-version statement. *Proposed:* a published policy covering all five, plus a
+commitment that security fixes ship to the versions named in NFR-8.4's support window.
+
+**NFR-12.3 (P0) — BLOCKING — Quickstart and reference example.**
+NFR-4.1 targets a useful run in ten minutes and NFR-4.3 generates reference documentation from schemas
+— but reference material is not a tutorial, and nothing requires a worked example. *Proposed:* ship a
+quickstart producing a real change on a real sample repository offline, and a complete reference factory
+definition exercising every file kind in FR-2.1, both validated in CI on every release so they cannot
+rot (the failure mode P4 describes, applied to the project's own documentation).
+
+**NFR-12.4 (P1) — IMPORTANT — Troubleshooting and error index.**
+FR-21.5 mandates a typed error catalogue where "each documents cause and remediation" — with no
+requirement that the catalogue is published as browsable documentation, no troubleshooting runbook for
+the failures in §7 above, and no FAQ. *Proposed:* a generated, published error index keyed by stable
+code, cross-linked from every error message, plus a troubleshooting guide per subsystem.
+
+**NFR-12.5 (P1) — IMPORTANT — Published threat model.**
+§7.17 is a strong set of security requirements written *as though* a threat model exists; the model
+itself — assets, actors, trust boundaries, assumptions, residual risks — is never required as a
+document, so a reviewer cannot check the requirements against it. *Proposed:* publish and version the
+threat model, require security-relevant changes to reference it, and list explicitly what is out of
+scope (a compromised host, a malicious operator, a model provider acting adversarially).
+
+**NFR-12.6 (P1) — IMPORTANT — Compatibility matrix.**
+NFR-6.1 names Linux and macOS with Windows via container. Nothing enumerates supported versions of the
+version-control client, container runtimes, harnesses, providers, or local-inference runtimes, or which
+combinations are tested. *Proposed:* a published matrix distinguishing tested, supported, and
+best-effort combinations, generated from CI so it cannot drift.
+
+**NFR-12.7 (P1) — IMPORTANT — Changelog and migration guides.**
+*Proposed:* a per-release changelog with a stability contract per surface (NFR-8.5), and a migration
+guide for every schema, state-format, and API version change (FR-23.4, FR-23.5).
+
+**NFR-12.8 (P1) — IMPORTANT — Sizing and capacity guide.**
+NFR-3.1 promises ten concurrent runs on "a workstation-class machine" without saying what that is or
+what it costs in disk, memory, and index space — the first question of anyone deploying it.
+*Proposed:* a sizing guide giving CPU, memory, and disk per concurrent run and per indexed repository
+size, with measured figures per release (NFR-2.5) and a worked example per topology in §6.3.
+
+**NFR-12.9 (P1) — IMPORTANT — Benchmark publication.**
+§11.2's central-bet acceptance test is the project's core claim and must be "tested before v1 ships",
+but nothing requires publishing the suite, the harness, the results, or reproduction instructions —
+and OQ-7 leaves even the question open. An unpublished, unreproducible benchmark supporting the
+headline claim of an open-source project is the weakest possible position. *Proposed:* publish the
+task suite (or a documented sampling protocol if contamination forbids full release, with the
+reasoning stated), the harness, per-task results with variance, the resolved model versions
+(FR-11.13), and reproduction instructions — and re-run it per release, publishing the trend.
+
+**NFR-12.10 (P2) — NICE — Offline documentation.**
+Documentation is the one component of a local-first, offline-capable product that currently assumes a
+network. *Proposed:* documentation ships with the artifact and is browsable offline (`sf docs`),
+including the generated schema reference, the error index, and the quickstart.
+
+---
+
+## 9. Coverage note
+
+Areas checked and found adequately specified, listed only to show the sweep was systematic and to avoid
+re-review: skill lifecycle states and transitions (FR-7.3–7.8), spec unit fields and agreement states
+(FR-5.2, FR-5.5), memory lanes and promotion (FR-6.1–6.4), blast-radius contract and violation
+recording (FR-12.1–12.5), tool side-effect classes and grants (FR-10.2, FR-10.7), the gate/scorer/
+benchmark separation (FR-13.1), reward-hacking defence (FR-14.7), filter boolean semantics (FR-18.4,
+excepting matching), idempotency of intake redelivery (FR-4.5, FR-18.7), the coordination/execution
+plane split (§6.2), and the local-first parity conformance suite (FR-20.5).

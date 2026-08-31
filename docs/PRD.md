@@ -3,11 +3,12 @@
 | Field | Value |
 | --- | --- |
 | Document | Master PRD |
-| Version | 1.0.0 |
-| Status | Baseline (pre-review) |
+| Version | 2.0.0 |
+| Status | Revised after adversarial, completeness, and bias review |
 | Owner | The Software Factory Authors |
 | Licence | Apache-2.0 |
-| Supersedes | — |
+| Supersedes | 1.0.0 (baseline) |
+| Review record | [`reviews/`](reviews/) — 62 adversarial, 117 completeness, 72 bias findings; dispositions in Appendix C |
 
 > **Reading order.** §1–§4 are the *why*. §5–§7 are the *what* (concepts, architecture, and the
 > complete functional requirement set). §8–§12 are the *how well* (non-functional requirements, data
@@ -110,10 +111,18 @@ benefits as much as a two-hundred-person one.
 
 ### 2.3 Why now
 
-Three things changed. Coding agents became good enough that a well-scoped change is routinely
-achievable. Structured tool use became reliable enough to build deterministic scaffolding around a
-model rather than inside it. And small models became good enough that, given excellent context, they
-handle most factory work — which makes the harness, not the model bill, the thing worth optimising.
+Two changes are observable and one is a hypothesis, and they are labelled accordingly because the
+baseline version of this section asserted the thesis as its own premise.
+
+**Observable.** Coding agents now complete well-scoped changes at a rate that makes a pipeline worth
+building around them. Structured tool use is reliable enough that deterministic scaffolding can sit
+*around* a model rather than being simulated inside it.
+
+**Hypothesis, not premise.** That small models, given excellent context, handle most factory work.
+This is the central bet (§1.1). It is the thing §11.2 exists to test, and it is not evidence for
+itself. If it is false, this project is still useful — a factory with a large model in it is a
+factory — but its cost argument and its offline argument both weaken substantially, and this document
+would need revising rather than defending.
 
 ---
 
@@ -179,6 +188,13 @@ dashboard alone.
 
 **U4 — Security / Compliance Reviewer.** Needs to enumerate what every agent can reach, where data
 goes, and what is retained. *Success:* can audit the factory from the repository plus one report.
+
+**U6 — Change Reviewer.** Inherits every change the factory produces and pays for its quality in
+attention. Distinct from U2 because reviewing machine-authored changes at volume is a different job
+from contributing: the reviewer did not build the context, cannot ask the author follow-up questions
+in the usual way, and faces a queue whose size the factory controls. Needs: evidence that reduces
+work rather than adding it, honest uncertainty, and a bounded queue. *Success:* reviewing is
+genuinely faster than writing, **measured** (O-6), not assumed — and the reviewer can say no.
 
 **U5 — Solo maintainer / small team.** Wants the whole thing on a laptop with a local model and no
 account anywhere. *Success:* `sf init && sf run` does real work offline.
@@ -423,6 +439,13 @@ factory-wide entries which always apply. `sf plan` must show the outcome explici
 **FR-3.1 (P0)** — Every factory declares exactly one agent with role `CONDUCTOR`. Zero or more than
 one is a validation error.
 
+*Rationale and its limits.* One conductor gives a requester one address and one conversation, and
+gives the factory one place where routing decisions are made and audited. That is an interface and
+auditability argument, not a proof that a single coordinator is architecturally necessary — a
+peer-to-peer or stage-owned routing model is not obviously worse, and has not been tested here. It is
+also a concentration of authority over attacker-controllable text, which is why FR-3.3a bounds what
+that authority can do. Recorded as OQ-3.
+
 **FR-3.2 (P0)** — Built-in roles: `CONDUCTOR`, `SCOUT`, `ARCHITECT`, `BUILDER`, `CRITIC`, `PROVER`,
 `CUSTOM`. Role determines default gates, default skills, default Awareness Pack composition, and
 default stage association.
@@ -438,10 +461,28 @@ default stage association.
 
 **FR-3.3 (P0)** — Roles are **responsibilities, not a fixed pipeline**. The Conductor must be able to
 skip stages that do not apply, enter partway when context suffices, and return work to an earlier
-stage. Skipping must be recorded in the ledger with a reason.
+stage. Skipping is recorded in the ledger with a reason.
+
+**FR-3.3a (P0) — Skip authority is bounded by policy, not by judgement.** The Conductor reads
+attacker-controllable text (issue bodies, comments, chat), so unbounded routing authority is an
+injection primitive: text that persuades the Conductor to skip Review removes Review. Policy
+therefore declares, per work class, which stages are **non-skippable**. Review and Verify are
+non-skippable by default. A skip of a non-skippable stage is not a decision the Conductor can make;
+it requires a human decision recorded against an identified principal (FR-26.2).
+
+**FR-3.3b (P0) — Routing decisions cite their basis.** Every skip records which signal justified it
+and that signal's trust class (FR-6.4b). A skip justified only by `untrusted` input is refused.
 
 **FR-3.4 (P0)** — Each agent independently selects harness, model, runner, executor, tool grants,
 secret grants, skills, and memory scope. Unset values inherit from factory defaults (FR-2.10).
+
+**FR-3.5a (P0) — Independence is a ladder, not a binary.** In a single-provider or offline factory,
+"different model and harness" may be unsatisfiable. The requirement is therefore the *strongest
+available* rung, declared and recorded per factory: (1) different provider; (2) different model
+family; (3) different model size or version; (4) same model, different harness; (5) same engine with
+an independent deterministic checker carrying the review's blocking weight. Rungs 4 and 5 must be
+declared explicitly and are reported on every review verdict, so a reader knows how independent the
+review actually was. A factory that can only reach rung 5 is valid and is told so.
 
 **FR-3.5 (P0)** — The Critic must not run on the same model *and* harness as the Builder for the same
 work item unless the definition explicitly opts in with `allowSharedBlindSpot: true`. Default
@@ -465,6 +506,19 @@ work item's task text. Precedence and delimiters must be specified and tested.
 **FR-3.10 (P1)** — Agents may declare `concurrency` (max simultaneous runs) and `queue` semantics, so
 a factory throttles a specific role without throttling the whole fleet.
 
+**FR-3.11a (P0) — Budgets compose upward.** Per-agent budgets do not bound anything, because rework
+resets them: a work item that cycles Build → Review → Build ten times spends ten budgets. Three
+levels are therefore required and independently enforced: **per run** (FR-3.11), **per work item**
+(total across every run it ever causes, including retries, scoring, and self-improvement follow-ups),
+and **per factory per period**. Exhaustion at the work-item level parks the item as
+`BLOCKED: budget_exceeded` with everything produced so far; exhaustion at the factory level stops
+intake and notifies, and never silently degrades quality to fit.
+
+**FR-3.11b (P0) — Assurance is inside the budget, not beside it.** Scoring, benchmarking, pack
+assembly, memory policing, and self-improvement runs consume the same budgets and are attributed to
+the work item or factory that caused them. A factory must be able to discover that it is spending
+more on introspection than on work (metric O-10), which is impossible if assurance is unbudgeted.
+
 **FR-3.11 (P0)** — Agents must declare a **budget**: max wall-clock, max tool calls, max tokens, max
 cost. Exceeding a budget ends the run with `budget_exceeded`, a partial evidence bundle, and a
 Conductor decision point — never a silent truncation.
@@ -477,9 +531,17 @@ Conductor may dispatch the fallback with the accumulated context, recorded as an
 **FR-4.1 (P0)** — A work item is created at intake and holds a stable identity through completion,
 regardless of how many runs, agents, stages, or humans touch it.
 
-**FR-4.2 (P0)** — Stages: `INTAKE → TRIAGE → DESIGN → BUILD → REVIEW → VERIFY → HANDOFF → COMPLETE`,
-with `CANCELLED` and `BLOCKED` reachable from any stage. Legal transitions must be an explicit table
-in code, and any transition not in the table is a defect.
+**FR-4.2 (P0)** — The **default** stage set is
+`INTAKE → TRIAGE → DESIGN → BUILD → REVIEW → VERIFY → HANDOFF → COMPLETE`, with `CANCELLED` and
+`BLOCKED` reachable from any stage. Legal transitions are an explicit table, and a transition not in
+the table is a defect.
+
+**FR-4.2a (P0) — The stage set is configuration, not architecture.** These eight stages were adopted
+by analogy with how teams already describe delivery, not derived from the problems in §2, and this
+document should not pretend otherwise. The stage graph is therefore declared in `policy/stages.yaml`
+and a factory may define its own, subject to two invariants that *are* derived: every work item has
+exactly one current stage, and at least one non-skippable verification stage precedes handoff
+(FR-3.3a). Whether the default eight is right at all is OQ-1, and it is expected to change.
 
 **FR-4.3 (P0)** — Every transition records: from, to, actor (agent or human), reason, evidence
 references, and timestamp, appended to the ledger.
@@ -595,9 +657,26 @@ references, and a `ttl` or `expires_on`. A write missing any required field is r
 §7.7), `anchor` (stable pointer into code), `metric` (observed measurement).
 
 **FR-6.4 (P0) — Promotion is earned, never automatic.** Candidate → Canon requires *at least one* of:
-(a) independent corroboration by a different run using a different model or tool path; (b) a passing
-verification, test, or gate that directly exercises the claim; (c) explicit human confirmation. The
+(a) **source-independent corroboration** — a different run, on a different model or tool path, whose
+claim derives from a *disjoint provenance set*; (b) a passing verification, test, or gate that
+directly exercises the claim; (c) explicit human confirmation by an identified principal. The
 satisfying evidence is recorded on the memory.
+
+**FR-6.4a (P0) — Corroboration is computed over sources, not over runs.** Two runs that read the same
+issue comment, the same file, or the same upstream memory are one observation sampled twice. The
+promotion check must intersect the runs' provenance sets and refuse promotion when the intersection
+is non-empty. Without this, untrusted text — an issue body, a comment, a dependency's README —
+launders into Canon and is then rendered as a *cited convention* in every subsequent Awareness Pack,
+which would defeat the structural injection defence in FR-17.4.
+
+**FR-6.4b (P0) — Trust class is carried, not inferred.** Every source, memory, spec unit, evidence
+item, and work item carries a `trust` attribute: `verified` (a deterministic check exercised it),
+`operator` (it came from the definition or an identified human), `internal` (produced by the factory
+from `verified`/`operator` inputs only), or `untrusted` (any content originating outside the
+definition, including repository content, issue text, comments, CI output, tool-server descriptions,
+and model output derived from any of these). Trust is **monotone downward**: a derived object's trust
+is the minimum of its inputs'. No memory whose trust is `untrusted` may enter Canon, and no
+`untrusted` item may appear in the `conventions` section of a pack at all.
 
 **FR-6.5 (P0) — Policing.** A continuously running policy pass must:
 - detect **contradiction** between memories in the same scope and quarantine both pending resolution;
@@ -753,9 +832,18 @@ cpu, memory, disk, or wall-clock terminates the run with a typed error and a par
 > the primary mechanism behind the central bet (§1.1): it is why a small model performs unusually
 > well here, and it is the first thing to measure when quality drops.
 
-**FR-9.1 (P0)** — Every run begins with a deterministically assembled **Awareness Pack**. Assembly is
-a pure function of (work item, agent config, repository state, spec, memory, ledger, skill registry)
-plus a seed. Given identical inputs it must produce an identical pack; the pack's digest is recorded.
+**FR-9.1 (P0) — Determinism over a captured input snapshot.** Assembly first captures an
+**input snapshot**: the repository commit, the definition revision, the memory-store revision, the
+ledger sequence number, the skill-registry revision, the wall-clock instant used for every freshness
+and decay computation, and the seed. The pack is then a pure function of that snapshot. Given the
+same snapshot, assembly must produce a byte-identical pack; the snapshot digest and the pack digest
+are both recorded on the run.
+
+Determinism is a property of *replay*, not of two runs at different times: decay (FR-6.8), freshness
+(FR-9.9), and retrieval timeouts (FR-6.10) all make a later run legitimately different. Timeouts are
+handled by recording the *achieved* result set in the snapshot, so a replay reproduces the truncation
+rather than racing it. The conformance assertion is therefore "same snapshot ⟹ same pack", and any
+requirement stated as "same inputs at any time" is a defect in this document.
 
 **FR-9.2 (P0)** — Standard sections, each individually budgeted, each omitted-with-reason rather than
 silently dropped:
@@ -890,6 +978,20 @@ unconfident and right — is a defect surfaced in the dashboard and a valid targ
 is validated; on failure the agent is given the validation error and a bounded number of repair
 attempts before escalation. Downstream stages consume validated structures, never free prose.
 
+**FR-11.9a (P0) — Decomposition does not run on the weakest model.** Splitting a task into
+individually-verifiable steps is the hardest reasoning in the run, and assigning it to the tier least
+able to do it is self-defeating. Decomposition therefore runs, in preference order: from a **skill**
+that already encodes the decomposition for this task class; from a **plan produced at Design** by a
+higher tier and carried into Build; or, only if neither exists, from one bounded higher-tier call
+whose cost is attributed to the run. A small-tier run that decomposes its own task must record that
+it did so, because that is the configuration most likely to fail.
+
+**FR-11.9b (P0) — Steps must have real verifiers.** "Verify each step with a deterministic tool" is
+only meaningful where a verifier exists. Each step declares its verifier class: `deterministic` (a
+test, a type check, a build, a resolved symbol), `heuristic` (a lint or a structural check), or
+`none`. A step with `none` may not be treated as verified, and a decomposition consisting mostly of
+`none` steps is reported as unscaffolded rather than presented as scaffolded.
+
 **FR-11.9 (P0) — Decomposition for small models.** When the starting tier is below a declared
 threshold, the harness must automatically apply small-model scaffolding: decompose the task into
 individually-verifiable steps, checkpoint between steps, verify each with a deterministic tool before
@@ -938,6 +1040,20 @@ inside a safe envelope, which is the point of PR-5.
 **FR-12.7 (P1) — Blast-radius widening requires human approval**, is scoped to a single run, expires,
 and is ledger-recorded with the approver.
 
+**FR-12.9 (P0) — The contract covers every output channel, not just the filesystem.** A rolled-back,
+budget-killed, or contract-violating run must not leave residue anywhere: memory candidates, spec
+deltas, skill proposals, benchmark task submissions, and ledger-visible claims are all **staged** and
+are committed only when the run reaches a terminal state that the policy admits. A `contract_violation`
+run commits nothing but its violation records. Undo that restores the filesystem while leaving a
+memory candidate behind is not undo.
+
+**FR-12.10 (P0) — Violation classes are distinguished.** Ordinary toolchains write outside a
+workspace constantly (caches, temporary directories, package metadata), so a single zero-tolerance
+counter is a gate that will be disabled within a week. Violations are classified: `benign`
+(a declared-tolerable path such as a cache), `blocked` (denied and recorded, run continues), and
+`escalating` (an attempt at a grant boundary). Only `escalating` blocks; `blocked` is reported; the
+tolerable set is declared in the runner, reviewed like any other grant, and reported in `sf audit`.
+
 **FR-12.8 (P0) — Secrets never enter the workspace unless declared.** A run receives exactly the
 secrets its agent declares, mounted for its lifetime, redacted at every output boundary, and
 destroyed at run end.
@@ -971,8 +1087,21 @@ remediation hint. Baseline gates:
 | `secret-clean` | Build, Review | No secret material in diff, logs, or evidence |
 
 **FR-13.3 (P0) — `regression-proven` is mandatory for defect work.** A fix without a test that
-demonstrably fails before it and passes after it does not pass Build. This single gate is the
-strongest available defence against plausible-but-wrong changes.
+demonstrably fails before it and passes after it does not pass Build.
+
+**FR-13.3a (P0) — The failure at the parent commit must be an assertion about behaviour.** A test
+that fails at the parent commit because of an import error, a collection error, a missing fixture, a
+syntax error, or any failure raised before the test body executed **does not satisfy the gate**. The
+harness classifies the parent-commit failure and accepts only an assertion failure — otherwise
+`from mymodule import the_new_function` satisfies the gate trivially, which is exactly the shape a
+small model produces by default. The observed failure message must also be recorded, so a reviewer
+can see *what* was proven.
+
+**FR-13.3b (P0) — Author independence is measured, not assumed.** The test that proves the regression
+is written by the same agent that wrote the fix, so it can encode the same misunderstanding. This
+gate therefore bounds a *class* of error, not all of them: it proves the change alters behaviour in
+the direction claimed, not that the claim was right. Establishing the claim is the Critic's and the
+spec's job (FR-5.7), and this document must not present `regression-proven` as more than it is.
 
 **FR-13.4 (P0) — Gate failures produce structured findings**: which gate, which criterion, the
 observed evidence, and the remediation. Findings feed the repair loop and the evidence bundle.
@@ -1003,6 +1132,13 @@ It must **not** collapse results into one number or declare a winner (PR-7): the
 criteria must be added before the suite runs. Reported benchmark cost must state explicitly what it
 does and does not include.
 
+**FR-13.10a (P0) — "No winner" applies to reporting, not to policy.** FR-13.9 forbids the *report*
+from collapsing results into one number, because the weighting between pass rate, cost, and latency
+is the operator's to choose. FR-13.11, FR-7.4 and FR-11.5 then apply *declared, written-down*
+thresholds to decide adoption — which is a policy the operator authored, not a judgement the system
+made. Both are consistent only because the weighting lives in the definition; an implementation that
+hard-codes a preference violates FR-13.9.
+
 **FR-13.11 (P0) — Adoption policy.** A configuration change that a benchmark shows regressing a
 declared metric beyond tolerance must be blocked from adoption by the definition gate, with an
 explicit, recorded human override path.
@@ -1027,6 +1163,19 @@ factory to investigate that scorer's failures and propose fixes.
 underlying runs, packs, and ledger → *propose* a minimal change → *validate* the proposal against the
 relevant evals or benchmark → *submit* as a reviewed change with its evidence.
 
+**FR-14.3a (P0) — Definition changes are stricter than code changes, not equal to them.** A change
+to `policy/`, `scorers/`, gates, grants, secrets, network policy, or the held-out set alters what
+every future run is allowed to do, so it cannot carry the same review weight as an application
+change. Required: a second human reviewer, a distinct approval group from ordinary code review, no
+self-approval by the proposing agent's own identity, and a standing-benchmark run before adoption.
+NFR-8.2's "identical review rules" is superseded here: it was wrong.
+
+**FR-14.3b (P0) — Proposing is not writing.** FR-17.6 forbids a run from writing the loaded
+definition; FR-14.3 permits a run to *propose* a definition change. These are consistent only because
+a proposal is authored in a workspace, submitted through the change path, and applied by the
+coordination plane after human approval — never by the run. Any implementation in which an
+improvement run's process can cause a definition to take effect is a defect.
+
 **FR-14.3 (P0)** — Proposals may target the factory's **own definition** — a prompt, a skill, an
 Awareness Pack weight, a tier assignment, a gate threshold, a runner — as well as application code.
 The definition is code and improves by the same route (PR-1).
@@ -1042,9 +1191,25 @@ cap open self-improvement proposals per factory.
 
 **FR-14.7 (P0) — Guard against reward hacking.** A proposal that improves a scorer's score without
 improving the underlying outcome must be detectable: proposals are validated against a **held-out**
-task set the proposing loop cannot see, and any proposal that edits a scorer, gate, or eval must be
-flagged as *self-referential* and reviewed under a stricter rule — never adopted on the loop's own
-evidence alone.
+task set the proposing loop cannot read or write, and any proposal that edits a scorer, gate, eval,
+threshold, or the held-out set is flagged *self-referential*, requires a second human reviewer, and
+may never be validated by the artefact it modifies.
+
+**FR-14.7a (P0) — Grader capture does not require editing a grader.** A proposal that teaches an
+agent to *write what the judge rewards* — a summary phrased to match the rubric, a claim shaped to
+satisfy `evidence-complete` without adding evidence — captures the grader while touching no scorer
+file, so the self-referential flag never fires. Defences, all required:
+
+1. **Outcome anchoring.** Every scorer whose failures drive the loop must have a declared *outcome
+   partner* from §11.1 (O-2 revert, O-3 defect escape, O-4 follow-up burden). A proposal that moves
+   the scorer without moving, or at minimum not degrading, its outcome partner is refused.
+2. **Counter-metric panel.** Every proposal reports cost per merged change, rework rate, human review
+   cost, and standing-benchmark pass rate. Degrading any beyond tolerance refuses the proposal.
+3. **Rubric-drift detection.** Scorer pass rates that rise while their outcome partners are flat are
+   reported as *suspected capture* and suspend that scorer from driving the loop until a human
+   re-validates it against a fresh labelled sample.
+4. **Loop effectiveness.** If adopted proposals do not move outcome metrics over a window, the loop
+   is disabled by default rather than left running.
 
 **FR-14.8 (P0) — Improvement telemetry.** Track proposals opened, adopted, rejected, and reverted, and
 the measured effect of adopted ones. A loop whose adopted proposals do not move outcomes is itself a
@@ -1104,6 +1269,20 @@ authentication.
 
 **FR-15.9 (P0)** — Everything visible in the dashboard is available from the CLI and API in structured
 form. No metric is UI-only.
+
+**FR-15.10a (P0) — Retention deletes bodies, never records.** Deleting an evidence body that a sealed
+claim resolves to would break INV-6, and truncating the ledger would break INV-8. Retention therefore
+removes *content* and leaves a **tombstone**: the id, class, digest, size, and the reason and time of
+removal. A claim whose evidence body has expired remains resolvable to a tombstone and is rendered as
+"evidence expired", never as unsupported and never as satisfied. The ledger is never truncated; it is
+**segmented and sealed** (FR-27.2), with segment digests chained across the boundary so verification
+still works over an archived prefix.
+
+**FR-15.10b (P0) — Erasure is by reference.** Where content must be destroyed for legal or privacy
+reasons, the referenced body is destroyed and the tombstone records that an erasure occurred, under
+whose authority, and when. Erasure never rewrites a ledger entry; it makes what the entry points at
+unavailable. This keeps deletion possible in an append-only design, which is otherwise architecturally
+impossible (FR-27.3).
 
 **FR-15.10 (P0) — Retention** is configurable per artifact class (transcripts, packs, evidence,
 recordings) with a documented default, and enforced by a recorded, auditable pass.
@@ -1165,10 +1344,28 @@ issue text, comments, CI output, and model output are all untrusted input. None 
 alter policy, or change a gate. Prompt-injection resistance is a *structural* property here: grants
 live in configuration the execution plane cannot write.
 
-**FR-17.5 (P0) — Injection containment.** Untrusted content must be delivered to the model inside
-labelled, delimited regions, and the harness must reject any tool call whose parameters were sourced
-from an untrusted region and target a grant boundary (a secret name, a policy path, a definition file)
-without an explicit human decision.
+**FR-17.5 (P0) — Containment by authority, not by taint tracking.** Untrusted content is delivered
+inside labelled, delimited regions, and delimiters are escaped in content so they cannot be forged.
+But the harness must **not** claim to trace influence through a language model: paraphrase, encoding,
+splitting, and influence-without-copying all defeat string-level taint tracking, and a control that
+can be defeated by rewording is not a control.
+
+What is enforced instead is *authority*, which is a property of configuration rather than of text:
+
+| Boundary | Rule |
+| --- | --- |
+| Secrets | A run receives exactly the secrets its agent declares. No text in any region can add one. |
+| Definition and policy files | Not writable from an execution workspace, under any circumstance (FR-17.6). |
+| Grants (tools, scopes, network, external actions) | Resolved from configuration before the run starts and immutable for its duration. |
+| Irreversible external actions | Require an authorisation that the run cannot mint: either a standing grant in the definition, or a human decision recorded against an identified principal (FR-26.2). |
+
+**FR-17.5a (P0) — Untrusted-origin decisions are declared, not detected.** Where a run's *only*
+justification for a boundary-crossing action traces to an untrusted region — the action was not asked
+for by the work item, is not covered by the agent's standing grants, and is not derived from a
+`verified` or `operator` source — the harness escalates to a human. This is a coarse, honest control:
+it will over-escalate and it will miss laundering through paraphrase, and both properties are stated
+here so no reader mistakes it for a solved problem. The strong guarantee is the table above; this is
+the weaker layer on top of it.
 
 **FR-17.6 (P0) — Definition files are protected.** A run may propose a change to the factory
 definition only via the normal change path; direct writes to the loaded definition from inside an
@@ -1258,6 +1455,12 @@ history. There is no second identity.
 
 **FR-19.4 (P0) — The server never modifies the caller's files.** It returns setup guidance — an
 isolated worktree, the branch, the context — and the caller's own agent executes it.
+
+**FR-19.5a (P0) — Irreversible actions need a lease even when work items do not.** Not locking a
+work item is a deliberate choice, but it must not extend to `external` effects: two actors finishing
+concurrently must not both open a change, both comment, or both update a tracker. Every external
+action on a work item takes a short, renewable lease keyed on (work item, action class). A second
+actor is told who holds it and what they are doing, rather than racing them.
 
 **FR-19.5 (P0) — Concurrency honesty.** Picking work up does not claim, lock, or pause it. The tool
 surface must expose active runs and make announcing the pickup a one-call operation, and the docs must
@@ -1371,6 +1574,198 @@ retry guidance, never presented as successful evidence.
 
 ---
 
+### 7.23 Repository onboarding (FR-23)
+
+> Added in v2.0.0. Almost every gate in §7.13 depends on a repository having runnable validation,
+> and §10 previously disposed of that with "or the factory helps create it". That conjunction hid
+> the largest single scope item in the document.
+
+**FR-23.1 (P0) — Readiness assessment.** `sf onboard` reports, for a repository: whether a build
+command exists and succeeds, whether a test command exists and succeeds, test runtime, flake
+estimate from repeated runs, coverage of the change surfaces the factory will touch, and which gates
+are therefore enforceable. Its output is the honest answer to "can this factory work here yet?"
+
+**FR-23.2 (P0) — Degraded mode is explicit and named.** A repository with no runnable tests may still
+be worked, in `advisory` mode: `tests-pass` and `regression-proven` report `unenforceable` rather
+than `pass`, every change carries that label, and the dashboard reports the share of work done under
+degradation. A gate that cannot run is never silently satisfied.
+
+**FR-23.3 (P0) — Validation bootstrapping is ordinary work.** Where validation is missing, the
+factory proposes it as normal work items (add a test harness, add a smoke test for this surface),
+subject to the same review as any change. It is not a hidden capability of the platform.
+
+**FR-23.4 (P0) — Index lifecycle.** The repository index that the Awareness Pack, symbol tools, and
+spec anchors all rest on has a specified lifecycle: cold build (with a progress and cost estimate),
+incremental invalidation on change, a storage budget, an explicit staleness signal, and defined
+behaviour when absent — degrade to on-demand analysis and mark packs `degraded`, never silently serve
+stale results.
+
+**FR-23.5 (P1) — Monorepo and multi-language.** Onboarding detects project boundaries, per-project
+build and test commands, and the mapping from a change surface to the subset of validation that
+covers it, so a change in one package does not run the whole repository's suite.
+
+**FR-23.6 (P0) — Time to first useful run is measured**, not asserted, and reported per repository.
+
+### 7.24 Versioning, state, and replay integrity (FR-24)
+
+**FR-24.1 (P0) — Runs pin their definition.** Every run records the definition revision, the resolved
+configuration digest, the harness version, the provider's resolved model version string, the sampling
+parameters, and the pack snapshot digest. Without these, replay (FR-11.11), benchmark comparison
+(FR-13.9), and improvement traceability (FR-14.4) are unsound the moment a prompt is edited — and the
+data cannot be recovered retroactively.
+
+**FR-24.2 (P0) — A work item pins one definition revision** for its duration by default, so a
+mid-flight definition change does not make a work item's stages mutually incomparable. Re-pinning is
+explicit and recorded.
+
+**FR-24.3 (P0) — On-disk state migration.** Every persisted store (ledger, memory, index, evidence,
+run state) declares a format version. Upgrades run forward migrations with a dry-run mode and a
+mandatory pre-migration backup; a downgrade policy is stated for each store.
+
+**FR-24.4 (P0) — Component version compatibility.** Coordinator, worker, dashboard, and CLI declare a
+compatibility range. A worker outside the coordinator's range refuses work with a clear message
+rather than producing subtly different results.
+
+**FR-24.5 (P0) — Base drift and merge conflicts.** A change whose base has moved must be re-validated
+against the new base before handoff; a conflicted change is either resolved by a run under the normal
+gates or parked as `BLOCKED: conflict`, never handed off unresolved.
+
+### 7.25 Identity, authorisation, and separation of duties (FR-25)
+
+> Added in v2.0.0. The baseline said "a human" must approve, override, widen, force-promote, and
+> emergency-stop, and never said which human.
+
+**FR-25.1 (P0) — Principals.** Every actor is a principal with a stable id: a person, an agent, an
+automation, or the coordination plane. Provider identities (git host, chat, tracker) map to principals
+explicitly; an unmapped identity may trigger intake but may not make a decision.
+
+**FR-25.2 (P0) — Capability model.** Authority is granted per capability, not per person-in-general:
+`approve_spec`, `answer_question`, `widen_blast_radius`, `force_promote_skill`, `adopt_definition_change`,
+`approve_self_referential_change`, `emergency_stop`, `erase_data`, `override_gate`. Each is granted to
+named principals or groups in the definition.
+
+**FR-25.3 (P0) — Separation of duties.** The principal who proposes a definition change may not be the
+sole approver. A self-referential change (FR-14.7) requires two approvers from a distinct group.
+
+**FR-25.4 (P0) — Every decision is attributed** to a principal, with the capability exercised, the
+evidence shown to them at the time, and the time. A decision without attribution is not a decision.
+
+**FR-25.5 (P0) — Live steering is a decision channel.** The ability to message or steer a run in
+flight (FR-15.7) can supply the human decision that FR-17.5a defers to, so it is authenticated,
+capability-checked, and ledger-recorded exactly like any other decision. An unauthenticated steering
+channel is a privilege-escalation path.
+
+**FR-25.6 (P0) — Repository identity is scoped.** Where runs act as a requesting user (`CREATOR`), the
+credential is scoped to the minimum needed to check out and push — never to merge, never to
+administer. NG-1 ("agents never merge") is otherwise a stated intention with nothing behind it.
+
+### 7.26 Cost control, scheduling, and backpressure (FR-26)
+
+**FR-26.1 (P0) — Aggregate spend caps** at factory and organisation level, per period, with a
+declared behaviour on approach (warn), at (stop intake), and over (halt and notify).
+
+**FR-26.2 (P0) — Admission control and scheduling.** A backlog needs a scheduling model: priority,
+fairness across sources, starvation prevention, and a bound on concurrent work items. Absent this, one
+noisy source consumes the factory.
+
+**FR-26.3 (P0) — Intake backpressure and circuit breaking.** A signal storm — a failing deploy
+emitting thousands of alerts — must not convert directly into unbounded spend. Per-source rate limits,
+deduplication by fingerprint, and a circuit breaker that parks a source and notifies are required.
+
+**FR-26.4 (P0) — Client-side provider control.** Concurrency limits, backoff, and fair queuing across
+agents, rather than discovering provider limits by being rate-limited (FR-11.10 handles the reactive
+case; this handles the proactive one).
+
+**FR-26.5 (P0) — Cost attribution.** Every unit of spend is attributed to a work item, an agent, a
+stage, and a cause (primary work, retry, scoring, benchmark, improvement), so O-9 and O-10 are
+computable rather than estimated.
+
+### 7.27 Data governance and lifecycle (FR-27)
+
+**FR-27.1 (P0) — Data classification.** Every persisted class (transcripts, packs, evidence,
+recordings, memory, ledger) declares whether it can contain repository content, personal data, or
+credentials, and its retention default.
+
+**FR-27.2 (P0) — Ledger segmentation.** The ledger is segmented, sealed, and archivable, with segment
+digests chained across boundaries so verification works over an archived prefix. Bounded growth
+(NFR-3.2) is otherwise a claim with no mechanism.
+
+**FR-27.3 (P0) — Erasure and legal hold.** Erasure by reference (FR-15.10b), a legal-hold flag that
+suspends retention for named subjects, and an erasure report. Append-only plus permanent archive
+otherwise makes compliance architecturally impossible.
+
+**FR-27.4 (P0) — Personal data in transcripts.** Transcripts may contain personal data from issues and
+chat. Redaction at capture (FR-17.3), configurable retention, and export/erasure per subject.
+
+**FR-27.5 (P0) — Provenance of generated code.** Changes record that they were machine-authored, which
+model tier produced them, and under which definition revision — for attribution, licence review, and
+post-hoc analysis.
+
+**FR-27.6 (P1) — Dependency and licence checks** on changes that add dependencies, reported as
+findings rather than silently merged.
+
+### 7.28 Operations (FR-28)
+
+**FR-28.1 (P0) — Installation.** Documented prerequisites, supported OS and runtime versions, an
+offline install path, and a post-install verification command (`sf doctor`) that reports what works
+and what does not.
+
+**FR-28.2 (P0) — Upgrade.** A documented upgrade path per component, with a compatibility statement
+and a rollback procedure.
+
+**FR-28.3 (P0) — Backup.** A defined *complete, consistent backup*: ledger, memory, evidence, index,
+run state, and definition revision, with a consistency guarantee across them and a documented
+restore procedure.
+
+**FR-28.4 (P0) — Disaster recovery.** Stated RPO and RTO, a rebuild-from-ledger procedure, and
+defined behaviour on ledger loss and on partial loss.
+
+**FR-28.5 (P0) — Run leases and orphan recovery.** Every run holds a heartbeat lease. A lease that
+expires marks the run `infrastructure_timeout`, releases its workspace, and notifies — so an executor
+that dies does not leave a permanently "running" work item.
+
+**FR-28.6 (P0) — Workspace garbage collection.** Worktrees, checkouts, caches, and evidence staging
+are reclaimed on a schedule and on disk pressure, with a floor that protects sealed evidence.
+
+**FR-28.7 (P0) — Disk-pressure behaviour.** Defined and tested: the coordination plane refuses new
+runs and continues serving reads before the disk fills, because a partial write during a chained
+ledger append is this design's worst corruption mode.
+
+**FR-28.8 (P0) — Health and alerting.** Component health, queue depth, lease expiry rate, provider
+error rate, and budget consumption are exported and alertable.
+
+**FR-28.9 (P0) — Log rotation and observability hygiene**, with secret redaction applied to logs.
+
+### 7.29 Conversation and context lifecycle (FR-29)
+
+**FR-29.1 (P0) — Bounded conversation state.** FR-3.7 requires continuing a specialist's existing
+conversation across revisions; on a multi-pass work item that conversation exceeds any context
+window. The harness maintains conversation state explicitly: a durable structured summary plus
+retrievable full history, compacted deterministically (HARNESS.md §6.4), with the compaction recorded.
+
+**FR-29.2 (P0) — Continuation is a resumption, not a replay.** Resuming a conversation restores the
+structured state and the pack for the current stage, not the entire prior transcript.
+
+**FR-29.3 (P0) — Cross-run state is auditable.** What one run carried into the next is inspectable, so
+"context was lost" is a diagnosable claim rather than a guess.
+
+### 7.30 Project deliverables (FR-30)
+
+**FR-30.1 (P0)** — `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, a maintainers list, and a stated decision
+process.
+
+**FR-30.2 (P0)** — `SECURITY.md` with a vulnerability disclosure process and a supported-versions
+statement. This project handles credentials and executes untrusted content; shipping without one is
+not acceptable.
+
+**FR-30.3 (P0)** — A quickstart, a tutorial, and a CI-tested reference factory definition that a
+reader can copy and run.
+
+**FR-30.4 (P0)** — Generated reference documentation for every schema, gate, tool, error code, and CLI
+command, produced from the same definitions that validate (NFR-4.3).
+
+**FR-30.5 (P1)** — A published threat model and a description of the trust boundaries in §6.2.
+
 ## 8. Non-functional requirements
 
 ### 8.1 Reliability
@@ -1437,6 +1832,41 @@ retry guidance, never presented as successful evidence.
 
 ---
 
+### 8.9 Operability
+
+- **NFR-9.1 (P0)** — A complete, consistent backup is definable, takeable while running, and
+  restorable, with a documented consistency guarantee across ledger, memory, evidence, and state.
+- **NFR-9.2 (P0)** — Stated RPO and RTO, with a tested rebuild-from-ledger procedure.
+- **NFR-9.3 (P0)** — Defined and tested disk-pressure behaviour that protects the coordination plane
+  before the disk fills.
+- **NFR-9.4 (P0)** — Every long-running component exposes health, queue depth, and lease state.
+
+### 8.10 Security posture
+
+- **NFR-10.1 (P0)** — Default-deny for every grant class, verified by a test that a fresh factory
+  reaches nothing it was not explicitly given.
+- **NFR-10.2 (P0)** — Every dependency and runner image is pinned by digest; unpinned references fail
+  lint.
+- **NFR-10.3 (P0)** — A published threat model, kept current with the trust boundaries in §6.2.
+- **NFR-10.4 (P0)** — Detective and preventive controls are labelled as such wherever a risk is
+  mitigated, so a reader is never sold detection as prevention.
+
+### 8.11 Fairness and access
+
+- **NFR-11.1 (P1)** — The system must be usable by a team with one machine, no CI, and a local model.
+  Every requirement that assumes otherwise declares its degradation.
+- **NFR-11.2 (P1)** — Agent-facing and user-facing output must not assume English-language
+  repositories, comments, or issue text.
+- **NFR-11.3 (P1)** — Nothing in the design may require a paid hosted service to reach a correct,
+  if slower, result.
+
+### 8.12 Project governance
+
+- **NFR-12.1 (P0)** — Contributing guide, code of conduct, maintainers, and decision process.
+- **NFR-12.2 (P0)** — Security policy and vulnerability disclosure process.
+- **NFR-12.3 (P0)** — A CI-tested reference example that the quickstart uses verbatim.
+- **NFR-12.4 (P0)** — Dependency licence reporting in CI, compatible with Apache-2.0 distribution.
+
 ## 9. Data model
 
 ### 9.1 Core entities
@@ -1486,58 +1916,145 @@ requirement for privileged daemons in local mode. All persisted state open-forma
 
 ## 11. Success metrics and acceptance criteria
 
-### 11.1 Product-level targets
+> **Revised in v2.0.0.** The baseline version of this section was rejected in review on three
+> counts: it stopped measuring at merge, its targets had denominators the system itself controls,
+> and its acceptance test was built so that the criteria most likely to fail could not falsify the
+> thesis. What follows is the replacement, not an amendment.
 
-| Goal | Metric | v1 target |
+### 11.0 Measurement principles
+
+- **MP-1 — Measure past the finish line.** Merge is not an outcome. Every quality metric here has a
+  post-merge partner (revert, follow-up fix, defect escape, incident attribution), and the
+  post-merge partner is the one that decides whether the factory is working.
+- **MP-2 — No metric whose denominator the system chooses.** Where the factory controls what enters
+  a ratio, the ratio is reported against an externally-fixed denominator as well.
+- **MP-3 — Every headline metric ships with a named counter-metric** that would degrade if the
+  headline were being gamed. Reporting the headline without the counter is a defect.
+- **MP-4 — Name the gaming strategy.** Each metric below states how it could be moved without
+  improving reality. If we cannot state that, we do not understand the metric.
+- **MP-5 — Human cost is measured, never assumed.** The time humans spend reviewing, answering, and
+  correcting factory output is a first-class measured quantity, not a hoped-for saving.
+
+### 11.1 Outcome metrics
+
+| # | Metric | Definition | Counter-metric | How it could be gamed |
+| --- | --- | --- | --- | --- |
+| O-1 | Delivered change rate | Factory-originated changes merged per week | Revert rate (O-2) | Ship trivia; split one change into many |
+| O-2 | Revert rate | Share of merged factory changes reverted or hot-fixed within 30 days | Delivered change rate | Avoid touching anything consequential |
+| O-3 | Defect escape rate | Defects attributable to a factory change, per merged change, at 30/90 days | Cycle time | Same as O-2 |
+| O-4 | Follow-up burden | Human commits on a factory branch after handoff, per merged change | Autonomy (O-5) | Push the work into the next work item |
+| O-5 | Autonomy | Share of merged factory changes with zero human code commits | Revert rate, follow-up burden | Restrict the factory to trivial work |
+| O-6 | Human review cost | Median reviewer minutes per factory change, and the ratio to a matched human-authored change | Delivered change rate | Attach less evidence; reviewers rubber-stamp |
+| O-7 | Rubber-stamp rate | Share of factory changes approved faster than a floor derived from diff size | Human review cost | — (this *is* the counter to O-6) |
+| O-8 | Rework rate | Share of work items returning to an earlier stage more than once | Cycle time | Loosen gates |
+| O-9 | Cost per merged change | Total attributable spend ÷ merged changes, **including** assurance, memory, scoring, benchmarking and retry overhead | Revert rate | Exclude overhead from the numerator |
+| O-10 | Assurance overhead share | Share of total spend consumed by scoring, benchmarking, self-improvement and pack assembly | Delivered change rate | Turn assurance off |
+| O-11 | Queue position of the constraint | Where work waits longest: intake, factory stages, human checkpoints, or review | — | — |
+
+**FR-15.13 (P0)** — O-11 is mandatory and reported first. It is the metric that can tell the project
+its own premise is wrong: if the constraint sits at human review or decision latency rather than at
+change production, then improving O-1 makes delivery *worse*, and the roadmap must change rather
+than the target.
+
+**FR-15.14 (P0)** — O-2, O-3 and O-4 require observation of the repository *after* merge. Where that
+observation is unavailable (an offline factory with no post-merge feedback), these metrics are
+reported `unavailable`, and every quality claim in the dashboard is labelled *unvalidated* until they
+exist. A factory that cannot see its own outcomes must say so rather than report autonomy as quality.
+
+**FR-15.15 (P0) — Evidence audit.** The "no silent false pass" claim is made testable by a standing
+procedure: each window, a fixed random sample (default 20) of gate-passing changes is independently
+re-checked by a human against the same criteria. The disagreement rate is published. A target of zero
+is not claimed; the *measured* rate is.
+
+### 11.2 The central-bet experiment
+
+The claim in §1.1 is a hypothesis. This is its protocol. It is written to be able to fail.
+
+**Pre-registration (FR-13.17, P0).** Before any trial runs, a registration document is committed
+containing: the task corpus and its selection rule, the conditions, the primary and secondary
+outcomes, the analysis plan, the effect sizes considered meaningful, the multiplicity correction, the
+stopping rule, and the results that would falsify the hypothesis. It is committed to the repository
+and is not editable after the first trial. Post-hoc changes are recorded as amendments and reported
+as such alongside the results.
+
+**Schedule.** The experiment runs at **M3**, not M8. Running it after every design decision is sunk
+converts it from a test into a ceremony. It re-runs at M6 and M8; the M3 result is allowed to change
+the design.
+
+**Corpus.** At least 120 tasks (not 40 — see power, below), drawn by a stated mechanical rule from
+real work items across at least five repositories and at least four task classes (defect fix, small
+feature, refactor, and test/infrastructure work), with difficulty stratified by an *a priori*
+measure (diff size and file fan-out of the human-authored resolution) fixed before conditions are
+assigned. A **held-out third** is sealed and never used for tuning.
+
+**Snapshot isolation (FR-13.18, P0).** Each task runs against a repository snapshot at the parent
+commit of its real resolution, with memory, ledger precedent, and spec state reconstructed *as of
+that commit*. Without this, the Precedent and Hazards sections replay the answer, and the experiment
+measures retrieval of a known resolution rather than capability. Any condition that cannot be
+snapshot-isolated is excluded from the primary analysis.
+
+**Conditions.** Every condition receives the **same attempt budget, the same repair budget, and the
+same acceptance oracle**. Any difference in attempts is a confound, not a treatment.
+
+| # | Condition | Harness | Tier | Purpose |
+| --- | --- | --- | --- | --- |
+| A | Competent baseline | A capable off-the-shelf single-agent setup with repository access and its own tooling | Large | The honest comparison, not a strawman |
+| B | Competent baseline | Same | Small | Tier effect at constant harness |
+| C | Full factory harness | This system | Small | The treatment |
+| D | Full factory harness | This system | Large | Headroom |
+| E | Ablations of C | C minus one of {Awareness Pack, gates, skills, memory, scaffolding} | Small | Which parts earn their place |
+
+**Blinding.** Outcome adjudication for any non-deterministic criterion is done by raters blind to
+condition. Deterministic outcomes (tests pass at the tip) need no blinding and are preferred for the
+primary outcome precisely for that reason.
+
+**Power.** With five primary comparisons, α = 0.05 Holm-corrected, 80% power, and a minimum
+meaningful effect of 10 percentage points on pass rate, the corpus and repetition count must be
+justified by an explicit calculation in the registration. Repetitions on the same task are **not**
+independent samples and are modelled as such (task as a random effect).
+
+**Outcomes.**
+
+| ID | Outcome | Statement |
 | --- | --- | --- |
-| The factory does real work | Share of intake work items reaching a reviewed change | ≥ 40% for defect-class work |
-| Output is trustworthy | Share of factory changes merged without human code push (autonomy) | ≥ 25% and rising |
-| Review is cheap | Median human review time for a factory change vs. a comparable human change | ≤ 1.0× |
-| Cost is known and falling | Median cost per opened change, trend over 90 days | Decreasing |
-| Rework is contained | Share of work items returning to an earlier stage more than once | ≤ 15% |
-| The loop works | Adopted improvement proposals with a measured positive effect | ≥ 60% |
-| Nothing is silently wrong | Evidence-gate false-pass rate on an audited sample | 0 |
+| AC-1 | Primary | C's pass rate exceeds A's by at least the registered effect size |
+| AC-2 | Primary | C's fully-loaded cost per *passing* task — including assurance, retries, scoring and pack assembly — is below A's |
+| AC-3 | Primary | C's pass rate exceeds B's by at least the registered effect size (the harness, not the tier, is doing the work) |
+| AC-4 | Primary | Each ablation in E reduces C's pass rate by at least the registered effect size |
+| AC-5 | Primary | C's post-hoc calibration error, measured as the gap between stated per-criterion confidence and observed outcome, is no worse than A's |
+| AC-6 | Secondary | C's advantage holds on the sealed held-out third |
+| AC-7 | Secondary | C's human review cost per accepted change is no worse than A's |
 
-### 11.2 The central-bet acceptance test
+**Falsification (explicit).** **Any** failed primary outcome falsifies the central bet as stated. No
+criterion is exempt. In particular:
 
-The claim in §1.1 is falsifiable and must be tested before v1 ships.
+- AC-3 failing means the tier, not the harness, explains the result — the project's premise is wrong.
+- AC-4 failing for a subsystem means **that subsystem must be removed**, not retained for
+  plausibility. This applies to the Awareness Pack, memory, skills, gates, and scaffolding equally.
+- AC-2 failing means the harness is a cost multiplier, and the local-first case weakens accordingly.
+- AC-5 failing means the calibration machinery produces confident wrongness, which is worse than no
+  calibration at all.
 
-**Setup.** A fixed benchmark suite of at least 40 tasks drawn from real work items across at least
-three repositories and at least three task classes (defect fix, small feature, refactor).
+A falsified result is published in this repository alongside the design change it forces.
 
-**Conditions.**
-
-| Condition | Harness | Model tier |
-| --- | --- | --- |
-| A (control) | Bare harness: task text only, no pack, no gates, no skills, no memory | Large |
-| B (control) | Bare harness | Small |
-| C (treatment) | Full factory harness | Small |
-| D (reference) | Full factory harness | Large |
-
-**Acceptance.** With ≥ 5 repetitions per task per condition:
-
-- **AC-1** — C's pass rate exceeds A's. *(A small model in this harness beats a large one outside it.)*
-- **AC-2** — C's cost per passing task is below A's by at least 3×.
-- **AC-3** — C's pass rate is at least 85% of D's. *(Most of the value comes from the harness.)*
-- **AC-4** — Ablating any one of {Awareness Pack, gates, skills, memory} from C measurably reduces its
-  pass rate, establishing that each subsystem earns its place.
-- **AC-5** — C's calibration error is no worse than D's. *(The small model is not confidently wrong.)*
-
-Failing AC-1 or AC-3 falsifies the central bet and requires the design to change, not the target.
+**Known threats to validity, recorded in advance.** Corpus contamination (tasks may appear in model
+training data — mitigated by recency filtering and by reporting contamination-suspect tasks
+separately); operator curation confound (condition C's advantage depends on the state of *this*
+factory's memory, skills and spec — that state is snapshotted, published, and reported as part of the
+result, because "the harness" is not separable from what has been put into it); and oracle
+weakness (a repository's own tests may accept a wrong change — hence AC-6 and the O-2/O-3 partners).
 
 ### 11.3 Subsystem acceptance
 
 | Subsystem | Acceptance |
 | --- | --- |
-| Living Spec | Injected drift is detected within one run; a behavioural change without a delta fails Review 100% of the time in test |
-| Memory | Injected contradictory memory is quarantined before it reaches a pack; an invalidated source demotes all descendants; a scope stays within budget under a 10k-write soak |
-| Skills | A skill regressing its evals cannot be promoted; overlapping skills produce a merge proposal; an unused skill produces a retirement proposal |
-| Evals | `regression-proven` cannot be satisfied by a test that passes at the parent commit; a scorer below human-agreement threshold is flagged before driving change |
-| Harness | Identical inputs produce an identical pack digest; every run replays deterministically with stubbed models |
-| Local-first | The conformance suite passes identically across all executors; `sf audit --egress` reports zero destinations for a fully local factory |
-| Security | No definition file is writable from an execution workspace; an untrusted-region tool call at a grant boundary is refused |
-
----
+| Living Spec | Injected drift is detected within one run; a behavioural change with no delta fails Review on a labelled corpus, with recall reported rather than asserted |
+| Memory | A contradictory memory is quarantined before it reaches a pack; an invalidated source demotes its descendants; corroboration by two runs reading the *same source* is refused; a scope stays within budget under a 10k-write soak |
+| Skills | A skill regressing its evals cannot be promoted; overlapping skills produce a merge proposal; the merge/split pair does not oscillate over 20 cycles on a fixed corpus |
+| Evals | `regression-proven` is not satisfiable by an import or collection error at the parent commit; a scorer below human-agreement threshold cannot drive adoption |
+| Harness | Identical inputs and an identical input snapshot produce an identical pack digest; recorded runs replay deterministically with stubbed models |
+| Local-first | The conformance suite passes identically across executors; `sf audit --egress` enumerates definition-declared destinations and explicitly reports setup-command and allowlist egress as *unverified by static analysis* |
+| Security | No definition file is writable from an execution workspace; a decision authored solely from untrusted input at a grant boundary requires a human decision |
 
 ## 12. Rollout plan
 
@@ -1559,37 +2076,52 @@ Each milestone ships with tests, documentation generated from schemas, and a CI 
 
 ## 13. Risks and open questions
 
+> **Revised in v2.0.0.** The baseline register listed detective controls as mitigations for
+> preventive risks, and its open questions were all tuning questions that threatened no decision
+> already made. Both are corrected. Each mitigation below is labelled **[P]** preventive (it stops
+> the thing happening) or **[D]** detective (it tells you afterwards). A CRITICAL risk whose only
+> mitigation is **[D]** is not mitigated.
+
 ### 13.1 Risks
 
 | ID | Risk | Impact | Mitigation |
 | --- | --- | --- | --- |
-| R-1 | **Plausible-but-wrong changes** pass review because the evidence looks good | Critical | `regression-proven` (FR-13.3), independent Critic configuration (FR-3.5), `evidence-complete` (FR-22.6), calibration scoring (FR-11.7) |
-| R-2 | **Memory poisoning**: one bad inference propagates | Critical | Lanes, earned promotion, transitive invalidation (FR-6.4–6.6) |
-| R-3 | **Reward hacking** in self-improvement | High | Held-out validation, self-referential flagging (FR-14.7) |
-| R-4 | **Prompt injection** via repository or issue content | Critical | Structural grants, untrusted-region labelling, refusal at grant boundaries (FR-17.4–17.6) |
-| R-5 | **Cost blowout** from escalation or loops | High | Budgets (FR-3.11), bounded loops (NFR-1.3), escalation triggers (FR-11.4) |
-| R-6 | **Spec becomes bureaucracy** and slows work | Medium | Deltas only where behaviour changes; skip-with-reason; induction on-ramp (FR-5.12) |
-| R-7 | **Skill sprawl** degrades selection | Medium | Selection budget, discoverability scoring, merge/split/sunset (FR-7.6–7.10) |
-| R-8 | **Local mode diverges** and becomes second-class | High | Parity conformance suite as a release blocker (FR-20.5) |
-| R-9 | **Scorer drift**: judges disagree with humans and drive bad change | High | Human-agreement threshold before verdicts drive change (FR-13.8) |
-| R-10 | **Operator overload**: too many checkpoints, factory ignored | Medium | Time-bounded checkpoints, autonomy levels, needs-attention triage (FR-16.4, FR-16.6) |
-| R-11 | **Vendor coupling** creeps in through convenience | Medium | Adapter contract (FR-18.2), portability tests, `sf audit` |
-| R-12 | **Evidence theatre**: bundles grow without adding trust | Medium | Evidence must resolve claims, not accompany them (FR-22.6); bundle-size vs. review-time metric |
+| R-1 | Plausible-but-wrong changes pass review | Critical | **[P]** `regression-proven` with parent-failure classification (FR-13.3a); **[P]** independence ladder (FR-3.5a); **[D]** calibration scoring (FR-11.7); **[D]** post-merge revert and defect-escape metrics (O-2, O-3). Honest statement: the preventive controls bound a class of error, not all of it — O-2/O-3 are how we learn what got through |
+| R-2 | Memory poisoning propagates | Critical | **[P]** trust classes with monotone downward propagation (FR-6.4b); **[P]** source-disjoint corroboration (FR-6.4a); **[P]** `untrusted` barred from Canon and from `conventions`; **[D]** transitive invalidation (FR-6.6) |
+| R-3 | Reward hacking / grader capture | Critical | **[P]** held-out isolation and self-referential flagging (FR-14.7); **[P]** outcome anchoring — a scorer that cannot name an outcome partner cannot drive the loop (FR-14.7a); **[D]** rubric-drift detection; **[D]** loop-effectiveness metric |
+| R-4 | Prompt injection via repository or issue content | Critical | **[P]** grants resolved from configuration the execution plane cannot write (FR-17.5 table); **[P]** definition files unwritable from a workspace (FR-17.6); **[P]** non-skippable stages (FR-3.3a); **[D]** untrusted-origin escalation (FR-17.5a), which is explicitly incomplete |
+| R-5 | Cost blowout | High | **[P]** three-level budgets, run/work-item/factory (FR-3.11a); **[P]** assurance inside the budget (FR-3.11b); **[P]** intake backpressure (FR-26.3); **[D]** O-9, O-10 |
+| R-6 | Spec becomes bureaucracy | Medium | **[P]** deltas only where behaviour changes; **[P]** induction on-ramp (FR-5.12); **[D]** time-in-Design metric |
+| R-7 | Skill sprawl degrades selection | Medium | **[P]** bounded offer (FR-7.10); **[P]** merge/split/sunset with anti-oscillation; **[D]** selection precision |
+| R-8 | Local mode becomes second-class | High | **[P]** parity conformance suite as a release blocker (FR-20.5); **[D]** topology-split metrics |
+| R-9 | Scorer drift drives bad change | High | **[P]** agreement threshold before a scorer may drive the loop (FR-13.8); **[P]** outcome anchoring (FR-14.7a). Honest statement: FR-13.8's human labelling does not scale to many scorers, so the number of loop-driving scorers is deliberately capped |
+| R-10 | Operator disables the safeguards within a week | High | **[P]** violation classes so ordinary toolchain noise does not trip a gate (FR-12.10); **[P]** time-bounded checkpoints (FR-16.4); **[D]** measured share of overridden gates — an override rate above threshold is treated as a design defect, not user error |
+| R-11 | Vendor coupling creeps in | Medium | **[P]** adapter contract (FR-18.2); **[D]** `sf audit` |
+| R-12 | Evidence theatre: bundles grow, trust does not | Medium | **[P]** claims must resolve to artifacts (FR-22.6); **[D]** O-6 human review cost and O-7 rubber-stamp rate. If O-6 rises while O-2 does not fall, the evidence is costing more than it is worth |
+| R-13 | **The bottleneck is not change production** | Critical to the premise | **[D]** O-11 constraint position, reported first. If the constraint is review or decision latency, the roadmap changes. No preventive control exists, because this is a fact about the world, not a failure of the system |
+| R-14 | **Reviewer overload**: the factory shifts work from writing to reviewing | High | **[P]** per-factory cap on concurrent open changes awaiting review; **[D]** O-6, O-7. A factory that outruns its reviewers has made things worse |
+| R-15 | Junior engineers lose the learning path that writing first drafts provides | Medium | **[D]** none available in-product. Recorded here because it is a real cost of adoption that the product cannot measure and should not pretend to |
+| R-16 | Ledger or state corruption under disk pressure | High | **[P]** disk-pressure behaviour (FR-28.7); **[P]** segmentation (FR-27.2); **[D]** `sf ledger verify` |
+| R-17 | Orphaned runs and unbounded disk growth | High | **[P]** leases (FR-28.5); **[P]** workspace GC (FR-28.6) |
+| R-18 | Deletion is architecturally impossible in an append-only design | High | **[P]** tombstones and erasure-by-reference designed in from the start (FR-15.10a, FR-27.3). Retrofitting this would require rewriting every store |
 
 ### 13.2 Open questions
 
-| ID | Question | Owner | Needed by |
-| --- | --- | --- | --- |
-| OQ-1 | What is the right default Awareness Pack budget split per role, and should it adapt per repository? | Harness | M2 |
-| OQ-2 | Should Candidate memories be visible to agents at all, or only after promotion? | Knowledge | M4 |
-| OQ-3 | What is the minimum corroboration for Canon promotion that does not become a bottleneck? | Knowledge | M4 |
-| OQ-4 | Should spec induction (FR-5.12) run continuously or only on demand? | Knowledge | M4 |
-| OQ-5 | What is the default tier ladder, and how is it calibrated per repository? | Harness | M3 |
-| OQ-6 | How much of the Builder's transcript may the Critic see before independence is compromised? | Assurance | M2 |
-| OQ-7 | Should benchmark tasks be shipped as a public suite, given contamination risk? | Assurance | M8 |
-| OQ-8 | What is the right default retention for transcripts and recordings? | Foundation | M6 |
+Rewritten so that each threatens a decision already made, rather than tuning a decision already
+taken. A question that cannot change anything is not an open question.
 
----
+| ID | Question | What it could overturn | Needed by |
+| --- | --- | --- | --- |
+| OQ-1 | Is a **fixed stage machine** right at all, or should stages be a per-factory declared graph? | FR-4.2, the whole §7.4 model. The eight stages were adopted by analogy, not derived from §2 | M2 |
+| OQ-2 | Does **role specialisation** beat one well-equipped agent with the same tools and pack? | §7.3 entirely. If not, five roles are five times the prompt maintenance for nothing | M3, via §11.2 condition E |
+| OQ-3 | Is **one conductor** an architectural necessity or an interface convenience? | FR-3.1, INV-1 | M2 |
+| OQ-4 | Is the bottleneck change production, or review and decision latency? | §11.1's entire orientation, and the roadmap | M3, via O-11 |
+| OQ-5 | Does **memory** improve outcomes enough to justify its poisoning risk? | §7.6 entirely; AC-4's memory ablation is the test | M3 |
+| OQ-6 | Can a scorer's **human-agreement** requirement scale past a handful of scorers, and if not, what is the cap? | FR-13.8, R-9 | M3 |
+| OQ-7 | Does **evidence** reduce review time or increase it? | FR-22, R-12; O-6 against a matched baseline is the test | M4 |
+| OQ-8 | Is **calibration** self-reportable at all, or is measured post-hoc accuracy the only usable signal? | FR-11.6, AC-5 | M3 |
+| OQ-9 | What is the honest **corpus contamination** rate for §11.2, and does it invalidate the result? | §11.2's validity. Must be answered *before* the experiment, not at it | M3 |
+| OQ-10 | Should third-party harness adapters exist, given they falsify pack determinism and replay? | FR-11.1, NFR-5.3 | M5 |
 
 ## 14. Traceability
 
@@ -1608,17 +2140,83 @@ Each milestone ships with tests, documentation generated from schemas, and a CI 
 
 ## Appendix A — Requirement index
 
-Requirement families: FR-0 topology · FR-1 factory model · FR-2 definitions as code · FR-3 agents ·
+Functional families: FR-0 topology · FR-1 factory model · FR-2 definitions as code · FR-3 agents ·
 FR-4 work items · FR-5 living spec · FR-6 memory · FR-7 skills · FR-8 runners · FR-9 awareness ·
 FR-10 tools · FR-11 routing and calibration · FR-12 blast radius · FR-13 evals and gates ·
 FR-14 self-improvement · FR-15 observability · FR-16 checkpoints · FR-17 security · FR-18 intake ·
-FR-19 factory tool server · FR-20 local-first · FR-21 API/CLI · FR-22 evidence.
+FR-19 factory tool server · FR-20 local-first · FR-21 API/CLI · FR-22 evidence ·
+**FR-23 repository onboarding · FR-24 versioning and replay integrity · FR-25 identity and
+authorisation · FR-26 cost, scheduling and backpressure · FR-27 data governance ·
+FR-28 operations · FR-29 conversation lifecycle · FR-30 project deliverables**.
 
 Non-functional families: NFR-1 reliability · NFR-2 performance · NFR-3 scalability · NFR-4 usability ·
-NFR-5 maintainability · NFR-6 portability · NFR-7 accessibility · NFR-8 governance.
+NFR-5 maintainability · NFR-6 portability · NFR-7 accessibility · NFR-8 governance ·
+**NFR-9 operability · NFR-10 security posture · NFR-11 fairness and access ·
+NFR-12 project governance**.
 
 ## Appendix B — Change log
 
 | Version | Date | Change |
 | --- | --- | --- |
 | 1.0.0 | 2026-08-31 | Baseline. Written before adversarial, completeness, and bias review. |
+| 2.0.0 | 2026-08-31 | Revised against 251 review findings. Section 11 replaced outright; twelve mechanism-level corrections; eight new requirement families; four new non-functional families; risk register relabelled preventive/detective; open questions rewritten to threaten decisions rather than tune them. See Appendix C. |
+
+## Appendix C — Review dispositions
+
+Three independent reviews were run against v1.0.0 and are kept in [`reviews/`](reviews/):
+**62** adversarial findings (12 CRITICAL), **117** completeness gaps (31 BLOCKING), and **72** bias
+findings. The reports are retained unedited, including the findings this revision *declined* to act
+on, because a review record that only preserves the accepted findings is not a review record.
+
+### C.1 Accepted and fixed in v2.0.0
+
+| Finding | What was wrong | Resolution |
+| --- | --- | --- |
+| AR-01, AR-02, AR-13–AR-17, BR-22–BR-30 | The acceptance test could not fail: strawman controls, unequal attempt budgets, a corpus that leaked the answers, and exemptions for the criteria most likely to fail | §11.2 replaced: pre-registration, snapshot isolation, a competent baseline, equal budgets, power analysis, blinding, a held-out third, and explicit falsification with no exemptions. Moved from M8 to M3 |
+| BR-41, BR-14, BR-30 | Measurement stopped at merge; the bottleneck assumption was never stated; denominators were system-controlled | §11.1 rebuilt around post-merge outcomes (O-2, O-3, O-4), constraint position (O-11), and counter-metrics on every headline (MP-1…MP-5) |
+| AR-03 | Corroboration was defined over runs, so two runs reading one planted issue laundered untrusted text into Canon | FR-6.4a: corroboration intersects provenance sets. FR-6.4b: an explicit trust class on every object, monotone downward, with `untrusted` barred from Canon |
+| AR-04 | FR-17.5 required taint-tracking through a language model | FR-17.5 rewritten around *authority* — grants resolved from configuration the execution plane cannot write — with FR-17.5a stated as the weaker, admittedly incomplete layer |
+| AR-05 | Grader capture needs no edit to a grader, so the self-referential flag never fires | FR-14.7a: outcome anchoring, a counter-metric panel, rubric-drift detection, and loop-effectiveness gating |
+| AR-06 | FR-17.6 and FR-14.3 contradicted each other; NFR-8.2 made definition changes *equal* to code changes | FR-14.3a (stricter review, second reviewer, no self-approval) and FR-14.3b (proposing is not writing). NFR-8.2 explicitly superseded |
+| AR-07, BR-16 | `regression-proven` was satisfied by an import error at the parent commit | FR-13.3a: the parent failure must be an assertion failure; FR-13.3b states plainly what the gate does *not* prove |
+| AR-08 | Rollback restored the filesystem and left memory candidates, spec deltas and skill proposals behind | FR-12.9: every output channel is staged and committed only at an admitted terminal state |
+| AR-10 | Unbounded stage-skip authority in the one agent that reads attacker-controlled text | FR-3.3a non-skippable stages; FR-3.3b routing decisions cite their basis and its trust class |
+| AR-11, AR-12 | `CREATOR` identity could carry merge scope; live steering had no identity model | FR-25.6 scoped repository identity; FR-25.5 makes steering an authenticated, capability-checked decision channel |
+| AR-18 | Determinism was asserted while decay, timeouts and freshness made it impossible | FR-9.1 rewritten as determinism over a captured input snapshot, with achieved results recorded |
+| AR-29, AR-31 | Budgets were per-run only; assurance was unbudgeted | FR-3.11a three-level budgets; FR-3.11b assurance inside the budget |
+| AR-34, FR-15.11/12, FR-27.3 | Retention deleted what INV-6 and INV-8 promised was reconstructible; erasure was impossible | FR-15.10a tombstones; FR-15.10b erasure by reference; FR-27.2 ledger segmentation |
+| AR-37 | FR-13.9 forbade declaring a winner while three other requirements declared one | FR-13.10a: "no winner" governs reporting; adoption applies operator-authored thresholds |
+| AR-39 | Review independence was unsatisfiable in a single-provider factory | FR-3.5a: an independence ladder, with the achieved rung reported on every verdict |
+| AR-41 | No lease meant duplicated irreversible external actions | FR-19.5a: leases on external actions, not on work items |
+| AR-27 | Decomposition — the hardest step — was assigned to the weakest model | FR-11.9a preference order; FR-11.9b verifier classes, with `none` never counted as verified |
+| AR-45 | A zero-tolerance violation gate over events ordinary toolchains generate constantly | FR-12.10 violation classes; only `escalating` blocks |
+| BR-01, BR-02, BR-03 | The stage machine, the single conductor and the role set were adopted by analogy and then protected as invariants | FR-4.2a makes the stage graph configuration; FR-3.1 states the rationale *and its limits*; OQ-1, OQ-2 and OQ-3 put all three up for falsification |
+| BR-11 | §2.3 asserted the thesis as its own premise | Rewritten to separate two observations from one hypothesis |
+| BR-50, BR-63, BR-13 | The reviewer who inherits the output had no persona, no protection and no measured cost | Persona U6; metrics O-6 and O-7; risks R-14 and R-15 |
+| Completeness FR-23…FR-30, NFR-9…NFR-12 | Onboarding, replay integrity, identity, cost control, data governance, operations, conversation lifecycle and project deliverables were entirely absent | Eight new functional families and four new non-functional families |
+
+### C.2 Accepted, deferred with a reason
+
+| Finding | Why not now |
+| --- | --- |
+| AR-19 (contradicted-state deadlock), AR-20 (reformat false drift), AR-22 (contradiction vs. merge), AR-23 (Canon collapse), AR-24 (low-frequency skill trap), AR-26 (merge/split oscillation) | All are algorithm-level corrections to §7.5–§7.7. They are specified in [`harness/living-spec.md`](harness/living-spec.md), [`harness/memory.md`](harness/memory.md) and [`harness/skills.md`](harness/skills.md) and will be reconciled into the PRD once the implementations settle at M4. Tracked, not dismissed |
+| AR-25, BR-18 (metrics needing an unavailable oracle) | Selection recall, criteria-never-failing, and similar quantities have no ground truth. They are retained but must be reported as *estimates with a stated derivation*, never as measurements. Full resolution deferred to M6 |
+| AR-30 (NFR-2.1/3.1/8.4 jointly infeasible) | Requires measurement on a real repository before the numbers can be set honestly. The current figures are marked as targets to be re-derived at M3 |
+| AR-36, R-9 (human-agreement validation does not scale) | Resolved by capping the number of loop-driving scorers rather than by scaling labelling. The cap is OQ-6 |
+| AR-51 (cross-repository migration has no home) | JTBD-4 is genuinely unsupported by the single-source-context work-item model. Recorded as unsupported in v2.0.0 rather than papered over; a multi-repository work item is a design change, not a parameter |
+| BR-15 (verifiable ≠ correct) | Accepted as a permanent limitation and stated as one in FR-13.3b and R-1, rather than resolved. The honest position is that gates bound classes of error and O-2/O-3 measure what escapes |
+
+### C.3 Declined
+
+| Finding | Why |
+| --- | --- |
+| BR-04 (one policy per factory is a multi-tenant artifact) | Partly right — the *lint* was imported thinking — but a single policy boundary is what makes `sf audit` answerable. Retained, with the lint downgraded to advisory |
+| AR-57 (UTC-only schedules) | Correct but minor; scheduled for M5 with timezone-aware cron. Not a v1 blocker |
+| BR-09 / OQ-10 (third-party harness adapters falsify determinism) | The tension is real and is now recorded as OQ-10 rather than removed. Portability is a stated principle (PR-10) and paying for it in replay fidelity is a trade we are making knowingly |
+
+### C.4 What the reviews did not cover
+
+No review examined the harness specifications in [`harness/`](harness), which were written after the
+PRD baseline and carry several of the corrections above. They are due for the same treatment. Nor did
+any review examine the implementation. Both are gaps in this record, stated here rather than left to
+be noticed.
