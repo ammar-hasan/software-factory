@@ -317,3 +317,188 @@ def test_the_dashboard_offers_no_write_endpoint(dashboard: str) -> None:
         urlopen(request)
 
     assert caught.value.code in (404, 501)
+
+
+# --------------------------------------------------------- the six views, all reachable
+
+
+def test_the_run_index_lists_runs_so_the_inspector_can_be_reached() -> None:
+    """The inspector could only be reached by somebody who already knew a run id.
+
+    Nothing in the product produced one: the client asked through a browser `prompt()`.
+    An index is not a convenience here, it is the half of FR-15.6 that makes the other
+    half usable.
+    """
+    from software_factory.ledger.entry import LedgerEntry
+    from software_factory.observability.views import run_index
+
+    entries = [
+        LedgerEntry(
+            seq=1,
+            ts="2026-01-01T00:00:00Z",
+            type=EntryType.RUN_STARTED,
+            actor="conductor",
+            subject="wi-1:build:0",
+            payload={"agent": "builder", "stage": "BUILD", "tier": "local", "workItem": "wi-1"},
+        ),
+        LedgerEntry(
+            seq=2,
+            ts="2026-01-01T00:00:01Z",
+            type=EntryType.MODEL_CALLED,
+            actor="builder",
+            subject="qwen",
+            payload={"run": "wi-1:build:0", "costUnits": 0.25},
+        ),
+        LedgerEntry(
+            seq=3,
+            ts="2026-01-01T00:00:02Z",
+            type=EntryType.GATE_EVALUATED,
+            actor="builder",
+            subject="wi-1",
+            payload={"run": "wi-1:build:0", "gate": "tests-pass", "outcome": "fail"},
+        ),
+        LedgerEntry(
+            seq=4,
+            ts="2026-01-01T00:00:03Z",
+            type=EntryType.RUN_FINISHED,
+            actor="builder",
+            subject="wi-1:build:0",
+            payload={"status": "blocked", "reason": "a gate refused"},
+        ),
+    ]
+
+    index = run_index(entries)
+
+    assert index["total"] == 1
+    row = index["runs"][0]
+    assert row["id"] == "wi-1:build:0"
+    assert row["agent"] == "builder"
+    assert row["status"] == "blocked"
+    assert row["modelCalls"] == 1
+    assert row["costUnits"] == 0.25
+    # A gate whose outcome is not a pass is a failed gate. Counting only literal "fail"
+    # would let "refused" and "error" render as green.
+    assert row["gatesFailed"] == 1
+
+
+def test_the_run_index_costs_agree_with_the_inspector(tmp_path: Path) -> None:
+    """Two places that report one run's cost must compute it the same way.
+
+    Two numbers for one run is worse than one number, because a reader has to decide which
+    to believe and has nothing to decide with.
+    """
+    from software_factory.observability.views import run_index
+
+    ledger = ledger_with(
+        tmp_path,
+        (EntryType.RUN_STARTED, "r1", {"agent": "builder", "stage": "BUILD"}),
+        (EntryType.MODEL_CALLED, "qwen", {"run": "r1", "costUnits": 0.5}),
+        (EntryType.MODEL_CALLED, "qwen", {"run": "r1", "costUnits": 0.25}),
+        (EntryType.RUN_FINISHED, "r1", {"status": "ok"}),
+    )
+    entries = list(ledger.read())
+
+    assert run_index(entries)["runs"][0]["costUnits"] == run_inspector(entries, "r1")["costUnits"]
+
+
+def test_every_declared_view_is_served(dashboard: str) -> None:
+    """`views.py` has always said "the dashboard's six views" and the server offered three.
+
+    `definition_view`, `evaluation_view` and `registry_view` were written, exported, tested
+    in isolation and called by nothing -- the exact failure this codebase keeps finding in
+    itself. A view reachable from no URL is a view no operator can look at.
+    """
+    from software_factory.observability.dash import VIEWS
+
+    assert len(VIEWS) == 6
+    for view in VIEWS:
+        with urlopen(f"{dashboard}/api/{view}") as response:
+            assert response.status == 200, view
+            body = json.loads(response.read())
+        assert "error" not in body, (view, body)
+
+
+def test_a_view_whose_data_is_absent_says_which_and_why(dashboard: str) -> None:
+    """Not an HTTP error: the factory is fine and one panel has nothing behind it.
+
+    The fixture's ledger sits in a bare tmp directory with no factory tree, so the
+    definition genuinely cannot be loaded. Serving 500, or an empty page, would both be
+    wrong -- availability with a reason is how every metric in this codebase reports the
+    same situation.
+    """
+    with urlopen(f"{dashboard}/api/definition") as response:
+        body = json.loads(response.read())
+
+    assert body["available"] is False
+    assert "factory.yaml" in body["reason"] or "no factory" in body["reason"].lower()
+
+
+def test_the_registry_view_reports_a_missing_memory_log_rather_than_zero(dashboard: str) -> None:
+    """Zero memories and an unreadable memory log must not render as the same thing."""
+    with urlopen(f"{dashboard}/api/registry") as response:
+        body = json.loads(response.read())
+
+    assert body["memory"]["available"] is False
+    assert "memory" in body["memory"]["reason"]
+
+
+def test_the_registry_view_reads_a_real_memory_log(tmp_path: Path) -> None:
+    """And when the log is there, the numbers come from it."""
+    from software_factory.memory import MemoryStore
+    from software_factory.memory.records import Kind, Lane, Memory, Scope, Source, SourceKind
+    from software_factory.observability.dash import DashboardData
+
+    ledger_with(tmp_path, (EntryType.RUN_STARTED, "r1", {"agent": "builder"}))
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    store.put(
+        Memory(
+            id=MemoryStore.new_id(),
+            lane=Lane.CANDIDATE,
+            kind=Kind.FACT,
+            scope=Scope.REPOSITORY,
+            scope_ref="acme/payments",
+            content="The BOM shows up as a zero-width space in the first header.",
+            provenance=(Source(kind=SourceKind.FILE, ref="src/importers/csv.py"),),
+        ),
+        op="admit",
+        actor="builder",
+        reason="observed while fixing wi-1",
+    )
+
+    body = DashboardData(tmp_path / "ledger.jsonl").payload("registry", {})
+
+    assert body["memory"]["available"] is True
+    assert body["memory"]["total"] == 1
+
+
+def test_the_definition_view_loads_a_real_factory(tmp_path: Path) -> None:
+    """The scaffold `sf init` writes must be legible to the dashboard beside it."""
+    from software_factory.observability.dash import DashboardData
+    from software_factory.scaffold import init_factory
+
+    init_factory(tmp_path, name="payments")
+    state = tmp_path / ".factory"
+    state.mkdir(exist_ok=True)
+    ledger_with(state, (EntryType.RUN_STARTED, "r1", {"agent": "builder"}))
+
+    body = DashboardData(state / "ledger.jsonl").payload("definition", {})
+
+    assert body["factory"] == "payments"
+    # FR-2.1: a conductor and at least one specialist. A definition view that renders an
+    # empty agent list for a real factory is worse than none.
+    assert len(body["agents"]) >= 2
+
+
+def test_the_client_lists_exactly_the_views_the_server_serves() -> None:
+    """A nav button with no endpoint behind it is a dead link the operator finds first."""
+    from software_factory.observability.dash import INDEX_HTML, VIEWS
+
+    for view in VIEWS:
+        assert f"'{view}'" in INDEX_HTML, view
+
+
+def test_the_client_never_asks_the_operator_to_type_a_run_id() -> None:
+    """`prompt()` was the only way to open the inspector, and it is not a way."""
+    from software_factory.observability.dash import INDEX_HTML
+
+    assert "prompt(" not in INDEX_HTML

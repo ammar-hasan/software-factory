@@ -362,3 +362,96 @@ def _trend(current: Report, previous: Report) -> dict[str, Any]:
             continue
         trend[measure.name] = round(measure.value - before.value, 4)
     return trend
+
+
+#: How many runs the index carries. A ledger accumulates runs forever, and a page that
+#: renders every one of them gets slower every day until nobody opens it.
+RUN_INDEX_LIMIT = 250
+
+
+def run_index(entries: Iterable[LedgerEntry], *, limit: int = RUN_INDEX_LIMIT) -> dict[str, Any]:
+    """Every run the ledger records, newest first, with what it cost and how it ended.
+
+    The run inspector could only be reached by somebody who already knew a run id, and
+    nothing in the product produced one -- the dashboard asked for it through a browser
+    ``prompt()``. An inspector whose index is "remember the id" is an inspector nobody
+    opens, so this is the missing half of FR-15.6 rather than a convenience.
+
+    Lifecycle entries are keyed by subject and everything else by ``payload["run"]``,
+    matching :func:`run_inspector`, so a run's cost here and its cost there are the same
+    number computed the same way.
+    """
+    runs: dict[str, dict[str, Any]] = {}
+    order: dict[str, int] = {}
+
+    def slot(run_id: str, seq: int) -> dict[str, Any] | None:
+        if run_id not in runs:
+            return None
+        order[run_id] = max(order.get(run_id, 0), seq)
+        return runs[run_id]
+
+    for entry in entries:
+        payload = entry.payload
+        if entry.type is EntryType.RUN_STARTED:
+            run_id = str(entry.subject)
+            runs[run_id] = {
+                "id": run_id,
+                "agent": str(payload.get("agent", "")),
+                "stage": str(payload.get("stage", "")),
+                "purpose": str(payload.get("purpose", "")),
+                "tier": str(payload.get("tier", "")),
+                "workItem": str(payload.get("workItem", "")),
+                "startedAt": entry.ts,
+                "finishedAt": None,
+                "status": "running",
+                "reason": "",
+                "costUnits": 0.0,
+                "modelCalls": 0,
+                "toolCalls": 0,
+                "gatesFailed": 0,
+                "escalations": 0,
+                "violations": 0,
+            }
+            order[run_id] = entry.seq
+            continue
+
+        if entry.type is EntryType.RUN_FINISHED:
+            row = slot(str(entry.subject), entry.seq)
+            if row is None:
+                continue
+            row["status"] = str(payload.get("status", "unknown"))
+            row["reason"] = str(payload.get("reason", ""))
+            row["finishedAt"] = entry.ts
+            continue
+
+        row = slot(str(payload.get("run", "")), entry.seq)
+        if row is None:
+            continue
+        if entry.type is EntryType.MODEL_CALLED:
+            row["modelCalls"] += 1
+            row["costUnits"] += float(payload.get("costUnits", 0.0) or 0)
+        elif entry.type is EntryType.TOOL_CALLED:
+            row["toolCalls"] += 1
+        elif entry.type is EntryType.GATE_EVALUATED:
+            if str(payload.get("outcome", "")).lower() not in ("pass", "passed", "true"):
+                row["gatesFailed"] += 1
+        elif entry.type is EntryType.ESCALATION:
+            row["escalations"] += 1
+        elif entry.type is EntryType.VIOLATION:
+            row["violations"] += 1
+
+    rows = sorted(runs.values(), key=lambda r: order[str(r["id"])], reverse=True)
+    for row in rows:
+        row["costUnits"] = round(float(row["costUnits"]), 4)
+
+    shown = rows[:limit]
+    return {
+        "view": "runs",
+        "runs": shown,
+        "total": len(rows),
+        "shown": len(shown),
+        "truncated": len(rows) > len(shown),
+        "costNote": (
+            "An estimate from recorded usage and declared prices, not from provider billing."
+        ),
+    }

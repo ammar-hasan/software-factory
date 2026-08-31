@@ -1240,6 +1240,10 @@ def dash(
     integration: Annotated[
         list[str] | None, typer.Option("--integration", help="An integration this factory has.")
     ] = None,
+    root: Annotated[
+        Path | None,
+        typer.Option("--root", help="The factory tree. Defaults to the state directory's parent."),
+    ] = None,
 ) -> None:
     """Serve the dashboard from the local ledger.
 
@@ -1262,6 +1266,7 @@ def dash(
         host=host,
         port=port,
         integrations=frozenset(integration or []),
+        root=root,
         ready=lambda url: console.print(f"dashboard on {url}  [dim](ctrl-c to stop)[/]"),
     )
     try:
