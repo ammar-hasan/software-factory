@@ -12,6 +12,7 @@ of the contract:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections import deque
 from contextlib import suppress
@@ -2062,6 +2063,232 @@ def doctor(as_json: JsonOpt = False) -> None:
         if not check["ok"] and check["remediation"]:
             console.print(f"       [dim]{check['remediation']}[/]")
     raise typer.Exit(EXIT_OK if ok else EXIT_FAILED)
+
+
+chat_app = typer.Typer(
+    help="The Slack integration: verify a delivery, replay one locally, check health.",
+    no_args_is_help=True,
+)
+app.add_typer(chat_app, name="chat")
+
+#: Credentials come from the environment, never from a flag.
+#:
+#: A token passed as `--token xoxb-...` is visible to every process on the host through
+#: `ps`, and lands in the shell history of whoever ran it. This codebase already found that
+#: exact leak in the container executor, where secret *values* went on a docker command
+#: line with a test asserting the leak as the requirement. There is no reason to make it
+#: twice.
+SLACK_TOKEN_ENV = "SF_SLACK_BOT_TOKEN"
+SLACK_SECRET_ENV = "SF_SLACK_SIGNING_SECRET"
+
+
+def _slack_credentials(*, require_token: bool) -> Any:
+    from software_factory.integrations import SlackCredentials
+
+    return SlackCredentials(
+        bot_token=os.environ.get(SLACK_TOKEN_ENV, "" if require_token else "unused"),
+        signing_secret=os.environ.get(SLACK_SECRET_ENV, ""),
+        bot_user_id=os.environ.get("SF_SLACK_BOT_USER_ID", ""),
+        team_domain=os.environ.get("SF_SLACK_TEAM_DOMAIN", ""),
+    )
+
+
+@chat_app.command("verify")
+def chat_verify(
+    body: Annotated[Path, typer.Argument(help="File holding the raw request body.")],
+    timestamp: Annotated[str, typer.Option("--timestamp", help="X-Slack-Request-Timestamp.")],
+    signature: Annotated[str, typer.Option("--signature", help="X-Slack-Signature.")],
+    as_json: JsonOpt = False,
+) -> None:
+    """Check one delivery's signature against this workspace's signing secret.
+
+    Verification is over the **raw bytes** of the request, which is why this takes a file
+    rather than parsed JSON: re-serialising a parsed body changes whitespace and key order,
+    so a receiver that verifies `json.dumps(json.loads(body))` rejects every genuine Slack
+    request -- and the failure looks exactly like a wrong secret, so the usual fix is to
+    stop verifying.
+    """
+    from software_factory.integrations import verify_signature
+
+    raw = body.read_bytes()
+    try:
+        verify_signature(
+            signing_secret=os.environ.get(SLACK_SECRET_ENV, ""),
+            timestamp=timestamp,
+            body=raw,
+            signature=signature,
+        )
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    if as_json:
+        _emit({"ok": True, "verified": True, "bytes": len(raw)})
+    else:
+        console.print(f"[green]verified[/] {len(raw)} bytes signed by this workspace's secret")
+    raise typer.Exit(EXIT_OK)
+
+
+@chat_app.command("sign")
+def chat_sign(
+    body: Annotated[Path, typer.Argument(help="File holding the raw request body.")],
+    as_json: JsonOpt = False,
+) -> None:
+    """Print the headers Slack would send for this body.
+
+    So a receiver can be exercised end to end without a workspace. A signing helper that
+    only exists inside a test suite is one the shipped path is never checked against.
+    """
+    from software_factory.integrations.slack import signature_headers
+
+    headers = signature_headers(
+        signing_secret=os.environ.get(SLACK_SECRET_ENV, ""), body=body.read_bytes()
+    )
+    if as_json:
+        _emit({"ok": True, "headers": headers})
+    else:
+        for name, value in headers.items():
+            console.print(f"{name}: {value}")
+    raise typer.Exit(EXIT_OK)
+
+
+@chat_app.command("receive")
+def chat_receive(
+    envelope: Annotated[Path, typer.Argument(help="File holding a Slack event envelope.")],
+    root: Annotated[
+        Path, typer.Option("--root", help="The factory definition directory.")
+    ] = Path(),
+    channel: Annotated[
+        list[str] | None,
+        typer.Option("--channel", help="A channel whose plain messages are requests. Repeatable."),
+    ] = None,
+    as_json: JsonOpt = False,
+) -> None:
+    """Put a saved Slack delivery through intake, with no network at all.
+
+    FR-18.10's local parity, and the way to check a filter without waiting for the message
+    it is meant to catch. Mentions are requests wherever they happen; a plain message is
+    only a request in a channel named with `--channel`, because reading everything in a
+    workspace is a decision an operator makes on purpose.
+    """
+    from software_factory.intake import Ignored, Started
+    from software_factory.intake import Refused as IntakeRefused
+    from software_factory.intake.loading import pipeline_from
+    from software_factory.integrations import SlackAdapter, challenge_for
+
+    try:
+        raw = json.loads(envelope.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        console.print(f"[red]cannot read {envelope}[/]: {exc}")
+        raise typer.Exit(EXIT_UNUSABLE) from exc
+
+    challenge = challenge_for(raw)
+    if challenge is not None:
+        # Not an event. Echoing it is the whole of Slack's URL verification, and treating
+        # it as work would file an item every time somebody re-saved the app config.
+        if as_json:
+            _emit({"ok": True, "challenge": challenge, "startedWork": False})
+        else:
+            console.print(f"[dim]url_verification[/] — echo back: {challenge}")
+        raise typer.Exit(EXIT_OK)
+
+    try:
+        definition = load_strict(root)
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    try:
+        adapter = SlackAdapter(
+            credentials=_slack_credentials(require_token=False),
+            channels=frozenset(channel or []),
+        )
+        event = adapter.normalise(raw)
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    if event is None:
+        if as_json:
+            _emit({"ok": True, "ignored": True, "reason": "not an event this factory acts on"})
+        else:
+            console.print(
+                "[dim]ignored[/] — a bot message, an edit, or a channel this factory does "
+                "not read. Most events are not for this factory; this is not an error."
+            )
+        raise typer.Exit(EXIT_OK)
+
+    outcomes = pipeline_from(definition).receive(event)
+
+    if as_json:
+        _emit(
+            {
+                "ok": True,
+                "event": {
+                    "id": event.id,
+                    "event": event.event,
+                    "title": event.title,
+                    "author": event.author,
+                    "replyTo": event.origin.ref,
+                    "backpressureSource": event.origin.source_key,
+                    "attributes": event.attributes,
+                },
+                "outcomes": [
+                    {
+                        "kind": type(o).__name__.lower(),
+                        "automation": getattr(o, "automation", None),
+                        "agent": getattr(o, "agent", None),
+                        "code": getattr(o, "code", None),
+                        "message": getattr(o, "message", None),
+                        "reason": getattr(o, "reason", None),
+                    }
+                    for o in outcomes
+                ],
+            }
+        )
+        raise typer.Exit(EXIT_OK)
+
+    console.print(f"[bold]{event.event}[/] {event.id}  [dim]from[/] {event.author}")
+    console.print(f"  [dim]title[/]  {event.title}")
+    console.print(f"  [dim]reply[/]  {event.origin.render()}")
+    for outcome in outcomes:
+        if isinstance(outcome, Started):
+            console.print(f"[green]starts[/] {outcome.automation} → agent {outcome.agent}")
+        elif isinstance(outcome, Ignored):
+            console.print(f"[dim]ignored[/] — {outcome.reason}")
+        elif isinstance(outcome, IntakeRefused):
+            console.print(f"[yellow]refused[/] {outcome.code}: {outcome.message}")
+            console.print(f"  [dim]{outcome.remediation}[/]")
+    raise typer.Exit(EXIT_OK)
+
+
+@chat_app.command("health")
+def chat_health(as_json: JsonOpt = False) -> None:
+    """Ask Slack whether this app's token still works.
+
+    Reads `SF_SLACK_BOT_TOKEN` and `SF_SLACK_SIGNING_SECRET` from the environment. This is
+    the one command here that opens a socket; everything else is local.
+    """
+    from software_factory.integrations import SlackAdapter
+
+    try:
+        adapter = SlackAdapter(credentials=_slack_credentials(require_token=True))
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    adapter.authenticate()
+    report = adapter.health()
+
+    if as_json:
+        _emit({"ok": report.accepts_events, "health": report.as_dict()})
+    else:
+        colour = {"healthy": "green", "degraded": "yellow", "unavailable": "red"}
+        console.print(
+            f"[{colour[report.status.value]}]{report.status.value}[/]"
+            f"{'  ' + report.detail if report.detail else ''}"
+        )
+    raise typer.Exit(EXIT_OK if report.accepts_events else EXIT_FAILED)
 
 
 def main() -> None:

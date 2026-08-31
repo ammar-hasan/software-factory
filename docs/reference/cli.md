@@ -28,6 +28,10 @@ cannot be scripted, and PR-2 makes the local path the reference one.
 | `sf explain` | Ask a handed-off work item why it did something (FR-32). |
 | `sf providers` | What each tier will actually call, and whether it can right now. |
 | `sf doctor` | Report what works in this environment and what does not (FR-28.1). |
+| `sf chat health` | Ask Slack whether this app's token still works. |
+| `sf chat receive` | Put a saved Slack delivery through intake, with no network at all. |
+| `sf chat sign` | Print the headers Slack would send for this body. |
+| `sf chat verify` | Check one delivery's signature against this workspace's signing secret. |
 | `sf checkpoints list` | What is waiting on a person, who can clear it, and how overdue it is (FR-16.1). |
 | `sf checkpoints resolve` | Answer a checkpoint as a named principal, recording the decision. |
 | `sf govern classes` | What each persisted class can contain, how long it is kept, and why. |

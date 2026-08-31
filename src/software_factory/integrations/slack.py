@@ -151,24 +151,42 @@ class SlackCredentials:
             f"bot_user_id={self.bot_user_id!r}, team_domain={self.team_domain!r})"
         )
 
-    def check(self) -> None:
-        """Refuse a half-configured adapter at construction rather than at first event.
+    def require_token(self) -> None:
+        """Refuse to reach Slack without a token.
 
-        An adapter with no signing secret verifies nothing, and one that is only discovered
-        to be misconfigured when a real event arrives is discovered by the event.
+        Checked at the point of use rather than at construction. The three things this
+        adapter does need different credentials -- verifying a delivery needs the signing
+        secret, posting needs the bot token, and turning a saved envelope into a factory
+        event needs neither -- so a single construction-time check would either be too
+        weak for the first two or refuse the third. Refusing the third matters: replaying a
+        delivery locally with no network is FR-18.10's local parity, and demanding a
+        workspace credential to do it makes the offline path need the thing it exists to
+        avoid.
         """
         if not self.bot_token.strip():
             raise SlackError(
-                "a Slack adapter needs a bot token",
-                remediation="Set the bot token from the app's OAuth page (it starts `xoxb-`).",
-            )
-        if not self.signing_secret.strip():
-            raise SlackError(
-                "a Slack adapter needs a signing secret",
+                "reaching Slack needs a bot token",
                 remediation=(
-                    "Copy the signing secret from the Slack app's Basic Information page. "
-                    "Without it, request signatures cannot be verified and any caller who "
-                    "learns the webhook URL can start work in this factory."
+                    "Set SF_SLACK_BOT_TOKEN from the app's OAuth page (it starts `xoxb-`). "
+                    "Never pass it as a command-line flag: `ps` shows it to every process "
+                    "on the host."
+                ),
+            )
+
+    def require_secret(self) -> None:
+        """Refuse to sign or verify without a signing secret.
+
+        An empty key produces a valid-looking HMAC, so a signer that shrugs at a missing
+        secret emits signatures nothing can verify, and a verifier that does the same
+        accepts whatever an attacker signs with the empty key.
+        """
+        if not self.signing_secret.strip():
+            raise SlackSignatureError(
+                "verifying a Slack delivery needs the app's signing secret",
+                remediation=(
+                    "Set SF_SLACK_SIGNING_SECRET from the Slack app's Basic Information "
+                    "page. Without it, request signatures cannot be verified and any "
+                    "caller who learns the webhook URL can start work in this factory."
                 ),
             )
 
@@ -264,9 +282,6 @@ class SlackAdapter:
     provider: Provider = field(default=Provider.CHAT, init=False)
     subscribed: frozenset[str] = field(default=frozenset(), init=False)
     _last_error: str = field(default="", init=False)
-
-    def __post_init__(self) -> None:
-        self.credentials.check()
 
     # ------------------------------------------------------------------ the six methods
 
@@ -472,6 +487,7 @@ class SlackAdapter:
 
     def _call(self, method: str, payload: dict[str, Any]) -> Response:
         """One Slack Web API call, with `ok: false` treated as the failure it is."""
+        self.credentials.require_token()
         response = self.transport.post_json(
             f"{self.api_base.rstrip('/')}/{method}",
             headers={
@@ -609,6 +625,12 @@ def signature_headers(
     receiver end to end without a workspace, and a signing helper that only exists in tests
     is one the shipped path is never exercised against.
     """
+    if not signing_secret:
+        # An empty key produces a perfectly valid HMAC that nothing else can reproduce.
+        raise SlackSignatureError(
+            "cannot sign a request without a signing secret",
+            remediation="Set SF_SLACK_SIGNING_SECRET before signing anything.",
+        )
     timestamp = str(int(at if at is not None else time.time()))
     basestring = b"%s:%s:%s" % (SIGNATURE_VERSION.encode(), timestamp.encode(), body)
     digest = hmac.new(signing_secret.encode(), basestring, hashlib.sha256).hexdigest()
