@@ -1916,3 +1916,162 @@ def test_n4_the_loops_own_guards_are_consulted_by_sf_improve(tmp_path) -> None:
     assert after["openProposals"] == 1
     assert after["clusters"][0]["mayPropose"] is False
     assert after["clusters"][0]["refusal"]["code"] == "loop.cooling"
+
+
+# ------------------------------------------------------------- O8, O9, O16, O17
+
+
+def test_o8_a_hosted_model_on_agent_defaults_is_not_offline_capable(tmp_path) -> None:
+    """`_from_model_tiers` read the ladder only, and `agentDefaults` may declare a `model`
+    or a `harness` instead with no ladder at all.
+
+    This is the dangerous case the module docstring names: an egress report that silently
+    omits what it cannot see is worse than none, because it reads as a complete list.
+    """
+    from software_factory.definition.egress import enumerate_egress
+    from software_factory.definition.loader import load_strict
+    from software_factory.scaffold import init_factory
+
+    init_factory(tmp_path, name="ref", owner="amaya", repo="service")
+    path = tmp_path / "factory.yaml"
+    text = path.read_text(encoding="utf-8")
+    text = (
+        text[: text.index("ladder:")]
+        + "agentDefaults:\n  model: some-hosted-model\n  runner: default\n"
+    )
+    path.write_text(text, encoding="utf-8")
+
+    report = enumerate_egress(load_strict(tmp_path))
+
+    assert not report.offline_capable
+    assert report.destinations
+
+
+def test_o9_three_tool_servers_sharing_an_alias_are_three_destinations(tmp_path) -> None:
+    """The report was built from a dict keyed by the *local alias*, so two agents each
+    naming their own server `tools` collapsed to one entry -- two declared destinations
+    vanished with no indeterminate marker and no note.
+
+    `mcpServers` is a per-scope alias; nothing requires two agents to mean the same server.
+    """
+    from software_factory.definition.egress import enumerate_egress
+    from software_factory.definition.loader import load_strict
+    from software_factory.scaffold import init_factory
+
+    init_factory(tmp_path, name="ref", owner="amaya", repo="service")
+    for agent, server_id in (("builder", "builder-only"), ("critic", "critic-only")):
+        agent_path = tmp_path / "agents" / agent / "agent.md"
+        body = agent_path.read_text(encoding="utf-8")
+        head, marker, rest = body.partition("---\n")
+        second, marker2, tail = rest.partition("---\n")
+        agent_path.write_text(
+            head
+            + marker
+            + second
+            + f"mcpServers:\n  tools:\n    id: {server_id}\n"
+            + marker2
+            + tail,
+            encoding="utf-8",
+        )
+
+    report = enumerate_egress(load_strict(tmp_path))
+    targets = " ".join(d.target for d in report.destinations)
+
+    assert "builder-only" in targets
+    assert "critic-only" in targets
+
+
+def test_o16_a_single_enormous_note_is_bounded(tmp_path) -> None:
+    """ "Bounded state" bounded the note *count* and never the note *size*.
+
+    A context window is measured in tokens, not notes, so the budget was denominated in the
+    one unit that does not bind: `render()` is what travels into the next run's prompt, and
+    its size was set by the model, unbounded, with `compact` reporting that nothing needed
+    doing.
+    """
+    from software_factory.definition.models import Stage
+    from software_factory.harness.conversation import ConversationState, Note, NoteKind
+
+    state = ConversationState(work_item_id="wi-1", agent="builder")
+    state.add(
+        Note(
+            kind=NoteKind.OPEN_QUESTION,
+            text="x" * 2_000_000,
+            run_id="run-1",
+            stage=Stage.BUILD,
+        )
+    )
+
+    rendered = state.render()
+
+    assert len(rendered) < 50_000, len(rendered)
+    assert "elided" in rendered
+
+
+def test_o16_compaction_records_the_size_it_saved(tmp_path) -> None:
+    from software_factory.definition.models import Stage
+    from software_factory.harness.conversation import (
+        ConversationState,
+        Note,
+        NoteKind,
+        compact,
+    )
+
+    state = ConversationState(work_item_id="wi-1", agent="builder")
+    for index in range(40):
+        state.add(
+            Note(
+                kind=NoteKind.OPEN_QUESTION,
+                text=f"question {index} " * 100,
+                run_id=f"run-{index}",
+                stage=Stage.BUILD,
+            )
+        )
+
+    record = compact(state, run_id="run-40")
+
+    assert record is not None
+    assert record.characters_removed > 0
+
+
+def test_o17_the_stage_schemas_ask_for_the_notes_the_coordinator_reads(tmp_path) -> None:
+    """`_carry_forward` built DECISION notes from `output["decisions"]` and ATTEMPT notes
+    from `output["attempted"]`, and no stage schema contained either key -- so the model was
+    never asked for them and a schema-conformant response never carried them. Four of the
+    five note kinds were never created."""
+    from software_factory.orchestrator.coordinator import STAGE_SCHEMAS
+
+    asked = {key for schema in STAGE_SCHEMAS.values() for key in schema.get("properties", {})}
+
+    assert "decisions" in asked
+    assert "attempted" in asked
+
+
+def test_o17_all_five_note_kinds_can_be_produced_by_a_conformant_response() -> None:
+    """Behavioural: a response satisfying a stage schema must be able to carry every kind
+    the coordinator reads, or the kinds are decoration."""
+    import jsonschema
+
+    from software_factory.definition.models import Stage
+    from software_factory.harness.conversation import NoteKind
+    from software_factory.orchestrator.coordinator import STAGE_SCHEMAS
+
+    schema = STAGE_SCHEMAS[Stage.BUILD]
+    response = {
+        "summary": "s",
+        "claims": [],
+        "calibration": {},
+        "decisions": ["kept the existing signature"],
+        "attempted": ["tried a decorator; it broke pickling"],
+        "constraints": ["the importer runs under a 30s timeout"],
+        "artifacts": ["branch factory/wi-1"],
+    }
+
+    jsonschema.validate(response, schema)
+    for key, kind in (
+        ("decisions", NoteKind.DECISION),
+        ("attempted", NoteKind.ATTEMPT),
+        ("constraints", NoteKind.CONSTRAINT),
+        ("artifacts", NoteKind.ARTIFACT),
+    ):
+        assert key in schema["properties"], kind

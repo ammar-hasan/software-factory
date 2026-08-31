@@ -78,6 +78,12 @@ from software_factory.spec.units import SpecStore
 
 #: What each role must produce. Downstream stages consume validated structures, never
 #: free prose (HARNESS.md O-1).
+#:
+#: Every stage carries the four carry-forward keys. `_carry_forward` read `decisions` and
+#: `attempted` and no schema asked for either, so the model was never told to produce them
+#: and a schema-conformant response never did: four of the five note kinds were constructed
+#: nowhere, and the only thing a conversation ever carried was calibration unknowns. A
+#: harness that asks for nothing gets nothing.
 STAGE_SCHEMAS: dict[Stage, dict[str, Any]] = {
     Stage.TRIAGE: {
         "type": "object",
@@ -86,6 +92,28 @@ STAGE_SCHEMAS: dict[Stage, dict[str, Any]] = {
             "findings": {"type": "string"},
             "scope": {"type": "string"},
             "open_questions": {"type": "array"},
+            "decisions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Choices made in this stage that a later run must not silently reverse."
+                ),
+            },
+            "attempted": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Approaches tried that did not work, so the next run does not repeat them.",
+            },
+            "constraints": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Facts discovered here that bound what any later stage may do.",
+            },
+            "artifacts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Things produced -- a branch, a file, a checkpoint -- that a later run acts on.",
+            },
             "calibration": {"type": "object"},
         },
     },
@@ -95,6 +123,28 @@ STAGE_SCHEMAS: dict[Stage, dict[str, Any]] = {
         "properties": {
             "plan": {"type": "string"},
             "acceptance": {"type": "array"},
+            "decisions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Choices made in this stage that a later run must not silently reverse."
+                ),
+            },
+            "attempted": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Approaches tried that did not work, so the next run does not repeat them.",
+            },
+            "constraints": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Facts discovered here that bound what any later stage may do.",
+            },
+            "artifacts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Things produced -- a branch, a file, a checkpoint -- that a later run acts on.",
+            },
             "calibration": {"type": "object"},
         },
     },
@@ -104,6 +154,28 @@ STAGE_SCHEMAS: dict[Stage, dict[str, Any]] = {
         "properties": {
             "summary": {"type": "string"},
             "claims": {"type": "array"},
+            "decisions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Choices made in this stage that a later run must not silently reverse."
+                ),
+            },
+            "attempted": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Approaches tried that did not work, so the next run does not repeat them.",
+            },
+            "constraints": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Facts discovered here that bound what any later stage may do.",
+            },
+            "artifacts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Things produced -- a branch, a file, a checkpoint -- that a later run acts on.",
+            },
             "calibration": {"type": "object"},
         },
     },
@@ -113,6 +185,28 @@ STAGE_SCHEMAS: dict[Stage, dict[str, Any]] = {
         "properties": {
             "verdict": {"type": "string"},
             "findings": {"type": "array"},
+            "decisions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Choices made in this stage that a later run must not silently reverse."
+                ),
+            },
+            "attempted": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Approaches tried that did not work, so the next run does not repeat them.",
+            },
+            "constraints": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Facts discovered here that bound what any later stage may do.",
+            },
+            "artifacts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Things produced -- a branch, a file, a checkpoint -- that a later run acts on.",
+            },
             "calibration": {"type": "object"},
         },
     },
@@ -122,6 +216,28 @@ STAGE_SCHEMAS: dict[Stage, dict[str, Any]] = {
         "properties": {
             "verdict": {"type": "string"},
             "evidence": {"type": "array"},
+            "decisions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Choices made in this stage that a later run must not silently reverse."
+                ),
+            },
+            "attempted": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Approaches tried that did not work, so the next run does not repeat them.",
+            },
+            "constraints": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Facts discovered here that bound what any later stage may do.",
+            },
+            "artifacts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Things produced -- a branch, a file, a checkpoint -- that a later run acts on.",
+            },
             "calibration": {"type": "object"},
         },
     },
@@ -136,6 +252,28 @@ STAGE_SCHEMAS: dict[Stage, dict[str, Any]] = {
             "summary": {"type": "string"},
             "branch": {"type": "string"},
             "changeRef": {"type": "string"},
+            "decisions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Choices made in this stage that a later run must not silently reverse."
+                ),
+            },
+            "attempted": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Approaches tried that did not work, so the next run does not repeat them.",
+            },
+            "constraints": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Facts discovered here that bound what any later stage may do.",
+            },
+            "artifacts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Things produced -- a branch, a file, a checkpoint -- that a later run acts on.",
+            },
             "calibration": {"type": "object"},
         },
     },
@@ -706,6 +844,10 @@ class Coordinator:
             conversation.add(Note(kind=NoteKind.DECISION, text=text, run_id=item.id, stage=stage))
         for text in _as_texts(output.get("attempted")):
             conversation.add(Note(kind=NoteKind.ATTEMPT, text=text, run_id=item.id, stage=stage))
+        for text in _as_texts(output.get("constraints")):
+            conversation.add(Note(kind=NoteKind.CONSTRAINT, text=text, run_id=item.id, stage=stage))
+        for text in _as_texts(output.get("artifacts")):
+            conversation.add(Note(kind=NoteKind.ARTIFACT, text=text, run_id=item.id, stage=stage))
         # Calibration unknowns are open questions by construction: the agent said it did not
         # know. Losing them between runs turns an unanswered question into an assumption
         # nobody made deliberately.

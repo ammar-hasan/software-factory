@@ -112,6 +112,7 @@ def enumerate_egress(definition: Definition) -> EgressReport:
     found: list[Destination] = []
     found += _from_runners(definition)
     found += _from_model_tiers(definition)
+    found += _from_direct_engines(definition)
     found += _from_mcp_servers(definition)
     found += _from_integrations(definition)
     return EgressReport(destinations=tuple(sorted(found, key=lambda d: (d.source, d.target))))
@@ -233,11 +234,70 @@ def _from_model_tiers(definition: Definition) -> list[Destination]:
     return found
 
 
-def _from_mcp_servers(definition: Definition) -> list[Destination]:
+def _from_direct_engines(definition: Definition) -> list[Destination]:
+    """Models and harnesses declared without a ladder.
+
+    `agentDefaults` may name a `model` or a `harness` instead of a tier, and a factory in
+    that shape has no ladder at all -- so the tier walk saw nothing and reported
+    `offlineCapable: true` with an empty list. The harness case is the worst version: a
+    definition declaring a managed *secret* for a hosted harness is unambiguous evidence of
+    an outbound call, answered with "this reaches nothing".
+
+    Both are `INDETERMINATE` rather than resolved. A bare model name does not say which
+    provider serves it, and a third-party harness reaches whatever endpoint it was built to
+    reach -- neither is readable from these files, and inventing an address would be the
+    thing this module exists to avoid.
+    """
     found: list[Destination] = []
-    servers: dict[str, Any] = dict(definition.factory.mcp_servers)
+    scopes: list[tuple[str, Any]] = [("agentDefaults", definition.factory.agent_defaults)]
+    scopes += [(f"agent {a.name!r}", a.definition.execution) for a in definition.agents.values()]
+
+    for label, scope in scopes:
+        if scope is None:
+            continue
+        model = getattr(scope, "model", None)
+        harness = getattr(scope, "harness", None)
+        if model:
+            found.append(
+                Destination(
+                    target=f"{model} (model, provider not declared)",
+                    certainty=Certainty.INDETERMINATE,
+                    source=label,
+                    detail=(
+                        "a model named without a tier does not say which provider serves "
+                        "it; declare a ladder to resolve the endpoint"
+                    ),
+                )
+            )
+        if harness:
+            secret = getattr(getattr(harness, "auth", None), "secret_name", "")
+            found.append(
+                Destination(
+                    target=f"{getattr(harness, 'type', 'harness')} (third-party harness)",
+                    certainty=Certainty.INDETERMINATE,
+                    source=label,
+                    detail=(
+                        "a third-party harness reaches whatever endpoint it was built to "
+                        "reach, which is not readable from this definition"
+                        + (f"; it is given the credential {secret!r}" if secret else "")
+                    ),
+                )
+            )
+    return found
+
+
+def _from_mcp_servers(definition: Definition) -> list[Destination]:
+    # Keyed by scope *and* alias. `mcpServers` is a per-scope alias and nothing requires two
+    # agents to mean the same server by `tools` -- so a factory-level entry and two
+    # agent-level ones collapsed into a single destination, and two declared destinations
+    # vanished with no indeterminate marker and no note.
+    found: list[Destination] = []
+    servers: dict[str, Any] = {
+        f"factory:{name}": server for name, server in definition.factory.mcp_servers.items()
+    }
     for agent in definition.agents.values():
-        servers.update(agent.definition.execution.mcp_servers or {})
+        for name, server in (agent.definition.execution.mcp_servers or {}).items():
+            servers[f"agent {agent.name}:{name}"] = server
 
     for name, server in sorted(servers.items()):
         command = getattr(server, "command", None)

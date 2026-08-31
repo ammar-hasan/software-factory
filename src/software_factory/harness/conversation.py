@@ -77,6 +77,19 @@ class Note:
     stage: Stage
     at: datetime = field(default_factory=utc_now)
 
+    def __post_init__(self) -> None:
+        if len(self.text) > NOTE_CHARACTER_BUDGET:
+            # Truncated at construction with the elision stated, the way command output is
+            # capped. A budget in notes bounds nothing when the text comes straight from
+            # model output: `KIND_BUDGET` permits 55 notes of arbitrary length, and a
+            # context window is measured in tokens.
+            elided = len(self.text) - NOTE_CHARACTER_BUDGET
+            object.__setattr__(
+                self,
+                "text",
+                f"{self.text[:NOTE_CHARACTER_BUDGET]}… [{elided} characters elided]",
+            )
+
     def render(self) -> str:
         return f"[{self.kind.value}] {self.text}  ({self.run_id}, {self.stage.value})"
 
@@ -96,6 +109,13 @@ class Compaction:
     notes_after: int
     dropped: tuple[str, ...]
     digest: str
+    characters_removed: int = 0
+    """How much text the compaction actually removed.
+
+    The note count alone does not say whether a compaction helped: dropping twelve
+    one-line notes and dropping one enormous one are the same number and very different
+    outcomes, and the whole reason compaction exists is the size of what travels.
+    """
 
     @property
     def dropped_count(self) -> int:
@@ -113,6 +133,22 @@ class Compaction:
 #: Per kind rather than overall, because the kinds are not interchangeable. Twenty decisions
 #: and no failed attempts is a summary that will send the next run straight back into the
 #: wall the last one hit. Attempts get the largest budget for exactly that reason.
+NOTE_CHARACTER_BUDGET = 800
+"""How much of one note is carried forward.
+
+Long enough for a real constraint or a real failed attempt stated in prose, short enough
+that fifty-five of them do not exceed a context window. The count budget below bounds the
+wrong unit on its own: a single note can be a megabyte, and `render()` is what travels into
+the next run's prompt.
+"""
+
+SUMMARY_CHARACTER_BUDGET = 24_000
+"""The total carried summary. Compaction triggers on this as well as on the counts.
+
+Per-note truncation alone still permits 55 x 800 characters, which is a large fraction of a
+small model's window spent on history rather than on the task.
+"""
+
 KIND_BUDGET: dict[NoteKind, int] = {
     NoteKind.DECISION: 12,
     NoteKind.CONSTRAINT: 10,
@@ -206,10 +242,19 @@ def compact(
         kept.extend(survivors)
         dropped.extend(note.text for note in of_kind[:-limit])
 
+    # A second pass on total size. Counts alone let a conversation inside every per-kind
+    # budget still exceed a window, which is the unit that actually binds.
+    order_for_size = {id(note): index for index, note in enumerate(state.notes)}
+    while sum(len(note.text) for note in kept) > SUMMARY_CHARACTER_BUDGET and len(kept) > 1:
+        oldest = min(kept, key=lambda note: order_for_size[id(note)])
+        kept.remove(oldest)
+        dropped.append(oldest.text)
+
     if not dropped:
         return None
 
     before = len(state.notes)
+    characters_before = sum(len(note.text) for note in state.notes)
     # Restored to the original insertion order, not grouped: `notes` is a log, and a
     # compaction that reordered it would make two states with the same content digest
     # differently while claiming to carry the same thing.
@@ -223,6 +268,7 @@ def compact(
         notes_after=len(state.notes),
         dropped=tuple(dropped),
         digest=state.digest(),
+        characters_removed=characters_before - sum(len(n.text) for n in state.notes),
     )
     state.compactions.append(record)
     return record
