@@ -17,10 +17,13 @@ permissions:
 env:
   PYTHONUNBUFFERED: "1"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # Determinism matters here: pack digests and similarity clustering must not depend on
+  # dict iteration order varying between runs.
+  PYTHONHASHSEED: "0"
 
 jobs:
   lint:
-    name: Lint (ruff)
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,15 +32,14 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
-      - name: Install
-        run: python -m pip install -e ".[dev]"
+      - run: python -m pip install -e ".[dev]"
       - name: ruff check
         run: ruff check --output-format=github .
       - name: ruff format --check
         run: ruff format --check .
 
   typecheck:
-    name: Typecheck (mypy)
+    name: Typecheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,10 +48,8 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
-      - name: Install
-        run: python -m pip install -e ".[dev]"
-      - name: mypy
-        run: mypy
+      - run: python -m pip install -e ".[dev]"
+      - run: mypy
 
   test:
     name: Tests (py${{ matrix.python-version }})
@@ -65,10 +65,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: pyproject.toml
-      - name: Install
-        run: python -m pip install -e ".[dev]"
+      - run: python -m pip install -e ".[dev]"
       - name: pytest
-        run: pytest --cov --cov-report=term-missing --cov-report=xml
+        run: pytest --cov --cov-report=term-missing --cov-report=xml --cov-fail-under=80
       - name: Upload coverage
         if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v4
@@ -76,3 +75,101 @@ jobs:
           name: coverage-xml
           path: coverage.xml
           if-no-files-found: ignore
+
+  determinism:
+    name: Determinism
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: python -m pip install -e ".[dev]"
+      - name: Same inputs must produce the same results under a different hash seed
+        # Awareness pack digests, similarity clustering, and skill ranking all have to be
+        # reproducible. A run that only passes at PYTHONHASHSEED=0 has an ordering bug.
+        run: PYTHONHASHSEED=random pytest -q
+
+  reference-factory:
+    name: Reference factory
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: python -m pip install -e ".[dev]"
+      - name: sf init produces a definition that validates and lints clean
+        # The quickstart uses this tree verbatim. A scaffold that emits warnings teaches
+        # every new user that warnings are normal.
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/reference
+          sf init /tmp/reference --name reference --owner acme --repo service
+          sf validate /tmp/reference
+          sf lint /tmp/reference
+          sf plan /tmp/reference --json > /dev/null
+          sf audit /tmp/reference --json > /dev/null
+      - name: Every schema exports and parses
+        run: |
+          set -euo pipefail
+          for kind in $(sf schema); do
+            sf schema "$kind" | python -c "import json,sys; json.load(sys.stdin)"
+          done
+      - name: sf doctor reports the environment
+        run: sf doctor --json
+
+  offline:
+    name: Offline operation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: python -m pip install -e ".[dev]"
+      - name: The whole test suite runs with no network
+        # Local is the reference implementation, not a degraded mode (PRD PR-2). The
+        # guard blocks connection and name resolution rather than replacing socket.socket,
+        # which ssl subclasses.
+        run: python scripts/run_offline_tests.py
+
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: python -m pip install -e ".[dev]" pip-audit
+      - name: Dependency vulnerabilities
+        run: pip-audit --strict --progress-spinner=off
+      - name: No credential-shaped strings outside the detectors that look for them
+        run: python scripts/check_no_secrets.py
+
+  licenses:
+    name: Licences
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: python -m pip install -e "." pip-licenses
+      - name: Report dependency licences
+        run: pip-licenses --format=markdown --with-urls --order=license
+      - name: Fail on a licence incompatible with Apache-2.0 distribution
+        run: pip-licenses --fail-on="GPL v3;AGPL v3;GPLv3;AGPLv3;SSPL"
