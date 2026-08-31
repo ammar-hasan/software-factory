@@ -136,9 +136,18 @@ class Completion:
 class ProviderError(Exception):
     """A provider could not serve a request. Typed so the loop can decide what to do."""
 
-    def __init__(self, message: str, *, retryable: bool = False) -> None:
+    def __init__(self, message: str, *, retryable: bool = False, status: int | None = None) -> None:
         super().__init__(message)
         self.retryable = retryable
+        self.status = status
+        """The HTTP status, when the failure had one.
+
+        Carried rather than folded into the message. The status is known where the error is
+        built and was thrown away there, so a caller wanting to treat 429 differently from
+        500 -- an integration deciding *degraded* versus *unavailable*, say -- had to match
+        on the text of a human-readable sentence. A caller that parses an error message is
+        a caller that breaks when the message is reworded.
+        """
 
 
 class Provider(ABC):

@@ -506,6 +506,9 @@ INDEX_HTML = r"""<!doctype html>
   .card:hover { border-color: var(--line2); transform: translateY(-1px); }
   .card .k { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); }
   .card .v { font: 600 27px/1.15 var(--mono); letter-spacing: -.02em; margin-top: 6px; }
+  /* An id is a value too, and a stat card sized for "12" clipped `wi_…:handoff:4` to
+     `wi_…:han`. A truncated identifier is worse than a small one: it cannot be copied. */
+  .card .v.long { font-size: 15px; line-height: 1.35; overflow-wrap: anywhere; }
   .card .v small { font-size: 13px; color: var(--dim); font-weight: 500; margin-left: 4px; }
   .card .d { font: 12px/1 var(--mono); margin-top: 7px; color: var(--faint); }
   .d.up { color: var(--green); } .d.down { color: var(--red); } .d.flat { color: var(--faint); }
@@ -550,8 +553,13 @@ INDEX_HTML = r"""<!doctype html>
   .meter i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--cyan), var(--violet)); transition: width .5s cubic-bezier(.22,1,.36,1); }
 
   /* pipeline */
-  .pipe { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(196px, 1fr); gap: 10px; overflow-x: auto; padding-bottom: 8px; }
+  /* auto-fit rather than one scrolling row: the stage a reader most wants -- the last
+     one, where finished work lands -- was the one pushed off the right edge, and a board
+     whose answer is off-screen is a board that answers nothing. Wraps on narrow viewports
+     instead of hiding a column. */
+  .pipe { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 10px; align-items: start; }
   .col { background: var(--panel2); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; min-width: 0; }
+  .col.vacant { opacity: .5; }
   .col > header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; }
   .col h4 { margin: 0; font: 600 11px/1 var(--mono); letter-spacing: .07em; text-transform: uppercase; color: var(--dim); }
   .col .n { font: 11px/1 var(--mono); color: var(--faint); background: var(--raise); border-radius: 999px; padding: 3px 7px; }
@@ -562,7 +570,9 @@ INDEX_HTML = r"""<!doctype html>
   .item:hover { border-color: var(--line2); transform: translateY(-1px); }
   .item.flag { border-color: color-mix(in srgb, var(--amber) 46%, var(--line)); background: color-mix(in srgb, var(--amber) 6%, var(--panel)); }
   .item .t { font-size: 12.5px; font-weight: 550; line-height: 1.4; }
-  .item .m { font: 11px/1.5 var(--mono); color: var(--faint); margin-top: 4px; word-break: break-all; }
+  /* `anywhere`, not `break-all`: an id with no spaces must wrap, and "chore" must not
+     become "cho re". break-all applies to every word regardless of need. */
+  .item .m { font: 11px/1.5 var(--mono); color: var(--faint); margin-top: 4px; overflow-wrap: anywhere; }
   .item .w { font-size: 11.5px; color: var(--amber); margin-top: 5px; }
 
   /* timeline */
@@ -582,8 +592,13 @@ INDEX_HTML = r"""<!doctype html>
   .ev pre {
     margin: 6px 0 0; padding: 9px 11px; background: var(--panel2); border: 1px solid var(--line);
     border-radius: 8px; overflow-x: auto; font: 11.5px/1.55 var(--mono); color: var(--dim);
-    max-height: 220px;
+    max-height: 320px;
   }
+  .ev .sum { font-size: 12.5px; color: var(--dim); margin-top: 2px; }
+  .ev details { margin-top: 5px; }
+  .ev summary { cursor: pointer; font: 11px/1.6 var(--mono); color: var(--faint); width: max-content; }
+  .ev summary:hover { color: var(--accent); }
+  .ev details[open] summary { color: var(--dim); }
 
   .note { color: var(--dim); font-size: 12.5px; margin: 8px 0 0; }
   .unavailable { color: var(--faint); font-style: italic; }
@@ -751,8 +766,10 @@ function delta(v, unit) {
 }
 
 function card(label, value, unit, d, i) {
+  const long = String(value === null || value === undefined ? '' : value).length > 14;
   return `<div class="card" style="--i:${i}"><div class="k">${esc(label)}</div>`
-       + `<div class="v">${esc(value)}${unit ? `<small>${esc(unit)}</small>` : ''}</div>`
+       + `<div class="v${long ? ' long' : ''}">${esc(value)}`
+       + `${unit ? `<small>${esc(unit)}</small>` : ''}</div>`
        + (d === undefined ? '' : d) + `</div>`;
 }
 
@@ -810,7 +827,8 @@ function renderActivity(d) {
   });
 
   const cols = [...byStage.entries()].map(([stage, items]) =>
-    `<div class="col"><header><h4>${esc(stage)}</h4><span class="n">${items.length}</span></header>`
+    `<div class="col ${items.length ? '' : 'vacant'}"><header><h4>${esc(stage)}</h4>`
+    + `<span class="n">${items.length}</span></header>`
     + (items.length ? items.map(w =>
         `<div class="item ${w.needsAttention ? 'flag' : ''}" data-row="${esc((w.id + ' ' + w.title + ' ' + stage).toLowerCase())}">`
         + `<div class="t">${esc(w.title)}</div>`
@@ -871,6 +889,19 @@ function renderRuns(d) {
     + `<p class="note">${esc(d.costNote || '')} Click a row to inspect the run.</p></section>`;
 }
 
+//: The payload fields worth putting on the timeline without opening anything, in the order
+//: a reader looks for them: what happened, then how it went, then what it cost.
+const SUMMARY_KEYS = ['stage', 'agent', 'tier', 'gate', 'outcome', 'status', 'tool',
+                      'verdict', 'costUnits', 'reason', 'blocker', 'action'];
+
+function summarise(payload) {
+  if (!payload || typeof payload !== 'object') return '';
+  const parts = SUMMARY_KEYS
+    .filter(k => payload[k] !== undefined && payload[k] !== null && payload[k] !== '')
+    .map(k => `${esc(k)} <b>${esc(fmt(payload[k]))}</b>`);
+  return parts.length ? `<div class="sum">${parts.join(' &middot; ')}</div>` : '';
+}
+
 function evClass(type) {
   if (/violation|escalation/.test(type)) return 'bad';
   if (/gate|finished/.test(type)) return 'ok';
@@ -885,11 +916,21 @@ function renderRun(d) {
   }).join(' ');
 
   const events = (d.entries || []).map(e => {
+    // A text node, not a string: the inspector returns whole ledger payloads by design,
+    // and JSON.stringify escapes JSON metacharacters rather than HTML ones -- so
+    // `</pre><img src=x onerror=...>` in model output closed the element and ran.
     const pre = document.createElement('pre');
     pre.textContent = JSON.stringify(e.payload, null, 2);
+    // Collapsed by default. Every payload expanded made one run a page nobody scrolls to
+    // the end of, which hides the escalation three screens down as effectively as not
+    // rendering it. The summary carries the fields a reader scans for; the disclosure
+    // keeps the whole record one click away, because a timeline that summarises and
+    // cannot be checked is worse than one that dumps.
     return `<div class="ev ${evClass(e.type)}" data-row="${esc(String(e.type).toLowerCase())}">`
       + `<div class="h"><span class="ty">${esc(e.type)}</span><span class="at">${esc(e.at)}</span>`
-      + `<span class="at">#${esc(e.seq)}</span></div>${pre.outerHTML}</div>`;
+      + `<span class="at">#${esc(e.seq)}</span></div>`
+      + summarise(e.payload)
+      + `<details><summary>payload</summary>${pre.outerHTML}</details></div>`;
   }).join('');
 
   const trouble = [...(d.escalations || []), ...(d.violations || [])];

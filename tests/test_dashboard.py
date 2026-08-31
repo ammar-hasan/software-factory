@@ -502,3 +502,64 @@ def test_the_client_never_asks_the_operator_to_type_a_run_id() -> None:
     from software_factory.observability.dash import INDEX_HTML
 
     assert "prompt(" not in INDEX_HTML
+
+
+def test_one_run_id_retrieves_the_whole_run(tmp_path: Path) -> None:
+    """The record of a run was split across two identifiers that nothing joined.
+
+    `RUN_STARTED` and `RUN_FINISHED` were subjected to the *work item*, while the model
+    calls, tool calls and gates inside the run carried a `run` id in their payload. So the
+    inspector could be handed either id and would answer with half a run: given the run id
+    it showed the calls and never how the run began or ended, and given the work item id it
+    merged every stage of that item together and showed no calls at all.
+
+    Neither answer was empty, which is why nothing caught it -- both looked like a run.
+    """
+    from software_factory.observability.views import run_index
+
+    run = "wi-1:build:2"
+    ledger = ledger_with(
+        tmp_path,
+        # Subjected to the work item, as `harness.sections` needs for precedent, and
+        # carrying the run's own id in the payload.
+        (EntryType.RUN_STARTED, "wi-1", {"agent": "builder", "stage": "BUILD", "run": run}),
+        (EntryType.MODEL_CALLED, "qwen", {"run": run, "costUnits": 0.75}),
+        (EntryType.RUN_FINISHED, "wi-1", {"status": "completed", "run": run}),
+    )
+    entries = list(ledger.read())
+
+    inspected = run_inspector(entries, run)
+    kinds = {e["type"] for e in inspected["entries"]}
+    assert EntryType.RUN_STARTED.value in kinds, "the inspector cannot see how the run began"
+    assert EntryType.RUN_FINISHED.value in kinds, "the inspector cannot see how the run ended"
+    assert inspected["costUnits"] == 0.75
+
+    rows = run_index(entries)["runs"]
+    assert [r["id"] for r in rows] == [run]
+    assert rows[0]["modelCalls"] == 1, "the index found the run but not its calls"
+    assert rows[0]["status"] == "completed"
+
+
+def test_each_stage_of_a_work_item_is_its_own_run(tmp_path: Path) -> None:
+    """Twelve runs must not render as three.
+
+    Keying the index on the ledger subject folded every stage of one work item into one
+    row, so a factory that had done twelve pieces of work reported three -- each with no
+    model calls, because the calls were filed under an id the index was not reading.
+    """
+    from software_factory.observability.views import run_index
+
+    appends = []
+    for stage in ("triage", "build", "review", "handoff"):
+        run = f"wi-1:{stage}:0"
+        appends.append(
+            (EntryType.RUN_STARTED, "wi-1", {"agent": "a", "stage": stage.upper(), "run": run})
+        )
+        appends.append((EntryType.MODEL_CALLED, "qwen", {"run": run, "costUnits": 0.1}))
+        appends.append((EntryType.RUN_FINISHED, "wi-1", {"status": "completed", "run": run}))
+
+    index = run_index(list(ledger_with(tmp_path, *appends).read()))
+
+    assert index["total"] == 4
+    assert {r["stage"] for r in index["runs"]} == {"TRIAGE", "BUILD", "REVIEW", "HANDOFF"}
+    assert all(r["modelCalls"] == 1 for r in index["runs"])

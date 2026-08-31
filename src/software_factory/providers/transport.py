@@ -151,6 +151,7 @@ def _from_status(url: str, status: int, response: Response) -> ProviderError:
     return ProviderError(
         f"{url} returned {status}{': ' + detail if detail else ''}",
         retryable=status in RETRYABLE_STATUS,
+        status=status,
     )
 
 

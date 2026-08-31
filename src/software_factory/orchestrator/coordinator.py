@@ -912,6 +912,16 @@ class Coordinator:
                 "agent": agent_name,
                 "purpose": "work",
                 "workItem": item.id,
+                # The run's own id, which every entry *inside* the run already carries as
+                # `run`. Without it here the record of one run was split across two
+                # identifiers that nothing joined: the lifecycle entries were keyed by work
+                # item, the model calls, tool calls and gates by run -- so the inspector
+                # could be handed either id and would answer with half a run. Asked for the
+                # run id it showed the calls and never how the run began or ended; asked
+                # for the work item it merged every stage into one row with no calls at
+                # all. The subject stays the work item because `harness.sections` queries
+                # precedent by it; this is the join, not a move.
+                "run": run_id,
             },
         )
 
@@ -993,6 +1003,7 @@ class Coordinator:
                 "paths": sorted(workspace.changed_paths()),
                 "unknowns": (run.calibration.unknowns if run.calibration else []),
                 "workItem": item.id,
+                "run": run_id,
                 # What this run wrote down, so a reviewer can ask about the change after the
                 # coordinator has exited (FR-32.1). The conversation objects live in a
                 # process that is gone by the time anyone reads the diff, and reconstructing

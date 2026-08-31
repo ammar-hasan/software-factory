@@ -393,7 +393,13 @@ def run_index(entries: Iterable[LedgerEntry], *, limit: int = RUN_INDEX_LIMIT) -
     for entry in entries:
         payload = entry.payload
         if entry.type is EntryType.RUN_STARTED:
-            run_id = str(entry.subject)
+            # `payload["run"]` first: the lifecycle entries are *subjected* to the work item
+            # (precedent is queried by it), and the run's own id travels in the payload
+            # alongside every model call that references it. Keying on the subject folded
+            # every stage of one work item into a single row -- three rows for twelve runs,
+            # each showing zero model calls, because the calls were filed under an id the
+            # index was not looking at.
+            run_id = str(payload.get("run") or entry.subject)
             runs[run_id] = {
                 "id": run_id,
                 "agent": str(payload.get("agent", "")),
@@ -416,7 +422,7 @@ def run_index(entries: Iterable[LedgerEntry], *, limit: int = RUN_INDEX_LIMIT) -
             continue
 
         if entry.type is EntryType.RUN_FINISHED:
-            row = slot(str(entry.subject), entry.seq)
+            row = slot(str(payload.get("run") or entry.subject), entry.seq)
             if row is None:
                 continue
             row["status"] = str(payload.get("status", "unknown"))
