@@ -10,6 +10,7 @@ states nobody checks.
 from __future__ import annotations
 
 from software_factory.definition.loader import Definition
+from software_factory.definition.models import AuthorTrust
 from software_factory.economics.scheduling import Priority
 from software_factory.identity.loading import directory_from
 from software_factory.intake.pipeline import Automation, Pipeline
@@ -41,10 +42,10 @@ def automations_from(definition: Definition) -> list[Automation]:
                     event=trigger.event,
                     filter=dict(trigger.filter),
                     enabled=declared.enabled,
-                    # FR-18.6: restrictive by default. An automation that accepts anyone is
-                    # a deliberate choice an operator makes by declaring an empty author
-                    # filter, not something they get by not thinking about it.
-                    require_known_author=not _accepts_anyone(dict(trigger.filter)),
+                    # FR-18.6: restrictive by default. Accepting anyone is a declared
+                    # field, so it cannot end up in the match predicate -- which is what
+                    # made the opt-out an attacker-chosen trigger.
+                    require_known_author=trigger.author_trust is AuthorTrust.KNOWN,
                     priority=Priority.NORMAL,
                 )
             )
@@ -57,16 +58,6 @@ def pipeline_from(definition: Definition) -> Pipeline:
         automations=automations_from(definition),
         directory=directory_from(definition),
     )
-
-
-def _accepts_anyone(trigger_filter: dict[str, object]) -> bool:
-    """An automation opts out of author trust by saying so, not by omission.
-
-    ``authorTrust: any`` is the opt-out. Reading an *absent* author filter as "anyone" would
-    make the permissive case the default for every automation nobody thought about, which is
-    exactly backwards for a surface that reads attacker-controlled text.
-    """
-    return str(trigger_filter.get("authorTrust", "")).lower() == "any"
 
 
 def _conductor_name(definition: Definition) -> str:

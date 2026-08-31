@@ -261,9 +261,15 @@ def test_a_provider_with_no_adapter_still_accepts_work() -> None:
 
 
 def test_a_redelivered_event_is_recognised() -> None:
+    """`seen` is a pure query; `record` is the write.
+
+    They used to be one mutating read, which meant an event refused by *anything* after the
+    dedupe check had already been written down as accepted and could never be retried.
+    """
     dedupe = Deduplicator()
 
     assert not dedupe.seen(event())
+    dedupe.record(event())
     assert dedupe.seen(event())
 
 
@@ -272,10 +278,10 @@ def test_the_dedupe_window_expires() -> None:
     leak with a compliance question attached."""
     dedupe = Deduplicator(window=timedelta(hours=1))
     now = utc_now()
-    dedupe.seen(event(), now=now)
+    dedupe.record(event(), now=now)
 
     assert not dedupe.seen(event(), now=now + timedelta(hours=2))
-    assert len(dedupe) == 1
+    assert len(dedupe) == 0
 
 
 # -------------------------------------------------------------------------- pipeline

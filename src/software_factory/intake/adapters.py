@@ -146,13 +146,27 @@ class Deduplicator:
         self._seen: dict[str, datetime] = {}
 
     def seen(self, event: FactoryEvent, *, now: datetime | None = None) -> bool:
-        """True when this event has already been accepted. Records it if not."""
+        """True when this event has already been **accepted**. Does not record.
+
+        A pure query, deliberately. This used to record on first sight, which contradicted
+        its own docstring and made every refusal permanent: an event turned away because an
+        adapter was down or backpressure was engaged had already been written down as
+        accepted, so the retry those refusals ask for came back `intake.redelivered`
+        forever. FR-18.9 promises that work parks rather than being dropped; it was dropped.
+        """
         now = now or utc_now()
         self._expire(now)
-        if event.id in self._seen:
-            return True
+        return event.id in self._seen
+
+    def record(self, event: FactoryEvent, *, now: datetime | None = None) -> None:
+        """Mark this event accepted, so a provider's retry does not start a second run.
+
+        Called once the pipeline has decided to act on the event -- not before, or a refusal
+        the caller is told to retry becomes a refusal they can never get past.
+        """
+        now = now or utc_now()
+        self._expire(now)
         self._seen[event.id] = now
-        return False
 
     def _expire(self, now: datetime) -> None:
         cutoff = now - self.window

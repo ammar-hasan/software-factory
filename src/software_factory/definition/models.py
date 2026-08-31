@@ -396,11 +396,44 @@ class TriggerSchedule(Strict):
     cron: str = Field(min_length=1)
 
 
+class AuthorTrust(enum.StrEnum):
+    """Whether an automation accepts events from authors this factory does not know.
+
+    A declared field rather than a filter key. As a key inside `filter` it was read as
+    policy *and* left in the predicate, so `authorTrust: any` disabled the author check and
+    simultaneously required the event to carry an attribute of that name -- making the
+    automation inert for real traffic and live for anything an event author chose to set.
+    """
+
+    KNOWN = "known"
+    ANY = "any"
+
+
 class Trigger(Strict):
     provider: Name
     event: Name
     filter: dict[str, Any] = Field(default_factory=dict)
+    author_trust: AuthorTrust = Field(default=AuthorTrust.KNOWN, alias="authorTrust")
+    """FR-18.6: restrictive by default. Accepting strangers is chosen, never inherited."""
+
     schedule: TriggerSchedule | None = None
+
+    @model_validator(mode="after")
+    def _author_trust_is_not_a_filter_key(self) -> Self:
+        """Refuse the old spelling rather than silently ignoring it.
+
+        A definition written against the previous behaviour would otherwise keep its
+        `authorTrust` key in the predicate and go on matching nothing, which is the exact
+        silent failure this refusal exists to end.
+        """
+        if any(key.lower() == "authortrust" for key in self.filter):
+            raise ValueError(
+                "`authorTrust` is policy, not a filter predicate; declare it beside "
+                "`filter`, not inside it. Inside the filter it also required the event to "
+                "carry an attribute of that name, so the automation matched only events "
+                "that set it"
+            )
+        return self
 
     @model_validator(mode="after")
     def _schedule_only_on_schedule_provider(self) -> Self:

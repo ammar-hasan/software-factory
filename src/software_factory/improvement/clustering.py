@@ -143,12 +143,20 @@ def cluster_failures(
 
     clusters: list[Cluster] = []
     for signature, members in by_signature.items():
-        for index, group in enumerate(_split(members, split_threshold)):
+        groups = _split(members, split_threshold)
+        for group in groups:
             if len(group) < min_size:
                 continue
             # A split group is still the same structural signature, suffixed so a diagnosis
             # and a cooling period can address one half without silencing the other.
-            key = signature if index == 0 else f"{signature}.{index}"
+            #
+            # The suffix is derived from the group's own members, not from its position in
+            # the split. As an enumeration index it was a property of how the ledger
+            # happened to be read: the same three failures carried `sig` on one read and
+            # `sig.1` on another, so FR-14.6's "a rejected proposal must not return without
+            # new evidence" was defeated by reading the log the other way round -- or by one
+            # extra detail-free failure arriving and re-sorting the groups.
+            key = signature if len(groups) == 1 else f"{signature}.{_group_key(group)}"
             clusters.append(Cluster(signature=key, failures=tuple(group)))
 
     clusters.sort(key=lambda c: (-c.size, -len(c.work_items), c.signature))
@@ -166,13 +174,20 @@ def _split(members: list[Failure], threshold: float) -> list[list[Failure]]:
     if len(detailed) < 2:
         return [members]
 
-    analysed = {f.run_id: analyse(f.detail) for f in detailed}
+    # Sorted before grouping, so the result is a property of the *set* of failures rather
+    # than of the order they arrived in. Single-link grouping is order-sensitive by nature,
+    # and the anti-thrash rule downstream keys on the outcome.
+    detailed = sorted(detailed, key=lambda f: (f.detail, f.run_id, f.work_item_id))
+
+    # Keyed by identity, not by `run_id`: one run can report several failures, and keying
+    # by run made the second overwrite the first, so a cluster could hold two members whose
+    # details had nothing in common.
+    analysed = {id(f): analyse(f.detail) for f in detailed}
     groups: list[list[Failure]] = []
     for failure in detailed:
         for group in groups:
             if any(
-                jaccard_of(analysed[failure.run_id].tokens, analysed[other.run_id].tokens)
-                >= threshold
+                jaccard_of(analysed[id(failure)].tokens, analysed[id(other)].tokens) >= threshold
                 for other in group
             ):
                 group.append(failure)
@@ -184,8 +199,22 @@ def _split(members: list[Failure], threshold: float) -> list[list[Failure]]:
         return [members]
 
     # Detail-free failures join the largest group rather than forming one of their own.
+    # Sorted by a content key rather than by size alone: ties in size were broken by
+    # arrival order, and that order then reached the cluster signature.
     bare = [f for f in members if not f.detail.strip()]
     if bare:
-        groups.sort(key=len, reverse=True)
+        groups.sort(key=lambda g: (-len(g), _group_key(g)))
         groups[0].extend(bare)
     return groups
+
+
+def _group_key(group: list[Failure]) -> str:
+    """A short, content-addressed identifier for a split group.
+
+    Derived from the members themselves so the same members always carry the same key,
+    whatever order they were read in. `run_id` alone is not enough -- one run can produce
+    several failures -- so the work item and gate go in too.
+    """
+    return digest_parts(
+        *sorted(f"{f.run_id}\x00{f.work_item_id}\x00{f.gate}" for f in group), length=8
+    )

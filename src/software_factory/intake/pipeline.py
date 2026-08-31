@@ -200,6 +200,18 @@ class Pipeline:
                     ),
                 )
             )
+
+        if any(isinstance(outcome, Started) for outcome in outcomes):
+            # Recorded only once something actually started. Recording earlier -- as this
+            # used to, inside the `seen` check -- made every refusal permanent: the
+            # `provider_unavailable` and backpressure refusals both tell the caller to
+            # retry, and the retry came back `intake.redelivered` forever.
+            #
+            # An `Ignored` event and an author refusal are deliberately not recorded. Both
+            # are decisions about the *current* configuration, and neither has an effect to
+            # duplicate: if an operator adds the automation or maps the identity, the
+            # provider's next delivery should be able to match.
+            self.deduplicator.record(event, now=now)
         return outcomes
 
     def _author_check(self, event: FactoryEvent, automation: Automation) -> Refused | None:

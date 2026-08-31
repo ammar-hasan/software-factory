@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from software_factory.evals.scorers import ImprovementProposal, ProposalVerdict, Scorer
+from software_factory.identity import Capability, Decision
 from software_factory.improvement.clustering import Cluster
 from software_factory.memory.records import utc_now
 
@@ -387,13 +388,54 @@ def settle(
     proposal_id: str,
     status: ProposalStatus,
     *,
+    decision: Decision,
     outcome_effect: float | None = None,
     now: datetime | None = None,
-) -> ProposalRecord | None:
-    """Move a proposal out of ``open``, optionally recording what adopting it achieved."""
+) -> ProposalRecord | Refused:
+    """Move a proposal out of ``open``, optionally recording what adopting it achieved.
+
+    `decision` is required, and it is not decoration. This used to rewrite a record's status
+    to whatever the caller passed, with no authority and no evidence -- so a REJECTED record
+    could be moved back to OPEN and would vanish from `rejected_signatures()`, taking
+    FR-14.6's anti-thrash rule with it. Every other state change in this codebase carries the
+    identity that made it; this one now does too.
+
+    The capability is `adopt_definition_change` because that is what settling a proposal
+    decides: whether a change the factory proposed about itself goes forward.
+    """
+    if decision.capability is not Capability.ADOPT_DEFINITION_CHANGE:
+        return Refused(
+            "loop.wrong_capability",
+            f"{decision.principal_id!r} exercised {decision.capability.value}, which does "
+            "not authorise settling an improvement proposal",
+            "Settle it with `adopt_definition_change`, or leave it open.",
+        )
+    if decision.subject != proposal_id:
+        return Refused(
+            "loop.wrong_subject",
+            f"the decision names {decision.subject or 'nothing'!r}, not {proposal_id!r}",
+            "A decision settles one proposal. Authorise this one by name.",
+        )
+
     for index, record in enumerate(state.records):
         if record.id != proposal_id:
             continue
+        reopening = (
+            record.status is ProposalStatus.REJECTED and status is not ProposalStatus.REJECTED
+        )
+        # Reopening a rejection is the move that erases the anti-thrash record, so it is the
+        # one that has to be visible. Allowed, but never silent.
+        if reopening and not decision.evidence_shown:
+            return Refused(
+                "loop.reopen_without_evidence",
+                f"{proposal_id!r} was rejected; reopening it needs the new evidence "
+                "that makes the answer different",
+                (
+                    "Cite the failures the rejected proposal did not cover, or a "
+                    "different diagnosis. Reopening with none re-asks a question that "
+                    "was already answered."
+                ),
+            )
         settled = ProposalRecord(
             id=record.id,
             target=record.target,
@@ -407,7 +449,11 @@ def settle(
         )
         state.records[index] = settled
         return settled
-    return None
+    return Refused(
+        "loop.unknown_proposal",
+        f"no proposal {proposal_id!r} is on record",
+        "Check the id; `sf improve` lists the open proposals.",
+    )
 
 
 def _record(

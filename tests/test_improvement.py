@@ -13,6 +13,7 @@ from datetime import timedelta
 import pytest
 
 from software_factory.evals.scorers import ImprovementProposal, Label, ProposalVerdict, Scorer
+from software_factory.identity import Capability, Decision
 from software_factory.improvement import (
     Cluster,
     Failure,
@@ -31,6 +32,22 @@ from software_factory.improvement import (
     telemetry,
 )
 from software_factory.memory.records import utc_now
+
+
+def adoption(proposal_id: str, *, evidence: tuple[str, ...] = ()) -> Decision:
+    """The decision `settle` now requires.
+
+    Settling a proposal decides whether a change the factory proposed about *itself* goes
+    forward, so it carries the identity that decided -- like every other state change here.
+    """
+    return Decision(
+        principal_id="amaya",
+        capability=Capability.ADOPT_DEFINITION_CHANGE,
+        subject=proposal_id,
+        rationale="reviewed and settled",
+        evidence_shown=evidence,
+    )
+
 
 # --------------------------------------------------------------------------- clustering
 
@@ -462,8 +479,8 @@ def test_telemetry_counts_every_outcome() -> None:
         scorer_name="s",
         signature="c",
     )
-    settle(state, "p1", ProposalStatus.ADOPTED, outcome_effect=0.05)
-    settle(state, "p2", ProposalStatus.REVERTED)
+    settle(state, "p1", ProposalStatus.ADOPTED, decision=adoption("p1"), outcome_effect=0.05)
+    settle(state, "p2", ProposalStatus.REVERTED, decision=adoption("p2"))
 
     numbers = telemetry(state)
 
@@ -474,5 +491,27 @@ def test_telemetry_counts_every_outcome() -> None:
     assert numbers.as_dict()["adoptionRate"] == 0.5
 
 
-def test_settling_an_unknown_proposal_returns_nothing() -> None:
-    assert settle(LoopState(), "missing", ProposalStatus.ADOPTED) is None
+def test_settling_an_unknown_proposal_says_so() -> None:
+    """A refusal rather than `None`: "nothing happened" and "no such proposal" are
+    different answers, and only one of them names what to do about it."""
+    result = settle(LoopState(), "missing", ProposalStatus.ADOPTED, decision=adoption("missing"))
+
+    assert isinstance(result, Refused)
+    assert result.code == "loop.unknown_proposal"
+
+
+def test_settling_needs_the_capability_that_decides_adoption() -> None:
+    result = settle(
+        LoopState(),
+        "p1",
+        ProposalStatus.ADOPTED,
+        decision=Decision(
+            principal_id="amaya",
+            capability=Capability.ANSWER_QUESTION,
+            subject="p1",
+            rationale="looks fine",
+        ),
+    )
+
+    assert isinstance(result, Refused)
+    assert result.code == "loop.wrong_capability"
