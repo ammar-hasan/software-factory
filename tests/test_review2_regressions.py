@@ -9,6 +9,7 @@ keystone gate has not built the gate, it has described one.
 from __future__ import annotations
 
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
@@ -737,3 +738,242 @@ def test_i2_a_checkpoint_is_opened_when_a_block_needs_a_person(tmp_path) -> None
     )
 
     assert book.routable_to(opened.id) == ["amaya"]
+
+
+# ------------------------------------------------------------------- O10, O11, O12
+
+
+def dashboard(tmp_path, *entries):
+    """A running dashboard over a ledger, and a function to GET from it."""
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    from software_factory.ledger import Ledger
+    from software_factory.observability.dash import DashboardData, make_handler
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    for entry_type, actor, subject, payload in entries:
+        ledger.append(entry_type, actor=actor, subject=subject, payload=payload)
+
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0), make_handler(DashboardData(ledger_path=ledger.path))
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def get(path: str):
+        url = f"http://127.0.0.1:{server.server_address[1]}{path}"
+        try:
+            with urllib.request.urlopen(url, timeout=5) as response:
+                return response.status, dict(response.headers), response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            # A 4xx is a result here, not an exception: the whole point is that the server
+            # answers rather than dropping the connection.
+            return exc.code, dict(exc.headers), exc.read().decode("utf-8")
+
+    return get, server
+
+
+def test_o10_a_nonsense_window_is_a_structured_error_not_a_dropped_connection(tmp_path) -> None:
+    """`?days=abc` dumped a traceback into the terminal the operator was watching and
+    returned no response at all -- the exact outcome `log_message` was overridden to
+    prevent."""
+    import json
+
+    get, server = dashboard(tmp_path)
+    try:
+        status, _headers, body = get("/api/overview?days=abc")
+    finally:
+        server.shutdown()
+
+    assert status == 400
+    assert json.loads(body)["error"] == "days.invalid"
+
+
+def test_o10_an_inverted_window_is_refused_rather_than_rendered_as_an_empty_factory(
+    tmp_path,
+) -> None:
+    """The serious one: `?days=-1` returned HTTP 200 with a window whose start was after its
+    end, so `Window.contains` was false for every entry and a busy factory rendered as
+    `runs=0` with everything else `insufficient_data`. The dashboard renders the window
+    nowhere, so nothing on the page would have hinted at it."""
+    import json
+
+    get, server = dashboard(tmp_path)
+    try:
+        negative = get("/api/overview?days=-1")
+        huge = get("/api/overview?days=99999999")
+    finally:
+        server.shutdown()
+
+    assert negative[0] == 400 and json.loads(negative[2])["error"] == "days.invalid"
+    assert huge[0] == 400 and json.loads(huge[2])["error"] == "days.invalid"
+
+
+def test_o11_the_policy_permits_the_pages_own_fetch(tmp_path) -> None:
+    """There was no `connect-src`, so it fell back to `default-src 'none'` and blocked
+    `fetch` -- the page's only data path. The dashboard's entire client was inert, and the
+    test suite could not notice because it checked the HTML for external URLs and never
+    checked the page could reach its own API."""
+    get, server = dashboard(tmp_path)
+    try:
+        _status, headers, _body = get("/")
+    finally:
+        server.shutdown()
+
+    policy = headers["Content-Security-Policy"]
+    assert "connect-src 'self'" in policy
+
+
+def test_o11_the_policy_does_not_permit_injected_inline_handlers(tmp_path) -> None:
+    """`script-src 'unsafe-inline'` is the one directive that would have contained the
+    injection in O12: inline handlers on injected elements are governed by `script-src`."""
+    get, server = dashboard(tmp_path)
+    try:
+        _status, headers, _body = get("/")
+    finally:
+        server.shutdown()
+
+    policy = headers["Content-Security-Policy"]
+    assert "'unsafe-inline'" not in policy.split("script-src")[1].split(";")[0]
+    assert "sha256-" in policy
+    assert "base-uri 'none'" in policy
+
+
+def test_o12_hostile_model_output_cannot_close_the_element_it_is_rendered_into(
+    tmp_path,
+) -> None:
+    """The ledger's payloads are full of text from outside the trust boundary -- model
+    output, work-item titles from intake, command stderr -- and `run_inspector` returns
+    whole payloads by design. The run view concatenated them into `innerHTML`."""
+    from software_factory.observability.dash import INDEX_HTML
+
+    # The fix is structural: nothing may reach innerHTML without passing through the
+    # escaper, and the run view builds a text node instead of a string.
+    assert "function esc(" in INDEX_HTML
+    assert "innerHTML = '<pre>'" not in INDEX_HTML
+    assert "textContent = JSON.stringify" in INDEX_HTML
+    for interpolation in ("${m.name}", "${m.reason}", "${w.id}", "${w.title}", "${w.why"):
+        assert interpolation not in INDEX_HTML, interpolation
+
+
+# --------------------------------------------------------------- O4, O13, O14, O15
+
+
+def sandbox(tmp_path, **kwargs):
+    from software_factory.runtime.executor import SandboxPolicy
+
+    return SandboxPolicy(workspace=tmp_path, wall_clock_s=60, **kwargs)
+
+
+def test_o15_a_bare_image_name_is_not_pinned(tmp_path) -> None:
+    """`ContainerImage("ubuntu")` is `ubuntu:latest` to every runtime -- the exact case the
+    class docstring says it refuses.
+
+    `rpartition(":")` on a reference with no colon returns the image name as the "tag", so
+    the check tested the wrong string. It caught `ghcr.io/acme/builder` only because that
+    shape happens to put a slash in the would-be tag: an accident, not the property.
+    """
+    from software_factory.runtime.executors import ContainerImage
+
+    for bare in ("ubuntu", "python", "node", "alpine", "registry.local:5000/app"):
+        with pytest.raises(ValueError, match="pinned"):
+            ContainerImage(bare)
+
+
+def test_o15_a_real_pin_is_still_accepted() -> None:
+    from software_factory.runtime.executors import ContainerImage
+
+    for pinned in (
+        "ghcr.io/acme/builder:1.0",
+        "registry.local:5000/app:1.2",
+        "python@sha256:" + "a" * 64,
+    ):
+        ContainerImage(pinned)
+
+
+def test_o14_the_container_executor_enforces_the_cwd_guard(tmp_path) -> None:
+    """The same call was an `ExecutorError` locally and a normal run in a container.
+
+    `run` passed the caller's cwd to `--workdir` and then called the inner executor with
+    the *workspace*, so the guard was evaluated against a value it was not guarding.
+    """
+    from software_factory.runtime.executor import ExecutorError
+    from software_factory.runtime.executors import ContainerExecutor, ContainerImage
+
+    executor = ContainerExecutor(
+        sandbox(tmp_path),
+        ContainerImage("ghcr.io/acme/builder:1.0"),
+        runtime="/usr/bin/docker",
+        probe_runtime=False,
+    )
+
+    with pytest.raises(ExecutorError, match="writable paths"):
+        executor.run(["pytest"], cwd=Path("/etc"))
+
+
+def test_o14_the_ssh_worker_enforces_the_cwd_guard(tmp_path) -> None:
+    """Worse here: the worker is a real machine the factory does not confine."""
+    from software_factory.definition.models import NetworkPolicy
+    from software_factory.runtime.executor import ExecutorError
+    from software_factory.runtime.executors import SshWorkerExecutor
+
+    executor = SshWorkerExecutor(
+        sandbox(tmp_path, network=NetworkPolicy.OPEN),
+        host="worker.internal",
+        remote_workspace="/srv/factory",
+        ssh="/usr/bin/ssh",
+    )
+
+    with pytest.raises(ExecutorError, match="writable paths"):
+        executor.run(["pytest"], cwd=Path("/etc"))
+
+
+def test_o13_the_ssh_worker_refuses_to_silently_drop_declared_secrets(tmp_path) -> None:
+    """It built `ssh host -- "cd ... && cmd"` with no SendEnv, no SetEnv, and no assignment.
+
+    OpenSSH forwards nothing by default, so the remote command ran with the worker's login
+    environment. A command reading a declared secret got an empty variable and failed with
+    an authentication error attributed to the credential rather than to the executor --
+    "quietly do something else" is the one option this module's thesis forbids.
+    """
+    from software_factory.runtime.executor import ExecutorError
+    from software_factory.runtime.executors import SshWorkerExecutor
+
+    with pytest.raises(ExecutorError, match="secret"):
+        SshWorkerExecutor(
+            sandbox(tmp_path, secrets={"SF_TOKEN": "sk-live"}),
+            host="worker.internal",
+            remote_workspace="/srv/factory",
+            ssh="/usr/bin/ssh",
+        )
+
+
+def test_o4_a_binary_with_no_daemon_is_not_a_container_runtime(tmp_path) -> None:
+    """Presence is not capability -- the mistake this project keeps finding.
+
+    `_detect_runtime` returned whatever `shutil.which` found, so the executor constructed
+    and then reported the *caller's* command as having failed: `run` rewrites
+    `command=tuple(command)` before returning, so a gate reading the result sees
+    `echo hello` exiting 1 rather than "there is no container runtime". A run that never
+    executed anywhere was indistinguishable from a run whose command failed.
+    """
+    from software_factory.runtime.executor import ExecutorError
+    from software_factory.runtime.executors import ContainerExecutor, ContainerImage
+
+    with pytest.raises(ExecutorError, match="daemon is not reachable"):
+        ContainerExecutor(
+            sandbox(tmp_path),
+            ContainerImage("ghcr.io/acme/builder:1.0"),
+            runtime="/bin/false",
+        )
+
+
+def test_o4_the_probe_is_what_test_parity_already_knew_to_do() -> None:
+    """The right check existed in the test file and not in the code it tested."""
+    from software_factory.runtime.executors import _daemon_reachable
+
+    assert _daemon_reachable("/bin/false") is False
+    assert _daemon_reachable("/nonexistent/binary") is False

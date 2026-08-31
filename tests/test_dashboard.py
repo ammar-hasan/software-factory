@@ -11,6 +11,7 @@ import json
 import threading
 from datetime import timedelta
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import urlopen
 
 import pytest
@@ -243,18 +244,23 @@ def test_the_dashboard_serves_the_overview_as_json(dashboard: str) -> None:
 
 
 def test_an_unknown_view_lists_the_ones_that_exist(dashboard: str) -> None:
-    with urlopen(f"{dashboard}/api/nonsense") as response:
-        body = json.loads(response.read())
+    """404, not 200. A structured error returned as success is one a caller has to inspect
+    to notice."""
+    with pytest.raises(HTTPError) as caught:
+        urlopen(f"{dashboard}/api/nonsense")
 
+    assert caught.value.code == 404
+    body = json.loads(caught.value.read())
     assert body["error"] == "view.unknown"
     assert "overview" in body["views"]
 
 
 def test_the_run_view_requires_a_run_id(dashboard: str) -> None:
-    with urlopen(f"{dashboard}/api/run") as response:
-        body = json.loads(response.read())
+    with pytest.raises(HTTPError) as caught:
+        urlopen(f"{dashboard}/api/run")
 
-    assert body["error"] == "run.missing"
+    assert caught.value.code == 400
+    assert json.loads(caught.value.read())["error"] == "run.missing"
 
 
 def test_the_activity_view_says_why_it_is_empty(dashboard: str) -> None:

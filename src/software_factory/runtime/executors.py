@@ -21,6 +21,7 @@ notice -- a secret leaking on one runner and not another.
 from __future__ import annotations
 
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -66,8 +67,16 @@ class ContainerImage:
     def __post_init__(self) -> None:
         if "@sha256:" in self.reference:
             return
-        tag = self.reference.rpartition(":")[2]
-        if not tag or tag == "latest" or "/" in tag:
+        # The tag lives in the last path component, and only there. A registry host may
+        # carry a port -- `registry.local:5000/app` -- so splitting the whole reference on
+        # the last colon reads that port as a tag. And a reference with no colon at all
+        # used to yield the *image name* as its tag: `ubuntu` was accepted as pinned, which
+        # is `ubuntu:latest` to every runtime and the exact case this class exists to
+        # refuse. The old check caught `ghcr.io/acme/builder` only because that shape puts
+        # a slash in the would-be tag -- an accident of the example, not the property.
+        last = self.reference.rpartition("/")[2]
+        name, separator, tag = last.partition(":")
+        if not separator or not tag or tag == "latest" or not name:
             raise ValueError(
                 f"{self.reference!r} is not pinned; use a digest (image@sha256:...) or at "
                 "least an explicit version tag. `latest` is a different image on different "
@@ -77,6 +86,43 @@ class ContainerImage:
     @property
     def pinned_by_digest(self) -> bool:
         return "@sha256:" in self.reference
+
+
+def _guard_cwd(policy: SandboxPolicy, cwd: Path | None) -> None:
+    """Refuse a working directory outside the run's writable paths.
+
+    The local executor has enforced this all along; the other two did not, so the same call
+    was an `ExecutorError` on one and a normal run on another. FR-20.5's parity requirement
+    is exactly the claim that cannot survive that, and a gate or tool relying on the refusal
+    would behave differently depending on where the run happened to execute.
+    """
+    if cwd is None:
+        return
+    if not policy.is_writable(cwd):
+        raise ExecutorError(
+            f"{cwd} is outside the run's writable paths",
+            remediation=(
+                "Run inside the workspace, or declare the path in `writablePaths`. A "
+                "working directory outside the contract is outside the blast radius the "
+                "run was reviewed against."
+            ),
+        )
+
+
+def _remote_path(policy: SandboxPolicy, remote_workspace: str, cwd: Path | None) -> str:
+    """Translate a local workspace path onto the worker.
+
+    A *local* absolute path was being sent as a *remote* working directory, and nothing
+    mapped one onto the other. On a worker whose checkout lives somewhere else that is a
+    `cd` into a directory that does not exist, reported as the command failing.
+    """
+    if cwd is None:
+        return remote_workspace
+    try:
+        relative = cwd.resolve().relative_to(policy.workspace.resolve())
+    except ValueError:
+        return remote_workspace
+    return remote_workspace if str(relative) == "." else f"{remote_workspace}/{relative}"
 
 
 class ContainerExecutor:
@@ -102,10 +148,15 @@ class ContainerExecutor:
         *,
         runtime: str | None = None,
         user: str = "1000:1000",
+        probe_runtime: bool = True,
     ) -> None:
         self.policy = policy
         self.image = image
         self.user = user
+        # An explicit runtime is validated the same way, except when the caller is a test
+        # asserting on the argv this builds rather than running anything. `probe_runtime`
+        # is how that is said out loud: a test that had to reach through a private name to
+        # avoid a daemon probe would have made the probe untestable.
         self.runtime = runtime or _detect_runtime()
         if self.runtime is None:
             raise ExecutorError(
@@ -114,6 +165,16 @@ class ContainerExecutor:
                     "Install docker or podman, or set `executor: local` and accept the "
                     "weaker isolation deliberately. A factory that declares `container` and "
                     "silently runs locally has lost the isolation it declared."
+                ),
+            )
+        if runtime is not None and probe_runtime and not _daemon_reachable(runtime):
+            raise ExecutorError(
+                f"{runtime} is present but its daemon is not reachable",
+                remediation=(
+                    "Start the container daemon, or set `executor: local` and accept the "
+                    "weaker isolation deliberately. Constructing anyway would report the "
+                    "run's own command as having failed, which hides that the isolation "
+                    "the factory declared was never applied."
                 ),
             )
         if policy.network is NetworkPolicy.ALLOWLIST:
@@ -134,6 +195,11 @@ class ContainerExecutor:
     def run(
         self, command: list[str], *, timeout_s: int | None = None, cwd: Path | None = None
     ) -> CommandResult:
+        # Guarded here, against the value being guarded. The inner executor checks the cwd
+        # it is *given*, and it is given the workspace -- so the caller's cwd went straight
+        # to `--workdir` unchecked, and the same call was an error locally and a normal run
+        # in a container. Parity is the claim; this is where it was false.
+        _guard_cwd(self.policy, cwd)
         wrapped = self._wrap(command, cwd=cwd)
         result = self._inner.run(wrapped, timeout_s=timeout_s, cwd=self.policy.workspace)
         # Report the command the caller asked for, not the runtime invocation. A transcript
@@ -219,6 +285,26 @@ class SshWorkerExecutor:
             "StrictHostKeyChecking=yes",
         ),
     ) -> None:
+        if policy.secrets:
+            # OpenSSH forwards no environment by default, this executor sets no `SendEnv`
+            # or `SetEnv`, and it prefixes no assignment to the remote command -- so a
+            # declared secret simply did not exist on the worker. A command reading it got
+            # an empty variable and failed with an authentication error attributed to the
+            # credential rather than to the executor.
+            #
+            # Refusing rather than forwarding, because the alternatives are worse: `env
+            # NAME=value` on the remote command line reproduces the `ps` exposure this
+            # module fixed for containers, and a temporary file over the connection is a
+            # secret written to a disk the factory does not control or clean up.
+            raise ExecutorError(
+                f"the ssh worker cannot carry {len(policy.secrets)} declared secret(s) to {host!r}",
+                remediation=(
+                    "Configure the worker's own environment with these values, and remove "
+                    "them from the run's `secrets`. This executor does not confine the "
+                    "worker and cannot deliver a secret to it without writing the value "
+                    "somewhere the factory does not control."
+                ),
+            )
         self.policy = policy
         self.host = host
         self.remote_workspace = remote_workspace
@@ -254,7 +340,8 @@ class SshWorkerExecutor:
     def run(
         self, command: list[str], *, timeout_s: int | None = None, cwd: Path | None = None
     ) -> CommandResult:
-        remote_cwd = str(cwd) if cwd else self.remote_workspace
+        _guard_cwd(self.policy, cwd)
+        remote_cwd = _remote_path(self.policy, self.remote_workspace, cwd)
         # `--` then the argument vector: ssh joins its arguments into a shell command on the
         # remote side, so a path containing a space would otherwise become two arguments.
         # Quoting each part is the difference between running one command and running
@@ -313,12 +400,44 @@ def cloud_executor(
     )
 
 
+DAEMON_PROBE_TIMEOUT_S = 10.0
+
+
 def _detect_runtime() -> str | None:
+    """The first container runtime with a *reachable daemon*, or None.
+
+    Presence is not capability. `shutil.which` alone returns a binary whose daemon may be
+    unreachable -- normal inside a container -- and this executor then constructed happily
+    and reported the *caller's* command as having failed, because `run` rewrites
+    `command=tuple(command)` before returning. A gate reading that result sees `echo hello`
+    exiting 1, not "there is no container runtime": a run that never executed anywhere is
+    indistinguishable from a run whose command failed, and nothing says the isolation the
+    factory declared was never applied.
+
+    The project already knew the right check and had it in `tests/test_parity.py`, whose
+    own docstring names the alternative as "precisely the 'presence is not capability'
+    mistake the whole project keeps finding elsewhere" -- while the code under test made
+    exactly that mistake.
+    """
     for candidate in ("docker", "podman"):
         found = shutil.which(candidate)
-        if found:
+        if found and _daemon_reachable(found):
             return found
     return None
+
+
+def _daemon_reachable(runtime: str) -> bool:
+    """Whether this runtime can actually run anything right now."""
+    try:
+        probe = subprocess.run(
+            [runtime, "info"],
+            capture_output=True,
+            timeout=DAEMON_PROBE_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0
 
 
 def _shell_quote(part: str) -> str:

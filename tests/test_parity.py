@@ -96,6 +96,10 @@ def structural_executors(tmp_path: Path) -> dict[str, Executor]:
         policy(tmp_path),
         ContainerImage("ghcr.io/acme/builder:1.0"),
         runtime=RUNTIME or "/usr/bin/docker",
+        # This test asserts on the *shape* of the executor, not on running anything, so it
+        # must construct on a machine with no daemon. The tests below that actually run a
+        # command are the ones gated on `_working_runtime()`.
+        probe_runtime=False,
     )
     executors["ssh-worker"] = SshWorkerExecutor(
         policy(tmp_path, network=NetworkPolicy.OPEN),

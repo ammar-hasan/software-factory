@@ -15,6 +15,8 @@ binds to loopback and serves what the ledger already contains.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -47,9 +49,17 @@ class DashboardData:
     integrations: frozenset[str] = frozenset()
 
     def payload(self, view: str, params: dict[str, list[str]]) -> dict[str, Any]:
+        days = _days_from(params)
+        if days is None:
+            return {
+                "error": "days.invalid",
+                "message": (
+                    f"`days` must be a whole number between 1 and {MAX_WINDOW_DAYS}; "
+                    f"got {params.get('days', [''])[0]!r}"
+                ),
+            }
         ledger = Ledger(self.ledger_path)
         entries = list(ledger.read())
-        days = int(params.get("days", ["7"])[0])
         window = Window.last(timedelta(days=days))
 
         match view:
@@ -80,6 +90,44 @@ class DashboardData:
                 }
 
 
+MAX_WINDOW_DAYS = 3650
+"""Ten years. Long enough for any real question, short enough that `timedelta` cannot
+overflow -- `?days=99999999` used to raise `OverflowError` out of `Window.last` and drop
+the connection with no response."""
+
+
+def _days_from(params: dict[str, list[str]]) -> int | None:
+    """The requested window in days, or None when the request does not name a usable one.
+
+    A negative value was the dangerous case: it produced HTTP 200 and a window whose start
+    was *after* its end, so `Window.contains` was false for every entry and a fully
+    populated factory rendered as `runs=0` with everything else `insufficient_data`. The
+    dashboard renders the window nowhere, so nothing on the page hinted at it.
+    """
+    raw = params.get("days", ["7"])[0]
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if days < 1 or days > MAX_WINDOW_DAYS:
+        return None
+    return days
+
+
+def _script_hash(html: str) -> str:
+    """The CSP hash of the page's one inline script.
+
+    Computed from the document rather than pasted beside it, because a hash written by hand
+    goes stale the first time the script changes -- and a stale hash means the page silently
+    stops working, which is the failure mode a CSP is most often blamed for and least often
+    guilty of.
+    """
+    start = html.index("<script>") + len("<script>")
+    end = html.index("</script>", start)
+    digest = hashlib.sha256(html[start:end].encode("utf-8")).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
 def make_handler(data: DashboardData) -> type[BaseHTTPRequestHandler]:
     """Build a request handler bound to one dashboard's data.
 
@@ -99,8 +147,19 @@ def make_handler(data: DashboardData) -> type[BaseHTTPRequestHandler]:
                 return
             if parsed.path.startswith("/api/"):
                 view = parsed.path.removeprefix("/api/").strip("/") or "overview"
-                body = json.dumps(data.payload(view, params), indent=2, default=str)
-                self._respond(200, "application/json; charset=utf-8", body.encode("utf-8"))
+                try:
+                    result = data.payload(view, params)
+                except Exception as exc:
+                    # A traceback into the operator's terminal and no response at all is
+                    # the outcome `log_message` was overridden to prevent. An error the
+                    # page can render is strictly better than a dropped connection.
+                    result = {
+                        "error": "view.failed",
+                        "message": f"{type(exc).__name__} while building {view!r}",
+                    }
+                status = _status_for(result)
+                body = json.dumps(result, indent=2, default=str)
+                self._respond(status, "application/json; charset=utf-8", body.encode("utf-8"))
                 return
             self._respond(404, "text/plain; charset=utf-8", b"not found")
 
@@ -112,16 +171,46 @@ def make_handler(data: DashboardData) -> type[BaseHTTPRequestHandler]:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
-            # No external anything: the page loads no scripts, fonts, or styles from
-            # elsewhere, which is what makes it work on a machine with no network.
+            # `connect-src 'self'` because without it the directive falls back to
+            # `default-src 'none'` and blocks the page's own fetch -- the only data path it
+            # has, so the whole client was inert under an enforcing browser.
+            #
+            # `script-src` names the hash of the one inline script rather than
+            # `'unsafe-inline'`. Inline handlers on *injected* elements are governed by
+            # `script-src` too, so `'unsafe-inline'` disabled the single protection that
+            # matters here: this page renders text that came from a model.
             self.send_header(
                 "Content-Security-Policy",
-                "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'",
+                (
+                    "default-src 'none'; "
+                    "connect-src 'self'; "
+                    "style-src 'unsafe-inline'; "
+                    f"script-src 'sha256-{SCRIPT_HASH}'; "
+                    "base-uri 'none'; "
+                    "form-action 'none'"
+                ),
             )
             self.end_headers()
             self.wfile.write(body)
 
     return Handler
+
+
+def _status_for(result: dict[str, Any]) -> int:
+    """HTTP status from the payload's own error code.
+
+    A structured error returned as 200 is one a caller has to inspect to notice, and the
+    inverted-window bug was exactly that: a successful-looking response describing an empty
+    factory that was not empty.
+    """
+    error = result.get("error")
+    if error in ("days.invalid", "run.missing"):
+        return 400
+    if error == "view.unknown":
+        return 404
+    if error == "view.failed":
+        return 500
+    return 200
 
 
 def serve(
@@ -182,48 +271,76 @@ INDEX_HTML = """<!doctype html>
 <script>
 const content = document.getElementById('content');
 
+// Everything this page renders came from the ledger, and the ledger is full of text from
+// outside the trust boundary: model output, work-item titles written by whoever opened the
+// issue, command stderr. Nothing reaches innerHTML without passing through here.
+function esc(value) {
+  return String(value === null || value === undefined ? '' : value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 function measureRow(m) {
   if (m.availability !== 'available') {
-    return `<tr><td>${m.name}</td><td class="unavailable" colspan="2">`
-         + `${m.availability.replace('_', ' ')} — ${m.reason}</td></tr>`;
+    return `<tr><td>${esc(m.name)}</td><td class="unavailable" colspan="2">`
+         + `${esc(String(m.availability).replace('_', ' '))} — ${esc(m.reason)}</td></tr>`;
   }
   const cls = m.estimate ? 'estimate' : '';
-  const excludes = m.excludes.length ? `excludes ${m.excludes.join(', ')}` : '';
-  return `<tr><td>${m.name}</td><td class="${cls}">${m.value} ${m.unit}</td>`
+  const excludes = m.excludes.length ? `excludes ${esc(m.excludes.join(', '))}` : '';
+  return `<tr><td>${esc(m.name)}</td><td class="${cls}">${esc(m.value)} ${esc(m.unit)}</td>`
        + `<td class="note">${excludes}</td></tr>`;
 }
 
 function renderOverview(d) {
   const r = d.current.runs;
   const rows = d.current.measures.map(measureRow).join('');
-  return `<p class="note">${r.note}</p>`
+  return `<p class="note">${esc(r.note)}</p>`
     + `<table><tr><th>runs</th><th>count</th><th></th></tr>`
-    + `<tr><td>total</td><td>${r.total}</td><td class="note">`
-    + `${Math.round(r.measurementShare * 100)}% measurement</td></tr>`
-    + `<tr><td>work</td><td>${r.work}</td><td></td></tr>`
-    + `<tr><td>evaluation</td><td>${r.evaluation}</td><td></td></tr>`
-    + `<tr><td>benchmark</td><td>${r.benchmark}</td><td></td></tr>`
-    + `<tr><td>improvement</td><td>${r.improvement}</td><td></td></tr>`
+    + `<tr><td>total</td><td>${esc(r.total)}</td><td class="note">`
+    + `${esc(Math.round(r.measurementShare * 100))}% measurement</td></tr>`
+    + `<tr><td>work</td><td>${esc(r.work)}</td><td></td></tr>`
+    + `<tr><td>evaluation</td><td>${esc(r.evaluation)}</td><td></td></tr>`
+    + `<tr><td>benchmark</td><td>${esc(r.benchmark)}</td><td></td></tr>`
+    + `<tr><td>improvement</td><td>${esc(r.improvement)}</td><td></td></tr>`
     + `</table><table><tr><th>metric</th><th>value</th><th></th></tr>${rows}</table>`;
 }
 
 function renderActivity(d) {
-  if (!d.workItems.length) return `<p class="note">${d.note || 'No work items.'}</p>`;
+  if (!d.workItems.length) return `<p class="note">${esc(d.note || 'No work items.')}</p>`;
   const rows = d.workItems.map(w =>
-    `<tr class="${w.needsAttention ? 'attention' : ''}"><td>${w.id}</td><td>${w.title}</td>`
-    + `<td>${w.stage}</td><td class="note">${w.why || ''}</td></tr>`).join('');
+    `<tr class="${w.needsAttention ? 'attention' : ''}"><td>${esc(w.id)}</td>`
+    + `<td>${esc(w.title)}</td>`
+    + `<td>${esc(w.stage)}</td><td class="note">${esc(w.why || '')}</td></tr>`).join('');
   return `<table><tr><th>id</th><th>title</th><th>stage</th><th>needs attention</th></tr>`
        + `${rows}</table>`;
+}
+
+function renderError(d) {
+  return `<p class="unavailable">${esc(d.error)} — ${esc(d.message)}</p>`;
 }
 
 async function show(view) {
   document.querySelectorAll('nav button').forEach(b =>
     b.setAttribute('aria-current', String(b.dataset.view === view)));
-  const q = view === 'run' ? '?run=' + (prompt('Run id?') || '') : '';
-  const data = await (await fetch(`/api/${view}${q}`)).json();
+  const q = view === 'run' ? '?run=' + encodeURIComponent(prompt('Run id?') || '') : '';
+  let data;
+  try {
+    data = await (await fetch(`/api/${view}${q}`)).json();
+  } catch (err) {
+    content.innerHTML = `<p class="unavailable">could not reach the factory: ${esc(err)}</p>`;
+    return;
+  }
+  if (data && data.error) { content.innerHTML = renderError(data); return; }
   if (view === 'overview') content.innerHTML = renderOverview(data);
   else if (view === 'activity') content.innerHTML = renderActivity(data);
-  else content.innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+  else {
+    // A text node, not a string: the run inspector returns whole ledger payloads by
+    // design, and JSON.stringify escapes JSON metacharacters rather than HTML ones -- so
+    // `</pre><img src=x onerror=...>` in model output closed the element and ran.
+    const pre = document.createElement('pre');
+    pre.textContent = JSON.stringify(data, null, 2);
+    content.replaceChildren(pre);
+  }
 }
 
 document.querySelectorAll('nav button').forEach(b =>
@@ -232,4 +349,13 @@ show('overview');
 </script>
 </body>
 </html>
+"""
+
+
+SCRIPT_HASH = _script_hash(INDEX_HTML)
+"""The CSP hash of the page's inline script, computed at import from the document itself.
+
+Derived rather than written down: a hash pasted beside the script goes stale the first time
+the script changes, and a stale hash means the page silently stops working -- the failure a
+CSP is most often blamed for and least often guilty of.
 """

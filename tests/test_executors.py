@@ -84,12 +84,16 @@ def test_a_container_executor_refuses_a_network_allowlist(tmp_path: Path) -> Non
             policy(tmp_path, network=NetworkPolicy.ALLOWLIST),
             ContainerImage("ghcr.io/acme/builder:1.0"),
             runtime="/usr/bin/docker",
+            probe_runtime=False,
         )
 
 
 def test_the_container_invocation_drops_capabilities_and_privileges(tmp_path: Path) -> None:
     executor = ContainerExecutor(
-        policy(tmp_path), ContainerImage("ghcr.io/acme/builder:1.0"), runtime="/usr/bin/docker"
+        policy(tmp_path),
+        ContainerImage("ghcr.io/acme/builder:1.0"),
+        runtime="/usr/bin/docker",
+        probe_runtime=False,
     )
 
     wrapped = executor._wrap(["pytest", "-q"], cwd=None)
@@ -105,6 +109,7 @@ def test_no_network_maps_to_the_runtimes_own_enforcement(tmp_path: Path) -> None
         policy(tmp_path, network=NetworkPolicy.NONE),
         ContainerImage("ghcr.io/acme/builder:1.0"),
         runtime="/usr/bin/docker",
+        probe_runtime=False,
     )
 
     wrapped = executor._wrap(["pytest"], cwd=None)
@@ -127,6 +132,7 @@ def test_secrets_are_passed_by_environment_not_on_the_command_line(tmp_path: Pat
         policy(tmp_path, secrets={"SF_TOKEN": secret}),
         ContainerImage("ghcr.io/acme/builder:1.0"),
         runtime="/usr/bin/docker",
+        probe_runtime=False,
     )
 
     wrapped = executor._wrap(["pytest"], cwd=None)
@@ -227,7 +233,10 @@ def test_every_executor_satisfies_one_protocol(tmp_path: Path) -> None:
 
     local = LocalExecutor(policy(tmp_path), level=SandboxLevel.PROCESS)
     container = ContainerExecutor(
-        policy(tmp_path), ContainerImage("ghcr.io/acme/builder:1.0"), runtime="/usr/bin/docker"
+        policy(tmp_path),
+        ContainerImage("ghcr.io/acme/builder:1.0"),
+        runtime="/usr/bin/docker",
+        probe_runtime=False,
     )
     remote = SshWorkerExecutor(
         policy(tmp_path, network=NetworkPolicy.OPEN),
