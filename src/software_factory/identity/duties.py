@@ -134,14 +134,23 @@ def approve(
         return decision
 
     if request.self_referential:
-        conflict = _shares_group(directory, principal_id, request.proposer_id)
-        if conflict is not None:
+        # Checked against the proposer *and* every approver already on the record. Against
+        # the proposer alone, two members of one team could approve a change to what counts
+        # as success -- exactly the correlated judgement the second approver exists to
+        # break. `validate.py` even tells the operator to "grant it to a second principal in
+        # a different group", so the configuration was being checked for a property the
+        # runtime did not enforce: the operator was told it held, and it did not.
+        others = [request.proposer_id, *(d.principal_id for d in state.approvals)]
+        for other in others:
+            conflict = _shares_group(directory, principal_id, other)
+            if conflict is None:
+                continue
+            role = "the proposer" if other == request.proposer_id else "an existing approver"
             return Refused(
                 "duties.same_group",
                 (
-                    f"{principal_id!r} and the proposer {request.proposer_id!r} are both in "
-                    f"{conflict!r}; a self-referential change needs an approver from "
-                    "outside the proposer's group"
+                    f"{principal_id!r} and {role} {other!r} are both in {conflict!r}; a "
+                    "self-referential change needs approvers from distinct groups"
                 ),
                 (
                     "Ask a principal in a different group. A change to what counts as "

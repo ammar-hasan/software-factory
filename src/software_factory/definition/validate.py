@@ -537,7 +537,16 @@ def _check_principals(definition: Definition, report: ValidationReport) -> None:
     # A checkpoint routed to a capability nobody holds is a question nobody can answer, and
     # FR-16.4 turns an unanswered question into a parked work item. Warn where the factory
     # is one checkpoint away from a stall it cannot clear.
-    for capability in ("approve_spec", "answer_question", "adopt_definition_change"):
+    #
+    # Derived from `ANSWERED_BY` rather than listed here. The literal tuple that used to sit
+    # in this loop covered three of the six kinds and omitted the three highest-authority
+    # ones -- `override_gate`, `widen_blast_radius`,
+    # `approve_self_referential_change` -- which are precisely the ones whose absence most
+    # needs an operator's attention, and which `CheckpointBook.open` treats as fatal. A
+    # derived set cannot drift from the map the checkpoints actually route through.
+    from software_factory.identity.checkpoints import ANSWERED_BY
+
+    for capability in sorted({c.value for c in ANSWERED_BY.values()}):
         if capability not in granted:
             report.add(
                 ValidationIssue(
@@ -548,6 +557,35 @@ def _check_principals(definition: Definition, report: ValidationReport) -> None:
                     remediation=(
                         f"Grant {capability} to someone. A checkpoint answered by a "
                         "capability nobody holds parks the work item and never clears."
+                    ),
+                )
+            )
+
+    # `Directory.add` raises on this -- correctly, since an ambiguous identity cannot
+    # attribute a decision -- and the check lived only there. So the condition passed
+    # validation and detonated at the point of use: `sf validate` said clean and
+    # `sf principals` died with a traceback, which is the opposite of this function's whole
+    # purpose. The same definition also breaks intake, which builds a directory to start.
+    seen_identities: dict[str, str] = {}
+    for loaded in definition.principals.values():
+        for identity in loaded.definition.identities:
+            key = identity.lower()
+            first = seen_identities.get(key)
+            if first is None:
+                seen_identities[key] = loaded.name
+                continue
+            report.add(
+                ValidationIssue(
+                    severity=Severity.ERROR,
+                    code="principal.ambiguous_identity",
+                    message=(
+                        f"provider identity {identity!r} maps to both {first!r} and "
+                        f"{loaded.name!r}; an ambiguous identity cannot attribute a decision"
+                    ),
+                    path=loaded.path,
+                    remediation=(
+                        "Remove the identity from one of them. A decision recorded against "
+                        "an identity two principals claim is a decision with no author."
                     ),
                 )
             )

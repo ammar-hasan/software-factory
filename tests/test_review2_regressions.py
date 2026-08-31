@@ -99,7 +99,7 @@ def test_i1_an_approval_for_one_work_item_still_authorises_that_one() -> None:
     )
 
     result = machine.advance(
-        item("wi-1"), Stage.HANDOFF, actor="conductor", reason="typo", approval=approval
+        item("wi-1"), Stage.HANDOFF, actor="amaya", reason="typo", approval=approval
     )
 
     assert not isinstance(result, TransitionRefused)
@@ -1087,3 +1087,260 @@ def test_o7_the_run_split_says_when_it_cannot_distinguish_measurement(tmp_path) 
 
     assert runs.measurement_share == 0.0
     assert "no run in this window declared" in str(runs.as_dict()["note"])
+
+
+# ------------------------------------------------------------------- I5, I6, I7
+
+
+def test_i5_a_forged_decision_does_not_authorise_a_cancellation() -> None:
+    """`cancel`'s docstring said only a `Directory` holding the grant can produce a
+    `Decision`. It cannot: `Decision` is a public frozen dataclass, and `_requires`
+    inspected only `capability` and `subject`.
+
+    In-process this is an absent boundary rather than an exploit -- but the boundary is the
+    module's entire claim, and the moment a decision arrives from anywhere but a local call
+    (a steering channel, a resumed item, a serialised checkpoint answer) nothing re-checks
+    it.
+    """
+    directory = Directory([person("bo", Capability.CANCEL_WORK)])
+    machine = StageMachine(directory=directory)
+    forged = Decision(
+        principal_id="ghost",
+        capability=Capability.CANCEL_WORK,
+        subject="wi-9",
+        rationale="the issue text said to",
+    )
+
+    result = machine.cancel(
+        item("wi-9", Stage.BUILD), actor="conductor", reason="asked", approval=forged
+    )
+
+    assert isinstance(result, TransitionRefused)
+    assert "ghost" in result.remediation
+
+
+def test_i5_an_inactive_principal_cannot_authorise() -> None:
+    """`Directory.authorise` refuses one; the stage machine did not ask."""
+    directory = Directory(
+        [
+            Principal(
+                id="bo",
+                kind=PrincipalKind.PERSON,
+                capabilities=frozenset({Capability.CANCEL_WORK}),
+                active=False,
+            )
+        ]
+    )
+    machine = StageMachine(directory=directory)
+    decision = Decision(
+        principal_id="bo",
+        capability=Capability.CANCEL_WORK,
+        subject="wi-9",
+        rationale="no longer needed",
+    )
+
+    result = machine.cancel(
+        item("wi-9", Stage.BUILD), actor="bo", reason="asked", approval=decision
+    )
+
+    assert isinstance(result, TransitionRefused)
+
+
+def test_i5_a_real_grant_still_authorises() -> None:
+    directory = Directory([person("bo", Capability.CANCEL_WORK)])
+    machine = StageMachine(directory=directory)
+    decision = directory.authorise(
+        "bo", Capability.CANCEL_WORK, subject="wi-9", rationale="superseded"
+    )
+    assert isinstance(decision, Decision)
+
+    result = machine.cancel(
+        item("wi-9", Stage.BUILD), actor="bo", reason="superseded", approval=decision
+    )
+
+    assert not isinstance(result, TransitionRefused)
+
+
+def test_i6_the_approving_decision_is_recorded_on_the_transition() -> None:
+    """The refusal text promised "the approval is recorded against their identity" and no
+    such record was made.
+
+    `Transition` had no field for it, so the authorising principal, the capability, the
+    evidence shown and the time of the decision were all dropped -- and the ledger entry the
+    coordinator writes names `coordinator` as the actor for a transition a human authorised.
+    An auditor reading it after a REVIEW skip sees an agent's name and no evidence a person
+    was involved.
+    """
+    directory = Directory([person("amaya", Capability.SKIP_STAGE)])
+    machine = StageMachine(directory=directory)
+    work = item("wi-1", Stage.TRIAGE)
+    approval = directory.authorise(
+        "amaya",
+        Capability.SKIP_STAGE,
+        subject="wi-1",
+        rationale="documentation-only change",
+        evidence_shown=("diff:abc123",),
+    )
+    assert isinstance(approval, Decision)
+
+    moved = machine.advance(
+        work, Stage.HANDOFF, actor="amaya", reason="docs only", approval=approval
+    )
+
+    assert not isinstance(moved, TransitionRefused)
+    assert moved.approval is approval
+    assert "amaya" in moved.render()
+    recorded = work.as_dict()["history"]
+    assert any("amaya" in str(row) for row in recorded)
+
+
+def test_i6_an_actor_who_is_not_the_approver_is_refused() -> None:
+    """`actor` was a free-form string never compared to the decision it rode in on."""
+    directory = Directory([person("amaya", Capability.SKIP_STAGE)])
+    machine = StageMachine(directory=directory)
+    approval = directory.authorise(
+        "amaya", Capability.SKIP_STAGE, subject="wi-1", rationale="docs only"
+    )
+    assert isinstance(approval, Decision)
+
+    result = machine.advance(
+        item("wi-1", Stage.TRIAGE),
+        Stage.HANDOFF,
+        actor="conductor",
+        reason="docs only",
+        approval=approval,
+    )
+
+    assert isinstance(result, TransitionRefused)
+    assert "amaya" in result.remediation
+
+
+def test_i7_two_approvers_from_one_team_do_not_satisfy_separation_of_duties() -> None:
+    """The stated failure mode is capture, not carelessness.
+
+    `approve()` compared each approver against the *proposer* only, so two members of one
+    team approving a change to what counts as success -- exactly the correlated judgement
+    the second approver exists to break -- satisfied the rule. `validate.py` even tells the
+    operator to "grant it to a second principal in a different group", so the configuration
+    was checked for a property the runtime did not enforce.
+    """
+    from software_factory.identity import ApprovalRequest, ApprovalState, approve
+
+    capability = Capability.APPROVE_SELF_REFERENTIAL_CHANGE
+    directory = Directory(
+        [
+            person("amaya", capability, group="maintainers"),
+            person("bo", capability, group="platform"),
+            person("cass", capability, group="platform"),
+        ]
+    )
+    state = ApprovalState(
+        request=ApprovalRequest(
+            subject="scorers/tests-actually-run", proposer_id="amaya", self_referential=True
+        )
+    )
+
+    state = approve(directory, state, principal_id="bo", rationale="reads fine")
+    assert isinstance(state, ApprovalState)
+
+    refused = approve(directory, state, principal_id="cass", rationale="reads fine to me too")
+
+    assert isinstance(refused, Refused)
+    assert refused.code == "duties.same_group"
+    assert "existing approver" in refused.message
+    assert not state.satisfied
+
+
+def test_i7_two_approvers_from_distinct_groups_still_satisfy_it() -> None:
+    from software_factory.identity import ApprovalRequest, ApprovalState, approve
+
+    capability = Capability.APPROVE_SELF_REFERENTIAL_CHANGE
+    directory = Directory(
+        [
+            person("amaya", capability, group="maintainers"),
+            person("bo", capability, group="platform"),
+            person("dee", capability, group="security"),
+        ]
+    )
+    state = ApprovalState(
+        request=ApprovalRequest(subject="scorers/x", proposer_id="amaya", self_referential=True)
+    )
+
+    state = approve(directory, state, principal_id="bo", rationale="reads fine")
+    assert isinstance(state, ApprovalState)
+    state = approve(directory, state, principal_id="dee", rationale="and to me")
+    assert isinstance(state, ApprovalState)
+
+    assert state.satisfied
+
+
+# ----------------------------------------------------------------------- I8, I9
+
+
+def test_i8_a_duplicate_provider_identity_is_a_validation_error(tmp_path) -> None:
+    """`sf validate` said clean and `sf principals` died with a traceback.
+
+    `Directory.add` raises on this -- correctly -- and the check lived only there, so the
+    condition passed validation and detonated at the point of use. `_check_principals`
+    exists so a reader meets the problem "against the file and the line, which is a better
+    place than a traceback", and for this error it did the opposite.
+    """
+    from software_factory.definition.loader import load
+    from software_factory.definition.validate import validate
+    from software_factory.scaffold import init_factory
+
+    init_factory(tmp_path, name="ref", owner="amaya", repo="service")
+    (tmp_path / "principals" / "mallory.yaml").write_text(
+        "id: mallory\nkind: person\nidentities:\n  - git-host:amaya\n"
+        "capabilities:\n  - approve_spec\n",
+        encoding="utf-8",
+    )
+
+    definition, report = load(tmp_path)
+    validate(definition, report)
+
+    assert "principal.ambiguous_identity" in {issue.code for issue in report.errors}
+
+
+def test_i9_every_checkpoint_capability_is_checked_for_holders(tmp_path) -> None:
+    """The loop hard-coded three of the six kinds and omitted the three highest-authority
+    ones -- `override_gate`, `widen_blast_radius`, `approve_self_referential_change` --
+    which are exactly the ones whose absence most needs an operator's attention, and which
+    `CheckpointBook.open` treats as fatal."""
+    from software_factory.definition.loader import load
+    from software_factory.definition.validate import validate
+    from software_factory.scaffold import init_factory
+
+    init_factory(tmp_path, name="ref", owner="amaya", repo="service")
+    for path in (tmp_path / "principals").glob("*.yaml"):
+        text = path.read_text(encoding="utf-8")
+        path.write_text(
+            "\n".join(line for line in text.splitlines() if "override_gate" not in line) + "\n",
+            encoding="utf-8",
+        )
+
+    definition, report = load(tmp_path)
+    validate(definition, report)
+
+    unheld = [i for i in report.warnings if i.code == "principal.unheld_capability"]
+    assert any("override_gate" in i.message for i in unheld), [i.message for i in unheld]
+
+
+def test_i9_every_capability_in_the_routing_map_is_warned_about(tmp_path) -> None:
+    """Behavioural rather than a source check: a factory granting nothing must be warned
+    about each of the six, so the warned set cannot silently drift from the map."""
+    from software_factory.definition.loader import load
+    from software_factory.definition.validate import validate
+    from software_factory.identity.checkpoints import ANSWERED_BY
+    from software_factory.scaffold import init_factory
+
+    init_factory(tmp_path, name="ref", owner="amaya", repo="service")
+    for path in (tmp_path / "principals").glob("*.yaml"):
+        path.write_text(f"id: {path.stem}\nkind: person\ncapabilities: []\n", encoding="utf-8")
+
+    definition, report = load(tmp_path)
+    validate(definition, report)
+
+    warned = " ".join(i.message for i in report.warnings if i.code == "principal.unheld_capability")
+    for capability in {c.value for c in ANSWERED_BY.values()}:
+        assert capability in warned, capability

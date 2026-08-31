@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from software_factory.definition.models import Stage
-from software_factory.identity.principals import Capability, Decision
+from software_factory.identity.principals import Capability, Decision, Directory, Refused
 from software_factory.memory.records import utc_now
 from software_factory.spec.units import TrustClass
 
@@ -103,10 +103,27 @@ class Transition:
     evidence: tuple[str, ...] = ()
     skipped: tuple[Stage, ...] = ()
     basis_trust: TrustClass = TrustClass.INTERNAL
+    approval: Decision | None = None
+    """The decision that authorised this, when one was needed.
+
+    The refusal text promises "the approval is recorded against their identity", and until
+    this field existed no such record was made: the authorising principal, the capability
+    exercised, the evidence they saw and the time of the decision were all dropped. An
+    auditor reading the ledger after a skipped REVIEW saw an agent's name and nothing
+    showing a person was involved -- which is FR-25.4's "a decision without attribution is
+    not a decision", failing at the one place a decision is consumed.
+    """
 
     def render(self) -> str:
         skipped = f" (skipped {', '.join(s.value for s in self.skipped)})" if self.skipped else ""
-        return f"{self.from_stage.value} -> {self.to_stage.value}{skipped}: {self.reason}"
+        authorised = (
+            f" [authorised by {self.approval.principal_id} under {self.approval.capability.value}]"
+            if self.approval
+            else ""
+        )
+        return (
+            f"{self.from_stage.value} -> {self.to_stage.value}{skipped}: {self.reason}{authorised}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +250,21 @@ class StageMachine:
     )
     non_skippable: frozenset[Stage] = DEFAULT_NON_SKIPPABLE
     order: tuple[Stage, ...] = DEFAULT_ORDER
+    directory: Directory | None = None
+    """Who this factory recognises, for re-checking a decision at the point of use.
+
+    A `Decision` is a public frozen dataclass, so a caller can build one naming a principal
+    that does not exist, is inactive, or holds nothing -- and the check used to inspect only
+    the capability and the subject. In-process that is an absent boundary rather than an
+    exploit, but the boundary is the module's entire claim: the moment a decision arrives
+    from anywhere but a local call (a steering channel per FR-25.5, a resumed work item, a
+    serialised checkpoint answer), nothing re-checked it and the type carried nothing that
+    could be re-checked.
+
+    Optional because a factory may run without a principal directory, and a machine that
+    refused every approval in that case would be worse than one that checks what it can.
+    When it is absent the capability and subject checks still apply.
+    """
 
     def legal(self, from_stage: Stage, to_stage: Stage) -> bool:
         return to_stage in self.transitions.get(from_stage, frozenset())
@@ -312,7 +344,13 @@ class StageMachine:
         skipped = self.skipped_between(measured_from, to_stage)
         blocked_skips = tuple(s for s in skipped if s in self.non_skippable)
         if blocked_skips:
-            refusal = _requires(approval, Capability.SKIP_STAGE, item.id)
+            refusal = _requires(
+                approval,
+                Capability.SKIP_STAGE,
+                item.id,
+                directory=self.directory,
+                actor=actor,
+            )
             if refusal is not None:
                 names = ", ".join(s.value for s in blocked_skips)
                 return TransitionRefused(
@@ -334,6 +372,7 @@ class StageMachine:
             evidence=evidence,
             skipped=skipped,
             basis_trust=basis_trust,
+            approval=approval,
         )
         item.history.append(transition)
         item.stage = to_stage
@@ -383,7 +422,13 @@ class StageMachine:
             return TransitionRefused(
                 "stage.terminal", f"{item.id} is already {item.stage.value}", "Nothing to do."
             )
-        refusal = _requires(approval, Capability.CANCEL_WORK, item.id)
+        refusal = _requires(
+            approval,
+            Capability.CANCEL_WORK,
+            item.id,
+            directory=self.directory,
+            actor=actor,
+        )
         if refusal is not None:
             return TransitionRefused(
                 "stage.cancel_needs_human",
@@ -400,13 +445,21 @@ class StageMachine:
             actor=actor,
             reason=reason,
             at=utc_now(),
+            approval=approval,
         )
         item.history.append(transition)
         item.stage = Stage.CANCELLED
         return transition
 
 
-def _requires(approval: Decision | None, capability: Capability, subject: str) -> str | None:
+def _requires(
+    approval: Decision | None,
+    capability: Capability,
+    subject: str,
+    *,
+    directory: Directory | None = None,
+    actor: str = "",
+) -> str | None:
     """``None`` when the decision authorises this, otherwise why it does not.
 
     Checking the *capability*, not merely the presence of a decision: an approval to answer
@@ -431,6 +484,29 @@ def _requires(approval: Decision | None, capability: Capability, subject: str) -
             f"the approval names {named!r}, not {subject!r}; an approval is for "
             "one decision, not a token to reuse"
         )
+    if actor and actor != approval.principal_id:
+        # `actor` was a free-form string the caller supplied and nothing compared it to the
+        # decision it rode in on, so the history recorded an agent as having made a move a
+        # person authorised.
+        return (
+            f"{actor!r} performed a transition authorised by "
+            f"{approval.principal_id!r}; the actor and the approver must be the same, or "
+            "the record attributes the decision to the wrong identity"
+        )
+    if directory is not None:
+        # Re-authorised rather than trusted. `Decision` carries no signature, so the only
+        # thing that makes it more than a claim is checking it against the directory again
+        # here, where it is used.
+        rechecked = directory.authorise(
+            approval.principal_id,
+            capability,
+            subject=subject,
+            rationale=approval.rationale,
+            evidence_shown=approval.evidence_shown,
+            channel=approval.channel,
+        )
+        if isinstance(rechecked, Refused):
+            return f"{rechecked.message} ({rechecked.remediation})"
     return None
 
 
