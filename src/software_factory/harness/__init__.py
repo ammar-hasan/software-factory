@@ -18,6 +18,16 @@ from software_factory.harness.awareness import (
     Snapshot,
     estimate_tokens,
 )
+from software_factory.harness.conversation import (
+    KIND_BUDGET,
+    Compaction,
+    ConversationState,
+    Note,
+    NoteKind,
+    Resumption,
+    compact,
+    resume,
+)
 from software_factory.harness.routing import (
     Decomposition,
     Escalation,
@@ -49,6 +59,7 @@ from software_factory.harness.tools import (
 )
 
 __all__ = [
+    "KIND_BUDGET",
     "PACK_BUDGET_FRACTION",
     "ROLE_WEIGHTS",
     "AwarenessPack",
@@ -57,6 +68,8 @@ __all__ = [
     "CalibrationCriterion",
     "Citation",
     "CitationKind",
+    "Compaction",
+    "ConversationState",
     "CostClass",
     "Decomposition",
     "Escalation",
@@ -65,8 +78,11 @@ __all__ = [
     "FailureKind",
     "Grants",
     "Item",
+    "Note",
+    "NoteKind",
     "Origin",
     "PackAssembler",
+    "Resumption",
     "RoutingState",
     "Scaffold",
     "Section",
@@ -82,8 +98,10 @@ __all__ = [
     "VerifierClass",
     "Violation",
     "calibration_error",
+    "compact",
     "estimate_tokens",
     "may_escalate",
+    "resume",
     "scaffolds_for",
     "starting_tier",
 ]
