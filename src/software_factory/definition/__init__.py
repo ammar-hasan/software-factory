@@ -34,6 +34,7 @@ from software_factory.definition.resolve import (
     resolve_for_agent,
     resolve_for_automation,
 )
+from software_factory.definition.schema import export_all, export_schema, schema_kinds
 from software_factory.definition.validate import lint, validate
 
 __all__ = [
@@ -55,11 +56,14 @@ __all__ = [
     "SkillStatus",
     "Stage",
     "explain_execution",
+    "export_all",
+    "export_schema",
     "lint",
     "load",
     "load_strict",
     "resolve_execution",
     "resolve_for_agent",
     "resolve_for_automation",
+    "schema_kinds",
     "validate",
 ]
