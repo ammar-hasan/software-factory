@@ -164,25 +164,73 @@ def _from_runners(definition: Definition) -> list[Destination]:
 
 
 def _from_model_tiers(definition: Definition) -> list[Destination]:
-    """A non-local tier reaches its provider.
+    """Where each tier's inference actually goes.
 
-    Reported as the provider rather than a host, and marked implied: the definition names
-    `provider: anthropic` and not an address, and inventing an address here would be
-    asserting something the files do not say.
+    The provider *registry* knows each provider's endpoint, so a tier naming `anthropic`
+    resolves to a host rather than to a shrug. That upgrade matters: an operator asked to
+    approve egress cannot approve "anthropic (model endpoint)", and a report full of
+    unresolvable entries is one that gets waved through.
+
+    Three cases, and the distinctions are the point:
+
+    * A **local** provider on its default loopback endpoint is not egress. Listing it as a
+      destination trains operators to ignore the report.
+    * A **known** provider is `DECLARED` with its address.
+    * An **unknown** provider name is `INDETERMINATE`, not implied. We cannot say where it
+      goes, and saying "somewhere, probably" would be inventing the thing this module
+      exists to avoid.
+
+    A tier that declares `local: true` but names a provider the registry knows to be hosted
+    is reported as a destination anyway, on the provider's evidence rather than the tier's
+    claim -- the flag is an assertion by the author and the registry is a fact about the
+    endpoint.
     """
+    from software_factory.providers.registry import UnknownProviderError, endpoint_for, spec_for
+
     ladder = definition.factory.ladder
     if ladder is None:
         return []
-    return [
-        Destination(
-            target=f"{tier.provider} (model endpoint)",
-            certainty=Certainty.IMPLIED,
-            source=f"tier {tier.name!r}",
-            detail="a non-local tier reaches its provider's endpoint",
+
+    found: list[Destination] = []
+    for tier in ladder.tiers:
+        try:
+            spec = spec_for(tier.provider)
+        except UnknownProviderError:
+            found.append(
+                Destination(
+                    target=f"{tier.provider} (unrecognised model provider)",
+                    certainty=Certainty.INDETERMINATE,
+                    source=f"tier {tier.name!r}",
+                    detail=(
+                        "no adapter is registered for this provider, so its endpoint "
+                        "cannot be determined from the definition"
+                    ),
+                )
+            )
+            continue
+
+        endpoint = endpoint_for(tier.provider)
+        if endpoint is None:
+            # The scripted provider. It never opens a socket, so it is not a destination.
+            continue
+        if endpoint.local:
+            continue
+
+        detail = "a hosted tier reaches its provider's endpoint"
+        if tier.local:
+            detail += (
+                f"; the tier declares `local: true`, but {spec.name!r} is a hosted "
+                "provider and the endpoint is what decides"
+            )
+        found.append(
+            Destination(
+                target=endpoint.url,
+                certainty=Certainty.DECLARED,
+                source=f"tier {tier.name!r}",
+                detail=detail,
+            )
         )
-        for tier in ladder.tiers
-        if not tier.local
-    ]
+    return found
 
 
 def _from_mcp_servers(definition: Definition) -> list[Destination]:

@@ -1541,6 +1541,114 @@ def stages(as_json: JsonOpt = False) -> None:
 
 
 @app.command()
+def providers(
+    root: RootArg = Path(),
+    probe: Annotated[
+        bool,
+        typer.Option(
+            "--probe",
+            help="Contact each endpoint. Off by default: this command must work offline.",
+        ),
+    ] = False,
+    as_json: JsonOpt = False,
+) -> None:
+    """What each tier will actually call, and whether it can right now.
+
+    A definition can name a provider that resolves to nothing, and until this command
+    existed the only way to find out was to start a run and watch it fail. The check is
+    offline unless `--probe` is passed: key presence and endpoint resolution are knowable
+    without contacting anything, and a diagnostic that needs the network to tell you the
+    network is misconfigured is not much of a diagnostic.
+    """
+    from software_factory.providers.registry import UnknownProviderError, resolve, spec_for
+
+    try:
+        definition = load_strict(root)
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    ladder = definition.factory.ladder
+    rows: list[dict[str, Any]] = []
+    for tier in ladder.tiers if ladder else ():
+        try:
+            spec = spec_for(tier.provider)
+        except UnknownProviderError as exc:
+            rows.append(
+                {
+                    "tier": tier.name,
+                    "provider": tier.provider,
+                    "model": tier.model,
+                    "endpoint": "",
+                    "local": False,
+                    "usable": False,
+                    "reason": str(exc),
+                }
+            )
+            continue
+
+        resolution = resolve(tier.provider)
+        reason = resolution.reason
+        if not reason and probe:
+            ok, detail = resolution.provider.available()
+            if not ok:
+                reason = detail
+
+        rows.append(
+            {
+                "tier": tier.name,
+                "provider": spec.name,
+                "model": tier.model,
+                "endpoint": resolution.base_url,
+                "local": spec.local,
+                "usable": not reason,
+                "reason": reason,
+                "apiKeyEnv": spec.api_key_env,
+                # The definition's own `local:` flag and the provider's are separate
+                # claims, and a mismatch is worth seeing: a tier marked local that
+                # resolves to a hosted endpoint sends data off the machine while the
+                # egress report says it does not.
+                "declaredLocal": tier.local,
+            }
+        )
+
+    mismatched = [r for r in rows if r.get("declaredLocal") and not r.get("local")]
+    ok = all(r["usable"] for r in rows) and not mismatched
+
+    if as_json:
+        _emit({"ok": ok, "tiers": rows, "mismatchedLocality": [r["tier"] for r in mismatched]})
+        raise typer.Exit(EXIT_OK if ok else EXIT_FAILED)
+
+    if not rows:
+        console.print("[yellow]this factory declares no ladder, so no tier resolves[/]")
+        raise typer.Exit(EXIT_OK)
+
+    table = Table(show_header=True, header_style="bold", box=None)
+    table.add_column("tier")
+    table.add_column("provider")
+    table.add_column("model")
+    table.add_column("endpoint", overflow="fold")
+    table.add_column("state")
+    for row in rows:
+        state = "[green]ready[/]" if row["usable"] else f"[red]{row['reason']}[/]"
+        where = row["endpoint"] or "[dim]unresolved[/]"
+        if row.get("local"):
+            where = f"{where} [dim](this machine)[/]"
+        table.add_row(row["tier"], row["provider"], row["model"], where, state)
+    console.print(table)
+
+    for row in mismatched:
+        console.print(
+            f"[yellow]tier {row['tier']!r} declares `local: true` but {row['provider']!r} "
+            f"resolves to {row['endpoint']} — the egress report would understate where "
+            f"this factory sends data[/]"
+        )
+    if not probe:
+        console.print("\n[dim]key presence and resolution only; --probe contacts each endpoint[/]")
+    raise typer.Exit(EXIT_OK if ok else EXIT_FAILED)
+
+
+@app.command()
 def doctor(as_json: JsonOpt = False) -> None:
     """Report what works in this environment and what does not (FR-28.1)."""
     import platform

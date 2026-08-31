@@ -36,23 +36,34 @@ class StopReason(enum.StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
 class Message:
     role: Role
     content: str
     tool_call_id: str | None = None
     name: str | None = None
+    tool_calls: tuple[ToolCall, ...] = ()
+    """The calls an assistant turn requested, kept on the message that requested them.
+
+    Not decoration. Both real wire formats reject a tool *result* whose id does not
+    appear in the preceding assistant turn, so a transcript that records only the
+    assistant's text cannot be sent back to any provider after the first tool call --
+    it fails on turn two, in production, with a 400 that reads like a schema problem.
+
+    It is also what makes replay (FR-11.11) meaningful: replaying a tool sequence
+    requires knowing which call produced which result, and pairing by position guesses.
+    """
 
     def tokens(self) -> int:
         from software_factory.harness.awareness import estimate_tokens
 
         return estimate_tokens(self.content)
-
-
-@dataclass(frozen=True, slots=True)
-class ToolCall:
-    id: str
-    name: str
-    arguments: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)

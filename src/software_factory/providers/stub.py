@@ -102,19 +102,26 @@ def fails(reason: str) -> Completion:
 
 
 class UnavailableProvider(Provider):
-    """A provider that is configured but cannot serve. Used to test degradation."""
+    """A provider that is configured but cannot serve. Used to test degradation.
+
+    `retryable` defaults to True because the original use was an unreachable endpoint,
+    which may well come back. A *misconfiguration* must pass False: an unset API key does
+    not become set by trying again, and retrying it spends the run's retry budget and its
+    wall clock before reporting a cause that was knowable at startup.
+    """
 
     name = "unavailable"
 
-    def __init__(self, reason: str = "endpoint unreachable") -> None:
+    def __init__(self, reason: str = "endpoint unreachable", *, retryable: bool = True) -> None:
         self.reason = reason
+        self.retryable = retryable
 
     def complete(
         self,
         messages: list[Message],  # noqa: ARG002 - interface conformance
         **kwargs: Any,  # noqa: ARG002 - interface conformance
     ) -> Completion:
-        raise ProviderError(self.reason, retryable=True)
+        raise ProviderError(self.reason, retryable=self.retryable)
 
     def available(self) -> tuple[bool, str]:
         return False, self.reason

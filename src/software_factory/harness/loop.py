@@ -275,7 +275,16 @@ class TurnLoop:
                 )
 
             if completion.wants_tools:
-                messages.append(Message(role=Role.ASSISTANT, content=completion.text))
+                # The calls travel with the message that made them. Appending only the
+                # text leaves the following tool results unpaired, which every real
+                # provider rejects on the next turn.
+                messages.append(
+                    Message(
+                        role=Role.ASSISTANT,
+                        content=completion.text,
+                        tool_calls=completion.tool_calls,
+                    )
+                )
                 if self._dispatch(completion, messages, result, started=started) is False:
                     return self._end(
                         result,

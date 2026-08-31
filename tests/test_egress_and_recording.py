@@ -244,3 +244,72 @@ def test_disabling_recording_removes_the_expectation_not_the_statement() -> None
     assert "is absent" in visual_evidence_statement(
         [NotRecorded(kind=RecordingKind.SCREEN, reason=Unavailable.NOT_ENABLED)]
     )
+
+
+# ------------------------------------------------- model endpoints resolve to hosts
+
+
+def factory_with_tier(tmp_path: Path, *, provider: str, local: str = "true") -> Path:
+    """A scaffold whose first tier names `provider`, so egress can be asked about it."""
+    init_factory(tmp_path, name="ref", owner="amaya", repo="service")
+    path = tmp_path / "factory.yaml"
+    text = path.read_text(encoding="utf-8")
+    text = text.replace(
+        "      provider: local\n      model: local-model\n      contextWindow: 32000",
+        f"      provider: {provider}\n      model: local-model\n      contextWindow: 32000",
+        1,
+    )
+    text = text.replace(
+        "      local: true\n      capabilities: [code, tools]",
+        f"      local: {local}\n      capabilities: [code, tools]",
+        1,
+    )
+    path.write_text(text, encoding="utf-8")
+    return tmp_path
+
+
+def test_a_hosted_tier_reports_its_actual_endpoint(tmp_path: Path) -> None:
+    """An operator cannot approve egress to "anthropic (model endpoint)".
+
+    The report used to name the provider and mark it implied, because nothing could turn
+    a provider name into an address. The registry can, so it does.
+    """
+    report = enumerate_egress(load_strict(factory_with_tier(tmp_path, provider="anthropic")))
+
+    hosted = [d for d in report.destinations if "anthropic.com" in d.target]
+    assert hosted, [d.target for d in report.destinations]
+    assert hosted[0].certainty is Certainty.DECLARED
+    assert not report.offline_capable
+
+
+def test_a_local_tier_is_not_reported_as_a_destination(tmp_path: Path) -> None:
+    """Loopback inference is not egress, and listing it teaches operators to skim."""
+    report = enumerate_egress(load_strict(factory_with_tier(tmp_path, provider="local")))
+
+    assert report.offline_capable
+    assert not [d for d in report.destinations if "11434" in d.target]
+
+
+def test_an_unknown_provider_is_indeterminate_not_implied(tmp_path: Path) -> None:
+    """We cannot say where it goes; "somewhere, probably" is the invention to avoid."""
+    report = enumerate_egress(load_strict(factory_with_tier(tmp_path, provider="mystery-llm")))
+
+    unknown = [d for d in report.destinations if "mystery-llm" in d.target]
+    assert unknown and unknown[0].certainty is Certainty.INDETERMINATE
+    assert not report.offline_capable
+
+
+def test_a_local_flag_does_not_override_a_hosted_provider(tmp_path: Path) -> None:
+    """The flag is the author's assertion; the endpoint is the fact.
+
+    A tier marked `local: true` pointed at a hosted provider would otherwise vanish from
+    the egress report entirely -- the one case where the report would be silently wrong in
+    the direction that matters.
+    """
+    report = enumerate_egress(
+        load_strict(factory_with_tier(tmp_path, provider="openai", local="true"))
+    )
+
+    hosted = [d for d in report.destinations if "openai.com" in d.target]
+    assert hosted, [d.target for d in report.destinations]
+    assert "declares `local: true`" in hosted[0].detail

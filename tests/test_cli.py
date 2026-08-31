@@ -928,3 +928,97 @@ def test_improve_says_nothing_repeats_rather_than_reporting_none(tmp_path: Path)
 
     assert body["failures"] == 1
     assert body["clusters"] == []
+
+
+# --------------------------------------------------------------------- sf providers
+
+
+def test_providers_resolves_the_scaffold_with_no_account(scaffold: Path) -> None:
+    """PR-2 made checkable: the reference path must work with nothing configured.
+
+    A scaffold whose tiers cannot resolve would make the local-first claim false out of
+    the box, and the only way to discover it would be to start a run.
+    """
+    result = runner.invoke(app, ["providers", str(scaffold), "--json"])
+
+    assert result.exit_code == 0, result.output
+    body = payload(result.output)
+    assert body["ok"] is True
+    assert [t["tier"] for t in body["tiers"]] == ["local-small", "mid"]
+    assert all(t["local"] and t["usable"] for t in body["tiers"])
+
+
+def test_providers_works_offline_by_default(scaffold: Path, monkeypatch) -> None:
+    """A diagnostic that needs the network to report a network problem is not one.
+
+    Without `--probe` nothing may be contacted, so the command still answers on a machine
+    with no model running -- which is exactly the machine whose operator is asking.
+    """
+    import software_factory.providers.transport as transport
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("providers must not open a socket without --probe")
+
+    monkeypatch.setattr(transport.UrllibTransport, "post_json", refuse)
+    result = runner.invoke(app, ["providers", str(scaffold), "--json"])
+    assert result.exit_code == 0, result.output
+
+
+def test_providers_names_the_missing_variable(tmp_path: Path, monkeypatch) -> None:
+    """ "Authentication failed" sends the reader to the wrong place; a variable name does not."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    root = tmp_path / "f"
+    root.mkdir()
+    runner.invoke(app, ["init", str(root), "--name", "p", "--owner", "a", "--repo", "s"])
+    factory = root / "factory.yaml"
+    factory.write_text(
+        factory.read_text(encoding="utf-8").replace("provider: local", "provider: anthropic"),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["providers", str(root), "--json"])
+
+    assert result.exit_code != 0
+    body = payload(result.output)
+    assert body["ok"] is False
+    assert "ANTHROPIC_API_KEY" in body["tiers"][0]["reason"]
+
+
+def test_providers_flags_a_tier_that_lies_about_being_local(tmp_path: Path, monkeypatch) -> None:
+    """A tier marked local that resolves to a hosted endpoint understates egress."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    root = tmp_path / "f"
+    root.mkdir()
+    runner.invoke(app, ["init", str(root), "--name", "p", "--owner", "a", "--repo", "s"])
+    factory = root / "factory.yaml"
+    factory.write_text(
+        factory.read_text(encoding="utf-8").replace("provider: local", "provider: anthropic"),
+        encoding="utf-8",
+    )
+
+    body = payload(runner.invoke(app, ["providers", str(root), "--json"]).output)
+
+    assert body["mismatchedLocality"] == ["local-small", "mid"]
+    assert body["ok"] is False
+
+
+def test_providers_reports_an_unknown_name_without_failing_the_others(tmp_path: Path) -> None:
+    """One typo must not hide every other tier: a resolver that raises reports one line."""
+    root = tmp_path / "f"
+    root.mkdir()
+    runner.invoke(app, ["init", str(root), "--name", "p", "--owner", "a", "--repo", "s"])
+    factory = root / "factory.yaml"
+    factory.write_text(
+        factory.read_text(encoding="utf-8").replace(
+            "provider: local\n      model: local-model\n      contextWindow: 32000",
+            "provider: nonesuch\n      model: local-model\n      contextWindow: 32000",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    body = payload(runner.invoke(app, ["providers", str(root), "--json"]).output)
+
+    assert len(body["tiers"]) == 2
+    assert body["tiers"][0]["usable"] is False
+    assert body["tiers"][1]["usable"] is True
