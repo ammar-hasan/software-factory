@@ -30,23 +30,50 @@ MAX_CLAIM_CHARS = 600
 #: A claim joining two independent assertions cannot be selectively invalidated, so it
 #: is refused at the door rather than split later (memory.md M-3).
 _COMPOUND = re.compile(
-    r"(?:\.\s+[A-Z])"  # two sentences
+    # A sentence boundary: a period, then whitespace, then a *genuinely* capital letter.
+    # `re.IGNORECASE` applies to the whole pattern, so the original `[A-Z]` matched
+    # lowercase too and the rule degenerated into "a period followed by a letter" -- every
+    # claim containing "i.e. ", "e.g. " or "vs. " was refused as more than one claim, and
+    # the COMPOUND_CLAIM rejection series (an operational signal) filled with noise.
+    r"(?:(?<!\be\.g)(?<!\bi\.e)(?<!\bcf)(?<!\bvs)(?<!\betc)(?<!\bal)(?<!\bresp)"
+    r"\.\s+(?-i:[A-Z]))"
     r"|(?:\band\s+also\b)"
     r"|(?:;\s*(?:additionally|moreover|furthermore)\b)"
-    r"|(?:\bfirst\b.{0,80}\bsecond\b)",
+    # Enumeration, not the words themselves: the comma is what distinguishes "first, X;
+    # second, Y" from "the retry fires on the first second of the window".
+    r"|(?:\bfirst(?:ly)?,\s.{0,120}\bsecond(?:ly)?,\s)",
     re.IGNORECASE | re.DOTALL,
 )
 
 #: Shapes that look like credentials. Deliberately broad: a false positive costs one
-#: rejected memory, a false negative writes a secret into a store that feeds prompts.
+#: rejected memory, a false negative writes a secret into a store that feeds prompts -- and
+#: this same predicate is the whole implementation of the `secret-clean` gate, which screens
+#: the diff, the logs and the evidence bundle.
+#:
+#: The first version claimed breadth and was narrow. Its token bodies were `[A-Za-z0-9]`, so
+#: a single hyphen ended the match: `sk-proj-...` passed. It knew the AWS access key *id*
+#: shape but not the secret key, had no pattern for a URL with an inline password, and
+#: nothing for the commonest shape of all -- an assignment whose left side says what the
+#: right side is. Each addition below has a negative test in the suite, so "deliberately
+#: broad" is a property the suite enforces rather than a claim the docstring makes.
 _SECRET_SHAPED = re.compile(
-    r"(?:sk-[A-Za-z0-9]{16,})"
+    # Vendor-prefixed tokens. Bodies allow `-` and `_`, which real tokens contain.
+    r"(?:sk-[A-Za-z0-9_-]{16,})"
     r"|(?:gh[pousr]_[A-Za-z0-9]{20,})"
     r"|(?:github_pat_[A-Za-z0-9_]{20,})"
-    r"|(?:xox[baprs]-[A-Za-z0-9-]{10,})"
+    r"|(?:xox[a-z]-[A-Za-z0-9-]{10,})"
     r"|(?:AKIA[0-9A-Z]{16})"
+    r"|(?:ASIA[0-9A-Z]{16})"
+    r"|(?:AIza[A-Za-z0-9_-]{30,})"
     r"|(?:-----BEGIN [A-Z ]*PRIVATE KEY-----)"
     r"|(?:eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})"
+    # A URL carrying credentials inline. The password is the part after the colon.
+    r"|(?:[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]{3,}@)"
+    # The generic shape: a name that says "credential", then a long opaque value. This is
+    # what catches an AWS secret key, a database password, and everything with no vendor
+    # prefix to recognise.
+    r"|(?i:(?:secret|token|password|passwd|pwd|api[_-]?key|access[_-]?key|private[_-]?key|"
+    r"credential)[\w-]*\s*[:=]\s*[\"\']?[A-Za-z0-9/+=_-]{16,})"
 )
 
 

@@ -33,6 +33,8 @@ from software_factory.memory import (
     Memory,
     MemoryStore,
     PromotionCriterion,
+    Rejected,
+    RejectionReason,
     Scope,
     Source,
     SourceKind,
@@ -1534,3 +1536,348 @@ def test_m36_the_limit_shim_execs_so_no_extra_process_survives(tmp_path: Path) -
 
     assert result.ok, result.stderr
     assert "(17, 17)" in result.stdout
+
+
+# ---------------------------------------------------------------------------------- M1
+# The policy pass re-applied the staleness penalty on every run.
+
+
+def test_m1_the_stale_penalty_is_applied_once_per_change(tmp_path: Path) -> None:
+    """`excerpt_digest` is never rewritten, so a drifted anchor mismatched forever and the
+    penalty compounded: five nightly passes took 0.5 to 0.039, silently crossing every
+    canon floor. This module's docstring promises a pass that is idempotent -- running it
+    twice on an unchanged store must produce the same actions the second time as none.
+    """
+    from software_factory.memory.policing import revalidate_anchors
+    from software_factory.spec.units import TrustClass, digest_text
+
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    store.load()
+    memory = Memory(
+        id="mem_anchor",
+        lane=Lane.CANON,
+        kind=Kind.ANCHOR,
+        scope=Scope.REPOSITORY,
+        scope_ref="acme/svc",
+        content="strip_bom lstrips the BOM from the first header cell.",
+        provenance=(
+            Source(
+                kind=SourceKind.FILE,
+                ref="src/importers/csv.py",
+                locator="src/importers/csv.py:strip_bom",
+                excerpt_digest=digest_text("def strip_bom(text):\n    return text\n"),
+            ),
+        ),
+        confidence=0.5,
+        trust=TrustClass.INTERNAL,
+    )
+    store.put(memory, op="seed", actor="test", reason="fixture")
+
+    def resolve(_locator: str) -> str:
+        return "def strip_bom(text):\n    return text.lstrip('\\ufeff')\n"
+
+    first = revalidate_anchors(store, resolve=resolve)
+    after_first = store.get("mem_anchor")
+    assert after_first is not None
+    weakened_to = after_first.confidence
+    assert first.weakened == ["mem_anchor"]
+    assert weakened_to < 0.5
+
+    for _ in range(4):
+        report = revalidate_anchors(store, resolve=resolve)
+        assert report.weakened == [], "the pass is not idempotent"
+
+    settled = store.get("mem_anchor")
+    assert settled is not None
+    assert settled.confidence == weakened_to
+
+
+def test_m1_a_second_distinct_change_weakens_again(tmp_path: Path) -> None:
+    """The fix must not turn the penalty off. A *different* change is new drift."""
+    from software_factory.memory.policing import revalidate_anchors
+    from software_factory.spec.units import TrustClass, digest_text
+
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    store.load()
+    store.put(
+        Memory(
+            id="mem_anchor",
+            lane=Lane.CANON,
+            kind=Kind.ANCHOR,
+            scope=Scope.REPOSITORY,
+            scope_ref="acme/svc",
+            content="strip_bom lstrips the BOM from the first header cell.",
+            provenance=(
+                Source(
+                    kind=SourceKind.FILE,
+                    ref="src/importers/csv.py",
+                    locator="src/importers/csv.py:strip_bom",
+                    excerpt_digest=digest_text("def strip_bom(text):\n    return text\n"),
+                ),
+            ),
+            confidence=0.5,
+            trust=TrustClass.INTERNAL,
+        ),
+        op="seed",
+        actor="test",
+        reason="fixture",
+    )
+
+    current = "def strip_bom(text):\n    return text.lstrip('\\ufeff')\n"
+    assert revalidate_anchors(store, resolve=lambda _l: current).weakened == ["mem_anchor"]
+    assert revalidate_anchors(store, resolve=lambda _l: current).weakened == []
+
+    changed_again = "def strip_bom(text):\n    return text.removeprefix('\\ufeff')\n"
+    assert revalidate_anchors(store, resolve=lambda _l: changed_again).weakened == ["mem_anchor"]
+
+
+# ---------------------------------------------------------------------------------- M2
+# Admission and eviction disagreed by one, closing a scope permanently.
+
+
+def test_m2_a_scope_at_its_item_ceiling_can_be_reopened_by_the_policy_pass(
+    tmp_path: Path,
+) -> None:
+    """Admission refused at `>= max_items`; the pass evicted only above `> max_items`. At
+    exactly the ceiling admission refused and told the operator to run the pass, which did
+    nothing -- the scope stayed closed until someone archived by hand."""
+    from software_factory.memory.admission import ScopeBudget
+    from software_factory.memory.policing import enforce_budget
+
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    store.load()
+    for index in range(3):
+        _chain_memory(store, f"S{index}", lane=Lane.CANDIDATE)
+
+    budget = ScopeBudget(max_items=3, max_bytes=1_000_000)
+    refused = admit(
+        Candidate(
+            content="The importer reads headers as UTF-8 with a byte-order mark.",
+            kind=Kind.FACT,
+            scope=Scope.REPOSITORY,
+            scope_ref="acme/svc",
+            provenance=(Source(kind=SourceKind.RUN, ref="run-new"),),
+        ),
+        store,
+        budget=budget,
+    )
+    assert isinstance(refused, Rejected)
+    assert refused.reason is RejectionReason.BUDGET
+
+    # The remediation the rejection prints must actually be able to help.
+    report = enforce_budget(store, "repository", "acme/svc", max_items=3, max_bytes=1_000_000)
+    assert report.evicted, "the pass the rejection recommends did nothing"
+
+    accepted = admit(
+        Candidate(
+            content="The importer reads headers as UTF-8 with a byte-order mark.",
+            kind=Kind.FACT,
+            scope=Scope.REPOSITORY,
+            scope_ref="acme/svc",
+            provenance=(Source(kind=SourceKind.RUN, ref="run-new"),),
+        ),
+        store,
+        budget=budget,
+    )
+    assert isinstance(accepted, Memory)
+
+
+# ------------------------------------------------------------------------------ M3, M4
+# Similarity read unrelated claims as contradictions, and saw only ASCII.
+
+
+def test_m3_a_short_canon_claim_does_not_contradict_everything_reusing_its_words() -> None:
+    """`containment` divides by the smaller token set, so a two-word canon memory scored
+    1.0 against any longer claim reusing both words. `admit` runs this against every canon
+    memory in scope and `detect_contradictions` quarantines *both* sides -- so an unrelated
+    newcomer could evict a real canon memory from retrieval."""
+    assert not negates("tests pass", "the deploy script does not pass tests to the runner")
+
+
+def test_m3_a_negator_far_from_the_shared_subject_does_not_contradict() -> None:
+    """A negator negates its own clause. The screen used to ask only whether one appeared
+    anywhere in the text, so a claim that repeated another and then said something negative
+    about an unrelated subject read as its contradiction."""
+    left = "the importer strips a byte-order mark from CSV headers"
+    right = (
+        "the importer strips a byte-order mark from CSV headers, although operators "
+        "inspecting the buffered writer during a long batch will observe that it does "
+        "not flush"
+    )
+
+    assert not negates(left, right)
+
+
+def test_m3_a_genuine_contradiction_survives_the_new_floor() -> None:
+    assert negates(
+        "The importer must strip a byte-order mark from CSV headers.",
+        "The importer must not strip a byte-order mark from CSV headers.",
+    )
+
+
+def test_m4_two_distinct_non_latin_claims_are_not_duplicates() -> None:
+    """`[a-z0-9_]+` saw only ASCII, so two different Japanese claims that both mentioned
+    "BOM" tokenized to {'bom'} and scored Jaccard 1.0 -- the second was rejected as a
+    near-duplicate of the first."""
+    from software_factory.memory.similarity import jaccard
+
+    importer = "インポータはBOMを削除する"
+    exporter = "エクスポータはBOMを追加する"
+
+    assert tokens(importer) != {"bom"}
+    assert jaccard(importer, exporter) < 0.9
+
+
+def test_m4_two_identical_non_latin_claims_are_still_duplicates() -> None:
+    """The other half: with no ASCII at all both sides tokenized to the empty set, jaccard
+    returned 0.0 by its empty-set guard, and duplicate *and* contradiction detection were
+    both silently off."""
+    from software_factory.memory.similarity import jaccard
+
+    claim = "インポータはヘッダの先頭バイト順マークを削除する"
+
+    assert tokens(claim)
+    assert jaccard(claim, claim) == 1.0
+
+
+def test_m4_unanalysable_text_is_distinguishable_from_dissimilar_text() -> None:
+    """0.0 meant both "these differ" and "this could not be analysed", and every caller
+    read it as the first."""
+    from software_factory.memory.similarity import comparable
+
+    assert not comparable("🎉 ✨")
+    assert comparable("the importer strips byte-order marks")
+
+
+# ---------------------------------------------------------------------------------- M5
+# The credential screen was narrow, and the gate skipped the evidence it named.
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "sk-proj-AbCdEfGh-1234567890abcdefghijklmnop",
+        "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "postgres://admin:S3cretPassw0rd@db.internal:5432/prod",
+        "xoxz-not-a-real-secret-example",
+        "DATABASE_PASSWORD='c0rrect-horse-battery-staple'",
+        "private_key: MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ",
+    ],
+)
+def test_m5_credential_shapes_the_screen_used_to_miss(secret: str) -> None:
+    """`is_secret_shaped` is the entire implementation of the `secret-clean` gate. Its
+    token bodies were `[A-Za-z0-9]`, so one hyphen ended the match; it knew the AWS key
+    *id* but not the secret; and it had nothing for a URL password or a named assignment."""
+    from software_factory.memory.admission import is_secret_shaped
+
+    assert is_secret_shaped(secret)
+
+
+@pytest.mark.parametrize(
+    "clean",
+    [
+        "the importer strips a byte-order mark from CSV headers",
+        "see https://example.com/docs/api-keys for the rotation policy",
+        "set timeout: 30 in the config",
+        "https://user@example.com/repo.git",
+        "the token bucket refills at 10 per second",
+    ],
+)
+def test_m5_ordinary_text_does_not_trip_the_screen(clean: str) -> None:
+    """ "Deliberately broad" is not "matches everything": a screen that fires on prose
+    would be switched off within a week."""
+    from software_factory.memory.admission import is_secret_shaped
+
+    assert not is_secret_shaped(clean)
+
+
+def test_m5_secret_clean_screens_the_evidence_it_names() -> None:
+    """The finding said "no credential material in changes, logs, or evidence" and the
+    gate never looked at `ctx.bundle`. Evidence is the channel written to be read later."""
+    from software_factory.evals.evidence import EvidenceBundle, EvidenceClass, EvidenceItem
+    from software_factory.evals.gates import secret_clean
+
+    bundle = EvidenceBundle(id="ev-1", run_id="r1", work_item_id="WI-1", stage="build")
+    bundle.add(
+        EvidenceItem(
+            id="e1",
+            evidence_class=EvidenceClass.COMMAND_TRANSCRIPT,
+            digest="d",
+            location="postgres://admin:S3cretPassw0rd@db.internal:5432/prod",
+        )
+    )
+    bundle.claim("the migration ran against the primary", "e1")
+
+    result = secret_clean(GateContext(stage="build", diff_text="", log_text="", bundle=bundle))
+
+    assert result.outcome is GateOutcome.FAIL
+    assert any("evidence" in finding.observed for finding in result.findings)
+
+
+# ---------------------------------------------------------------------------------- M7
+# The compound-claim screen refused ordinary single claims.
+
+
+@pytest.mark.parametrize(
+    "single",
+    [
+        "The API returns 404 for unknown ids, i.e. the resource does not exist",
+        "The retry fires on the first second of the window",
+        "Header parsing is UTF-8, cf. the exporter which is ASCII",
+        "The loader prefers the local file vs. the remote one",
+    ],
+)
+def test_m7_ordinary_single_claims_are_not_refused_as_compound(single: str) -> None:
+    """`re.IGNORECASE` applied to the whole pattern, so `[A-Z]` matched lowercase and the
+    two-sentence rule degenerated into "a period followed by a letter". Every claim with
+    an abbreviation in it was refused, poisoning a rejection series the operator is told
+    to read as a signal."""
+    from software_factory.memory.admission import _COMPOUND
+
+    assert not _COMPOUND.search(single)
+
+
+@pytest.mark.parametrize(
+    "compound",
+    [
+        "The importer strips BOMs. The exporter writes CRLF line endings.",
+        "The loader validates and also resolves inheritance.",
+        "first, it validates the header, second, it resolves inheritance",
+    ],
+)
+def test_m7_genuinely_compound_claims_are_still_refused(compound: str) -> None:
+    from software_factory.memory.admission import _COMPOUND
+
+    assert _COMPOUND.search(compound)
+
+
+# --------------------------------------------------------------------------------- M10
+# The anchor digest ignored indentation, so re-nesting produced no drift.
+
+
+def test_m10_moving_a_statement_into_a_conditional_changes_the_digest() -> None:
+    """Stripping indentation before hashing made these two hash identically. Moving a
+    statement into a conditional is the commonest accidental behaviour change in an
+    indentation-significant language, and it produced AGREED with no drift at all."""
+    from software_factory.spec.units import digest_text
+
+    outside = "if x:\n    do_a()\ndo_b()\n"
+    inside = "if x:\n    do_a()\n    do_b()\n"
+
+    assert digest_text(outside) != digest_text(inside)
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        ("if x:\n    do_a()\n", "if x:\n  do_a()\n"),
+        ("if x:\n\tdo_a()\n", "if x:\n    do_a()\n"),
+        ("if x:\n    do_a()\n", "if  x:\n    do_a()\n\n"),
+    ],
+)
+def test_m10_reformatting_still_produces_no_drift(left: str, right: str) -> None:
+    """The collapse exists so a reformat does not mark every anchor drifted and make the
+    signal worthless. Keeping indentation must not cost that."""
+    from software_factory.spec.units import digest_text
+
+    assert digest_text(left) == digest_text(right)

@@ -176,14 +176,34 @@ def blast_radius_clean(ctx: GateContext) -> GateResult:
     return GateResult("blast-radius-clean", GateOutcome.PASS, detail=detail)
 
 
+def _evidence_text(bundle: EvidenceBundle) -> str:
+    """The screenable surface of a bundle: claim text plus each item's location.
+
+    Bodies are not held here -- an item records a digest and a location -- so this screens
+    what the bundle itself carries. A location is included because a URL with an inline
+    password is a credential in exactly the place a reviewer will click.
+    """
+    parts = [claim.text for claim in bundle.claims]
+    parts += [item.location for item in bundle.items.values()]
+    return "\n".join(parts)
+
+
 def secret_clean(ctx: GateContext) -> GateResult:
-    """Screen the diff and the logs. Redaction is a backstop, not this gate's excuse."""
-    if ctx.diff_text is None and ctx.log_text is None:
+    """Screen the diff, the logs and the evidence. Redaction is a backstop, not an excuse.
+
+    The evidence bundle used to be named in the finding text and never looked at. Evidence
+    is the one channel written specifically to be read later by a human and by other runs,
+    so a credential landing there outlives the run that leaked it.
+    """
+    if ctx.diff_text is None and ctx.log_text is None and ctx.bundle is None:
         return GateResult(
             "secret-clean",
             GateOutcome.ERROR,
-            detail="no diff or log available to screen",
+            detail="no diff, log or evidence available to screen",
         )
+    sources: list[tuple[str, str | None]] = [("diff", ctx.diff_text), ("logs", ctx.log_text)]
+    if ctx.bundle is not None:
+        sources.append(("evidence", _evidence_text(ctx.bundle)))
     findings = [
         Finding(
             criterion="no secret material",
@@ -191,7 +211,7 @@ def secret_clean(ctx: GateContext) -> GateResult:
             expected="no credential material in changes, logs, or evidence",
             remediation="Remove it, then rotate the credential. Assume it is already exposed.",
         )
-        for label, text in (("diff", ctx.diff_text), ("logs", ctx.log_text))
+        for label, text in sources
         if text and is_secret_shaped(text)
     ]
     if findings:

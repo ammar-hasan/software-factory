@@ -75,16 +75,38 @@ def derived_trust(*classes: TrustClass) -> TrustClass:
     return max(classes, key=lambda c: _TRUST_ORDER[c])
 
 
+#: Tab width used to compare indentation. Only relative depth survives normalisation, so
+#: the exact number matters much less than that it is fixed.
+_TAB_WIDTH = 8
+
+
 def digest_text(text: str) -> str:
     """Digest of an anchored range, normalised so formatting is not a behaviour change.
 
     Whitespace runs collapse and blank lines vanish before hashing. Without this, every
     reformat marks every anchor drifted and the signal is worthless within a week
-    (adversarial finding AR-20). Indentation-significant languages are unaffected in
-    practice because a reindent that changes semantics also changes tokens.
+    (adversarial finding AR-20).
+
+    Indentation is *kept*, as a relative depth rather than a character count. Stripping it
+    outright made the two texts below hash identically::
+
+        if x:          if x:
+            do_a()         do_a()
+        do_b()             do_b()
+
+    Moving a statement into a conditional is the commonest accidental behaviour change in
+    an indentation-significant language, and it produced no drift at all -- `evaluate` read
+    AGREED, with the module's own claim being that agreement is a digest comparison rather
+    than a model's opinion. Ranking the distinct indent widths absorbs a 4-space-to-2-space
+    or tabs-to-spaces reformat, which is what the collapse was for, while leaving a
+    re-nesting visible.
     """
-    normalised = re.sub(r"[ \t]+", " ", text)
-    normalised = "\n".join(line.strip() for line in normalised.splitlines() if line.strip())
+    lines = [line for line in text.expandtabs(_TAB_WIDTH).splitlines() if line.strip()]
+    widths = sorted({len(line) - len(line.lstrip(" ")) for line in lines})
+    depth = {width: rank for rank, width in enumerate(widths)}
+    normalised = "\n".join(
+        f"{depth[len(line) - len(line.lstrip(' '))]}\t{' '.join(line.split())}" for line in lines
+    )
     return hashlib.sha256(normalised.encode("utf-8")).hexdigest()
 
 

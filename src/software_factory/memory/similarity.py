@@ -79,25 +79,81 @@ module's whole job includes telling "X must happen" from "X must not happen", an
 stopword list that eats the negation makes every contradiction look like a duplicate.
 """
 
-_WORD = re.compile(r"[a-z0-9_]+")
+#: Unicode-aware. The previous `[a-z0-9_]+` saw only ASCII, so a claim written in a
+#: non-Latin script tokenized to whatever ASCII it happened to embed -- two *different*
+#: Japanese claims that both mentioned "BOM" scored Jaccard 1.0 and the second was rejected
+#: as a duplicate, while two *identical* claims with no ASCII at all tokenized to the empty
+#: set, scored 0.0, and slipped past duplicate and contradiction detection entirely. The
+#: same regex backs skill-description collision checks and selection scoring, so a
+#: non-English skill library lost both.
+_WORD = re.compile(r"\w+")
+
+#: Scripts that do not put spaces between words. One `\w+` run in these is a clause, not a
+#: word, so indexing it whole would make every pair of distinct claims score 0.0. Character
+#: bigrams give them something to overlap on.
+_UNSEGMENTED = re.compile(
+    r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u0e00-\u0e7f\uac00-\ud7af]"
+)
 
 #: Words that flip a claim's meaning. Never filtered out, at any length: this module's
 #: job includes telling "X must happen" from "X must not happen".
 _NEGATORS = frozenset({"not", "never", "no", "without", "avoid", "cannot", "neither"})
 
+#: How many content words two claims must actually share before either is treated as being
+#: about the other's subject. `containment` divides by the *smaller* token set, so a
+#: two-word canon memory scored 1.0 against any longer claim reusing both words: "tests
+#: pass" was read as contradicting "the deploy script does not pass tests to the runner",
+#: admission rejected the newcomer, and `detect_contradictions` quarantined *both* --
+#: dropping a real canon memory out of retrieval because an unrelated claim reused two
+#: common words.
+_MIN_SHARED_TOKENS = 3
 
-def tokens(text: str) -> set[str]:
-    """Content words, lowercased, with stopwords and one-character noise removed."""
-    return {
-        word
-        for word in _WORD.findall(text.lower())
+#: How far a negator may sit from a shared content word and still be read as negating it.
+_NEGATOR_WINDOW = 4
+
+
+def _bigrams(word: str) -> list[str]:
+    if len(word) < 2:
+        return [word]
+    return [word[index : index + 2] for index in range(len(word) - 1)]
+
+
+def _scan(text: str) -> list[str]:
+    """Content words in order, with duplicates kept. ``tokens`` is this, deduplicated.
+
+    Order matters to the negation test, which asks whether a negator sits near the subject
+    the two claims share rather than merely somewhere in the sentence.
+    """
+    found: list[str] = []
+    for word in _WORD.findall(text.casefold()):
+        if _UNSEGMENTED.search(word):
+            found.extend(_bigrams(word))
+            continue
         # Numbers are kept at any length: "retry after 3s" and "retry after 30s" are
         # different claims, and dropping short numeric tokens makes them identical.
         # Negators are kept at any length too: the length filter was silently eating
         # "no", which made every contradiction phrased with it invisible to admission
         # control and to the policy pass.
-        if word not in _STOPWORDS and (len(word) > 2 or word.isdigit() or word in _NEGATORS)
-    }
+        if word in _STOPWORDS:
+            continue
+        if len(word) > 2 or word.isdigit() or word in _NEGATORS:
+            found.append(word)
+    return found
+
+
+def tokens(text: str) -> set[str]:
+    """Content words, case-folded, with stopwords and one-character noise removed."""
+    return set(_scan(text))
+
+
+def comparable(text: str) -> bool:
+    """Whether this text yields anything a similarity score can be computed from.
+
+    ``jaccard`` and ``containment`` both return 0.0 for an empty token set, and every
+    caller reads 0.0 as "not similar". That conflates "these differ" with "this could not
+    be analysed", so anything that cares about the difference asks here first.
+    """
+    return bool(tokens(text))
 
 
 def jaccard(left: str, right: str) -> float:
@@ -146,12 +202,16 @@ def negates(left: str, right: str, *, topic_threshold: float = 0.45) -> bool:
     members of an antonym pair). Requiring *exactly one* negator is what stops "X must
     not happen" and "X must not happen" from reading as a contradiction.
     """
-    if containment(left, right) < topic_threshold:
+    left_tokens, right_tokens = tokens(left), tokens(right)
+    shared = left_tokens & right_tokens
+    if len(shared) < _MIN_SHARED_TOKENS or containment(left, right) < topic_threshold:
         return False
 
-    left_tokens, right_tokens = tokens(left), tokens(right)
-    left_negated = bool(left_tokens & _NEGATORS)
-    right_negated = bool(right_tokens & _NEGATORS)
+    # The negator has to attach to the subject the two claims share, not merely appear
+    # somewhere in one of them. Without this, any sentence containing "not" contradicted
+    # any sentence that reused a couple of its words.
+    left_negated = _negates_shared(left, shared)
+    right_negated = _negates_shared(right, shared)
     if left_negated != right_negated:
         return True
 
@@ -159,6 +219,20 @@ def negates(left: str, right: str, *, topic_threshold: float = 0.45) -> bool:
         (positive in left_tokens and negative in right_tokens)
         or (negative in left_tokens and positive in right_tokens)
         for positive, negative in _ANTONYMS
+    )
+
+
+def _negates_shared(text: str, shared: set[str]) -> bool:
+    """True when a negator sits within ``_NEGATOR_WINDOW`` words of a shared content word."""
+    sequence = _scan(text)
+    negator_positions = [i for i, word in enumerate(sequence) if word in _NEGATORS]
+    if not negator_positions:
+        return False
+    shared_positions = [i for i, word in enumerate(sequence) if word in shared]
+    return any(
+        abs(negator - subject) <= _NEGATOR_WINDOW
+        for negator in negator_positions
+        for subject in shared_positions
     )
 
 

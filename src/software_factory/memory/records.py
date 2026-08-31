@@ -194,6 +194,15 @@ class Memory:
     contradicts: tuple[str, ...] = ()
     quarantined: bool = False
     last_used_at: datetime | None = None
+    stale_for: str | None = None
+    """The ``locator@digest`` this memory has already been penalised for.
+
+    Staleness is a state, not an event. Without this the drift penalty was re-applied on
+    every policy pass -- the source's ``excerpt_digest`` is never rewritten, so the mismatch
+    was permanent and a nightly pass drove confidence to zero in a fortnight. Recording what
+    the penalty was for makes the pass idempotent, and lets a *second, different* change to
+    the same anchor weaken the memory again, which is the behaviour the penalty is for.
+    """
     use_count: int = 0
     helped_count: int = 0
     """Incremented only when this memory was cited in a run that then passed its gates.
@@ -280,6 +289,7 @@ class Memory:
             "contradicts": list(self.contradicts),
             "quarantined": self.quarantined,
             "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
+            "stale_for": self.stale_for,
             "use_count": self.use_count,
             "helped_count": self.helped_count,
         }
@@ -321,6 +331,7 @@ class Memory:
             last_used_at=(
                 datetime.fromisoformat(raw["last_used_at"]) if raw.get("last_used_at") else None
             ),
+            stale_for=raw.get("stale_for"),
             use_count=int(raw.get("use_count", 0)),
             helped_count=int(raw.get("helped_count", 0)),
         )

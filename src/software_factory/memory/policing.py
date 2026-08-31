@@ -143,16 +143,39 @@ def revalidate_anchors(store: MemoryStore, *, resolve: object) -> PolicyReport:
                 demote(memory, store, reason=f"anchor {source.locator} no longer resolves")
                 report.stale.append(memory.id)
                 break
-            if source.excerpt_digest and digest_text(current) != source.excerpt_digest:
-                memory.confidence *= STALE_PENALTY
-                store.put(
-                    memory,
-                    op="weaken",
-                    actor="policy",
-                    reason=f"anchor {source.locator} changed under this memory",
-                )
-                report.weakened.append(memory.id)
+            if not source.excerpt_digest:
+                continue
+            observed = digest_text(current)
+            if observed == source.excerpt_digest:
+                if memory.stale_for is not None:
+                    # The anchor came back. Clear the mark so a *future* change weakens again.
+                    memory.stale_for = None
+                    store.put(
+                        memory,
+                        op="revalidate",
+                        actor="policy",
+                        reason=f"anchor {source.locator} matches the recorded excerpt again",
+                    )
+                continue
+
+            # Weakening is a transition, not a repeated multiplication. `excerpt_digest` is
+            # never rewritten, so the mismatch is permanent: re-applying the penalty each
+            # pass drove confidence to zero in a fortnight of nightly runs and kept
+            # `report.weakened` non-empty forever, so an operator never saw the empty report
+            # that this module's docstring calls the healthy steady state.
+            mark = f"{source.locator}@{observed}"
+            if memory.stale_for == mark:
                 break
+            memory.confidence *= STALE_PENALTY
+            memory.stale_for = mark
+            store.put(
+                memory,
+                op="weaken",
+                actor="policy",
+                reason=f"anchor {source.locator} changed under this memory",
+            )
+            report.weakened.append(memory.id)
+            break
     return report
 
 
@@ -366,7 +389,12 @@ def enforce_budget(
     ]
 
     def over() -> bool:
-        return len(live) > max_items or sum(len(m.content) for m in live) > max_bytes
+        # `>=`, matching admission. With `>` the pass considered a scope holding exactly
+        # `max_items` to be fine while admission refused it -- and the rejection told the
+        # operator to run this pass, the one action that could not help. The scope stayed
+        # closed until someone archived by hand. Eviction now leaves room for one more,
+        # which is the state admission accepts.
+        return len(live) >= max_items or sum(len(m.content) for m in live) >= max_bytes
 
     if not over():
         return report
