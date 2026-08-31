@@ -132,6 +132,14 @@ class GateContext:
     critic_engine: tuple[str, str] | None = None
     allow_shared_blind_spot: bool = False
     has_test_command: bool = True
+    has_build_command: bool = True
+    """Whether this repository has a build step to run at all.
+
+    Distinct from `build_ok is None`, which means "it has one and we did not run it". A
+    repository with no build command cannot fail this gate and cannot pass it either --
+    the same shape as `has_test_command`, and the two answering an identical absence
+    differently was an inconsistency an operator would read as a bug in one of them.
+    """
 
 
 Gate = Callable[[GateContext], GateResult]
@@ -225,6 +233,15 @@ def build_green(ctx: GateContext) -> GateResult:
     The distinction matters more than the check: "we did not build it" reading as green is
     how a change reaches review having never been compiled.
     """
+    if not ctx.has_build_command:
+        return GateResult(
+            "build-green",
+            GateOutcome.UNENFORCEABLE,
+            detail=(
+                "this repository has no build step, so this gate cannot be enforced; the "
+                "change carries that label"
+            ),
+        )
     if ctx.build_ok is None:
         return GateResult("build-green", GateOutcome.ERROR, detail="build was not run")
     if not ctx.build_ok:

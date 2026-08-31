@@ -414,6 +414,208 @@ ROLE_FOR_STAGE: dict[Stage, AgentRole] = {
 }
 
 
+PYTEST_COMMAND = ["python", "-m", "pytest", "-v", "--no-header", "-p", "no:cacheprovider"]
+"""How the repository's suite is invoked.
+
+`-v` rather than `-q`, and the difference is not cosmetic: `parse_pytest` extracts per-test
+identifiers, and quiet output is a row of dots. Invoked quietly, the parser returned zero
+results for a suite that passed -- which `tests-pass` correctly refuses as "exit code 0 with
+0 results", so the mismatch surfaced as a gate failure rather than as a silent pass. It also
+made `regression-proven` unable to name the new test, which is the whole comparison.
+
+`-p no:cacheprovider` keeps the run from writing `.pytest_cache` into the workspace, which
+would show up in the diff the gates screen.
+"""
+
+
+_COLLECTION_ERROR = 2
+"""pytest's exit code for a collection failure -- the tree did not import.
+
+Distinguished from an ordinary test failure because they mean different things to
+`build-green`: tests that ran and failed are a working build with a bug, and a suite that
+could not collect is a build that is broken.
+"""
+
+#: How long the repository's own suite may take before the run gives up on it. Generous,
+#: because a slow suite is a property of the repository rather than a fault, and short
+#: enough that a hung test does not hold a work item open indefinitely.
+VALIDATION_TIMEOUT_S = 600
+
+
+@dataclass(frozen=True, slots=True)
+class Validation:
+    """What the repository's own validation said, if it has any.
+
+    `build_ok` is `None` rather than `True` when there is no test command. A repository with
+    no validation has not been shown to build, and reporting `True` would be the constant
+    this class replaced.
+    """
+
+    has_test_command: bool = False
+    at_tip: Any | None = None
+    at_parent: Any | None = None
+    new_test_ids: tuple[str, ...] = ()
+    build_ok: bool | None = None
+
+
+def _test_command_for(root: Path) -> list[str] | None:
+    """The repository's own test command, or None if it has none.
+
+    Detected from what is present rather than configured, because a factory pointed at a
+    repository it has never seen has nowhere to have been told. A repository that declares
+    one explicitly should be believed over this; that declaration does not exist yet, and
+    when it does it belongs above this check rather than instead of it.
+
+    Only pytest is detected. That is a real limit and it is stated rather than papered over:
+    a repository whose suite is `go test` or `npm test` gets `None` here, which makes
+    `tests-pass` report *unenforceable* -- honest, and less useful than an adapter.
+    """
+    has_tests = (
+        (root / "tests").is_dir() or any(root.glob("test_*.py")) or any(root.glob("**/test_*.py"))
+    )
+    return PYTEST_COMMAND if has_tests else None
+
+
+def _run_suite(root: Path, command: list[str]) -> Any:
+    """Run the suite where it stands and parse the result."""
+    import subprocess
+
+    from software_factory.runtime.tools import parse_pytest
+
+    completed = subprocess.run(
+        command,
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=VALIDATION_TIMEOUT_S,
+        check=False,
+    )
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    run = parse_pytest(completed.stdout + "\n" + completed.stderr, command, head)
+    run.exit_code = completed.returncode
+    return run
+
+
+def _new_tests(
+    workspace: Workspace, at_tip: Any, command: list[str], parent: str
+) -> tuple[str, ...]:
+    """Which tests in the tip run did not exist at the parent commit.
+
+    Answered from git where git can answer it, which is the common case and the cheap one: a
+    test living in a file the parent does not have is new, and `git ls-tree` says so without
+    running anything. Only a test added to a file that *already existed* needs the parent's
+    own suite run to identify, and that third execution is the reason to avoid it -- a
+    defect fix on a repository with a ten-minute suite would otherwise cost half an hour
+    before the gate has an opinion.
+    """
+    import subprocess
+
+    listing = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", parent],
+        cwd=workspace.root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if listing.returncode != 0:
+        return ()
+    existed = {line.strip() for line in listing.stdout.splitlines() if line.strip()}
+
+    from_new_files = {
+        result.test_id
+        for result in at_tip.results
+        if result.test_id.split("::", 1)[0] not in existed
+    }
+    touched_existing = {
+        result.test_id.split("::", 1)[0]
+        for result in at_tip.results
+        if result.test_id.split("::", 1)[0] in existed
+    } & set(_test_paths(workspace))
+    if not touched_existing:
+        return tuple(sorted(from_new_files))
+
+    # A test file the parent also has, edited here. Only its own suite run can say which of
+    # its tests are new.
+    baseline = _run_suite_at(workspace.root, command, parent)
+    before = {result.test_id for result in baseline.results} if baseline else set()
+    return tuple(
+        sorted(from_new_files | {r.test_id for r in at_tip.results if r.test_id not in before})
+    )
+
+
+def _test_paths(workspace: Workspace) -> tuple[str, ...]:
+    """Test files this run added or changed.
+
+    Test files only. Carrying the whole diff onto the parent would be running the tip, and
+    the comparison the gate makes depends on the code being the parent's.
+    """
+    return tuple(
+        sorted(
+            path
+            for path in workspace.changed_paths()
+            if Path(path).name.startswith("test_") or Path(path).name.endswith("_test.py")
+        )
+    )
+
+
+def _run_suite_at(
+    root: Path, command: list[str], commit: str, *, carrying: tuple[str, ...] = ()
+) -> Any | None:
+    """Run the suite at another commit, in a worktree of its own.
+
+    A separate worktree rather than stashing and checking out the run's own tree. The first
+    version did the latter and it was both wrong and unsafe: `git stash push --staged`
+    returns a non-zero code on success in git 2.43, so the pop was skipped, and a checkout
+    over a dirty tree carries uncommitted files forward -- so the "parent" run saw the new
+    test and `regression-proven` found nothing new. The dangerous half is worse than the
+    wrong half: a stash that is taken and not popped loses the run's work.
+
+    A worktree cannot do either. The live tree is never touched, and the parent's code is
+    the only thing in the directory the suite runs in.
+
+    Returns None when there is no such commit -- a shallow clone, or an orphan first commit
+    with no parent. Inventing a result would give `regression-proven` a comparison against
+    nothing, which is the failure FR-13.3a exists to name.
+    """
+    import subprocess
+    import tempfile
+
+    def run_git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=False)
+
+    resolved = run_git("rev-parse", "--verify", f"{commit}^{{commit}}")
+    if resolved.returncode != 0:
+        return None
+
+    with tempfile.TemporaryDirectory(prefix="sf-parent-") as directory:
+        target = Path(directory) / "tree"
+        added = run_git(
+            "worktree", "add", "--detach", "--quiet", str(target), resolved.stdout.strip()
+        )
+        if added.returncode != 0:
+            return None
+        try:
+            for relative in carrying:
+                source = root / relative
+                if not source.is_file():
+                    continue
+                destination = target / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(source.read_bytes())
+            return _run_suite(target, command)
+        finally:
+            # Pruned as well as removed: an interrupted run would otherwise leave the parent
+            # repository holding a registration for a directory that no longer exists.
+            run_git("worktree", "remove", "--force", str(target))
+            run_git("worktree", "prune")
+
+
 @dataclass(slots=True)
 class StageOutcome:
     """What one stage produced."""
@@ -1179,6 +1381,13 @@ class Coordinator:
         escalating = registry.escalating_violations()
         if escalating:
             violations[ViolationClass.ESCALATING] = len(escalating)
+        # The repository's own validation, actually run. These three fields were
+        # `has_test_command=False` and `build_ok=True` constants, which made `tests-pass`
+        # permanently unenforceable, `build-green` permanently satisfied, and
+        # `regression-proven` -- the keystone gate -- an assertion with no measured input.
+        # It blocked a defect fix for having no evidence, which is right, and it had never
+        # once compared a real test run at the tip against a real one at the parent.
+        validation = self._validate(item, stage, workspace)
         return GateContext(
             stage=stage.value,
             work_class=item.work_class.value,
@@ -1186,12 +1395,70 @@ class Coordinator:
             violations=violations,
             diff_text=workspace.diff() or "",
             bundle=bundle,
-            has_test_command=False,  # no test command configured in the local slice
-            build_ok=True,
+            has_test_command=validation.has_test_command,
+            has_build_command=validation.has_test_command,
+            tests_at_tip=validation.at_tip,
+            tests_at_parent=validation.at_parent,
+            new_test_ids=validation.new_test_ids,
+            build_ok=validation.build_ok,
             external_actions=(),
             permitted_external=frozenset(),
             builder_engine=("stub", "small"),
             critic_engine=("stub", "mid"),
+        )
+
+    def _validate(self, item: WorkItem, stage: Stage, workspace: Workspace) -> Validation:
+        """Run the repository's own tests, at the tip and where the gate needs it.
+
+        Only at the stages whose gates read the result: running a suite at TRIAGE costs the
+        same as running it at BUILD and answers a question nobody asked.
+
+        The parent-commit run happens only for defect-class work, because that is the only
+        place `regression-proven` needs it -- and it is expensive, since it means checking
+        out the parent and running the suite a second time. FR-13.3a is what makes it worth
+        the cost: a test that fails at the parent for the *wrong* reason (an import error,
+        a collection failure) is a test that proves nothing, and only a real run can tell
+        the difference.
+        """
+        if stage not in (Stage.BUILD, Stage.REVIEW):
+            return Validation()
+
+        command = _test_command_for(workspace.root)
+        if command is None:
+            return Validation(has_test_command=False, build_ok=None)
+
+        at_tip = _run_suite(workspace.root, command)
+        at_parent = None
+        new_test_ids: tuple[str, ...] = ()
+        if item.work_class is WorkClass.DEFECT:
+            # The *new tests*, carried onto the parent's source. This is what FR-13.3a
+            # actually asks for, and it is the gate's own remediation: "run the new test
+            # against the parent commit". A plain checkout of the parent cannot contain a
+            # test written after it, so a bare parent run reports the new test as absent and
+            # the gate correctly refuses -- correctly, and uselessly, because no fix could
+            # ever satisfy it.
+            #
+            # Transplanting the tests and nothing else is the whole point: the test is the
+            # tip's, the code under it is the parent's, and a test that passes in that
+            # combination has not demonstrated the defect.
+            at_parent = _run_suite_at(
+                workspace.root,
+                command,
+                item.base_commit or "HEAD~1",
+                carrying=_test_paths(workspace),
+            )
+            if at_parent is not None:
+                new_test_ids = _new_tests(workspace, at_tip, command, item.base_commit or "HEAD~1")
+
+        return Validation(
+            has_test_command=True,
+            at_tip=at_tip,
+            at_parent=at_parent,
+            new_test_ids=new_test_ids,
+            # A suite that ran at all is evidence the tree imports. A separate build step is
+            # the honest answer for a compiled language; for Python, collection *is* the
+            # build, and claiming a build we did not run would be the lie this replaces.
+            build_ok=at_tip.exit_code != _COLLECTION_ERROR,
         )
 
     # --------------------------------------------------------------------- plumbing

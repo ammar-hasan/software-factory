@@ -16,6 +16,7 @@ import pytest
 
 from software_factory.definition.models import Stage
 from software_factory.ledger import EntryType, Ledger
+from software_factory.orchestrator import SourceContext, WorkClass, WorkItem
 from software_factory.orchestrator.coordinator import MAX_DISCOVERIES_PER_RUN, STAGE_SCHEMAS
 
 # ------------------------------------------------------------------- FR-31 discovery
@@ -563,3 +564,125 @@ def test_a_factory_that_never_delegates_gets_the_same_view(tmp_path: Path) -> No
     assert len(roots) == 3
     assert all(not root.children for root in roots)
     assert all(root.depth == 1 for root in roots)
+
+
+# ------------------------------------------- the validation the trials exposed
+
+
+def test_the_gate_context_runs_the_repositorys_own_tests(tmp_path: Path) -> None:
+    """`_gate_context` supplied `has_test_command=False` and `build_ok=True` as constants.
+
+    So `tests-pass` was permanently unenforceable, `build-green` permanently satisfied, and
+    `regression-proven` -- the keystone gate -- an assertion with measured input on neither
+    side. It blocked a defect fix for having no evidence, which is correct, and it had never
+    once compared a real run at the tip against a real one at the parent.
+    """
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from trials.brownfield import prepare
+    from trials.harness import build_factory, coordinator_for, scripted
+
+    repo = prepare(tmp_path)
+    definition = build_factory(tmp_path / "factory", name="i", owner="t", repo="i")
+    coordinator = coordinator_for(definition, repo, tmp_path / "state", scripted())
+
+    from software_factory.runtime.workspace import WorkspaceFactory
+
+    workspace = WorkspaceFactory(repo, tmp_path / "ws").create(run_id="r1", replace=True)
+    validation = coordinator._validate(
+        WorkItem(
+            id="wi-1",
+            factory="i",
+            title="t",
+            request="r",
+            source=SourceContext(provider="cli", kind="direct", ref="local"),
+            work_class=WorkClass.CHORE,
+        ),
+        Stage.BUILD,
+        workspace,
+    )
+
+    assert validation.has_test_command
+    assert validation.at_tip is not None
+    assert len(validation.at_tip.results) == 2, "the repository's own suite really ran"
+    assert validation.build_ok is True
+
+
+def test_a_repository_with_no_suite_cannot_pass_build_green_either(tmp_path: Path) -> None:
+    """The same absence answered two ways is an inconsistency a reader takes for a bug.
+
+    `tests-pass` reported *unenforceable* and `build-green` reported ERROR for a repository
+    that simply has no validation.
+    """
+    from software_factory.evals.gates import GateContext, GateOutcome, build_green, tests_pass
+
+    context = GateContext(
+        stage="BUILD", has_test_command=False, has_build_command=False, build_ok=None
+    )
+
+    assert build_green(context).outcome is GateOutcome.UNENFORCEABLE
+    assert tests_pass(context).outcome is GateOutcome.UNENFORCEABLE
+    assert not build_green(context).blocks
+
+
+def test_the_suite_is_invoked_verbosely_because_the_parser_needs_ids() -> None:
+    """`-q` output is a row of dots.
+
+    Invoked quietly, `parse_pytest` returned zero results for a passing suite -- which
+    `tests-pass` correctly refused as "exit code 0 with 0 results", so the mismatch surfaced
+    as a gate failure rather than a silent pass. It also left `regression-proven` unable to
+    name the new test, which is the entire comparison.
+    """
+    from software_factory.orchestrator.coordinator import PYTEST_COMMAND
+
+    assert "-v" in PYTEST_COMMAND
+    assert "-q" not in PYTEST_COMMAND
+
+
+def test_the_parent_run_never_touches_the_live_working_tree(tmp_path: Path) -> None:
+    """A stash that is taken and not popped loses the run's work.
+
+    The first implementation stashed and checked out the run's own tree, and
+    `git stash push --staged` returns non-zero on success in git 2.43 -- so the pop was
+    skipped. A worktree cannot do either.
+    """
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from trials.brownfield import prepare
+    from trials.harness import write
+
+    from software_factory.orchestrator.coordinator import PYTEST_COMMAND, _run_suite_at
+
+    repo = prepare(tmp_path)
+    write(repo / "test_new.py", "def test_new():\n    assert True\n")
+    before = (repo / "test_new.py").read_text(encoding="utf-8")
+
+    at_parent = _run_suite_at(repo, PYTEST_COMMAND, "HEAD~1")
+
+    assert at_parent is not None
+    assert (repo / "test_new.py").read_text(encoding="utf-8") == before
+    assert not any(r.test_id.startswith("test_new.py") for r in at_parent.results)
+
+
+def test_new_tests_are_carried_onto_the_parents_code(tmp_path: Path) -> None:
+    """A plain checkout of the parent cannot contain a test written after it, so a bare
+    parent run reports the new test as absent -- correctly, and uselessly, because no fix
+    could ever satisfy the gate. FR-13.3a asks for the new test run against the old code.
+    """
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from trials.brownfield import prepare
+    from trials.harness import write
+
+    from software_factory.orchestrator.coordinator import PYTEST_COMMAND, _run_suite_at
+
+    repo = prepare(tmp_path)
+    write(repo / "test_new.py", "def test_new():\n    assert True\n")
+
+    carried = _run_suite_at(repo, PYTEST_COMMAND, "HEAD~1", carrying=("test_new.py",))
+
+    assert carried is not None
+    assert any(r.test_id.startswith("test_new.py") for r in carried.results)
