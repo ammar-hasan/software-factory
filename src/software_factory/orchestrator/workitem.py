@@ -150,6 +150,15 @@ class WorkItem:
     definition_revision: str = ""
     """Pinned for the item's duration, so its stages stay comparable (PRD FR-24.2)."""
 
+    base_commit: str = ""
+    """The commit this work item's change is based on.
+
+    Pinned for the same reason as the definition revision, and needed for a second: FR-19.4
+    says the factory hands a caller *setup guidance* rather than touching their files, and
+    guidance that does not name a base commit tells them to branch from wherever they happen
+    to be standing.
+    """
+
     @property
     def terminal(self) -> bool:
         return self.stage in TERMINAL
