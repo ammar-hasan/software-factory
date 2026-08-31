@@ -132,9 +132,14 @@ class RunCounts:
         return self.work + self.evaluation + self.benchmark + self.improvement
 
     @property
-    def measurement_share(self) -> float:
-        """How much of the run count is the factory measuring itself."""
-        return (self.total - self.work) / self.total if self.total else 0.0
+    def measurement_share(self) -> float | None:
+        """How much of the run count is the factory measuring itself, or None if no runs.
+
+        `None` rather than `0.0`: a factory that has never run has no measurement share, and
+        the dashboard rendered the zero as "0% measurement" -- a definite statement about a
+        ratio that is undefined.
+        """
+        return (self.total - self.work) / self.total if self.total else None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -143,7 +148,9 @@ class RunCounts:
             "evaluation": self.evaluation,
             "benchmark": self.benchmark,
             "improvement": self.improvement,
-            "measurementShare": round(self.measurement_share, 4),
+            "measurementShare": (
+                None if (share := self.measurement_share) is None else round(share, 4)
+            ),
             "byAgent": dict(sorted(self.by_agent.items())),
             "byStage": dict(sorted(self.by_stage.items())),
             "byStatus": dict(sorted(self.by_status.items())),
@@ -255,6 +262,18 @@ def compute(
                     "reporting zero here would read as a factory that produces none",
                 )
             )
+        elif not any(m.name == name for m in measures):
+            # Configured but unimplemented is a third state, and it needs its own row. The
+            # rows simply vanished when the adapter appeared, so an operator who did the
+            # thing the reason text told them to do watched three metrics disappear from
+            # the dashboard -- and a metric that is absent reads as one nobody wanted.
+            measures.append(
+                unavailable(
+                    name,
+                    f"the {integration} adapter is configured, but nothing in this build "
+                    "computes this metric yet",
+                )
+            )
 
     return Report(window=window, runs=runs, measures=tuple(measures))
 
@@ -343,11 +362,20 @@ def _gate_pass_rate(entries: list[LedgerEntry]) -> Measure:
 
 
 def _escalation_rate(entries: list[LedgerEntry], runs: int) -> Measure:
-    escalated = len({e.subject for e in entries if e.type is EntryType.ESCALATION})
+    """Share of *runs* that climbed a tier.
+
+    The numerator used to be distinct escalated work *items* over a denominator of runs, and
+    a run is written per stage -- so one work item that escalated at all three of its stages
+    reported 33%, when every run had escalated. Two populations, one ratio.
+    """
+    escalated = sum(1 for e in entries if e.type is EntryType.ESCALATION)
     if not runs:
         return insufficient("escalation_rate", "no runs in this window")
     return Measure(
-        name="escalation_rate", value=round(escalated / runs, 4), unit="share", sample=runs
+        name="escalation_rate",
+        value=round(min(escalated, runs) / runs, 4),
+        unit="share of runs",
+        sample=runs,
     )
 
 

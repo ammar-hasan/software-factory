@@ -192,8 +192,20 @@ class RecordingPolicy:
 
     enabled: bool = True
 
-    def expects_visual(self, work_class: str, *, user_facing: bool) -> bool:
-        return self.enabled and user_facing and work_class in self.visual_for_work_classes
+    def expects_visual(self, work_class: str, *, user_facing: bool | None) -> bool:
+        """Whether visual evidence is expected for this work.
+
+        `None` means nobody has said, and it is treated as "expect it" for the classes that
+        usually need it. That is the conservative direction: the cost of expecting evidence
+        for a change that turned out to be invisible is a statement in the bundle saying
+        none was captured; the cost of the other default is a user-facing change reviewed
+        with no picture of what it looks like.
+        """
+        if not self.enabled:
+            return False
+        if user_facing is False:
+            return False
+        return work_class in self.visual_for_work_classes
 
 
 def visual_evidence_statement(captures: list[Capture]) -> str:

@@ -167,12 +167,25 @@ def test_the_reason_names_the_missing_integration(tmp_path: Path) -> None:
     assert "no git-host adapter is configured" in autonomy.reason
 
 
-def test_configuring_the_integration_removes_the_unavailable_entry(tmp_path: Path) -> None:
+def test_configuring_the_integration_changes_the_reason_rather_than_the_row(
+    tmp_path: Path,
+) -> None:
+    """The row must not vanish.
+
+    This asserted that configuring the adapter *removed* the metric, and nothing in this
+    build computes `changes_merged` -- so an operator who did the thing the reason text told
+    them to do watched three metrics disappear from the dashboard. Configured-but-
+    unimplemented is a third state and needs its own row: a metric that is absent reads as
+    one nobody wanted.
+    """
     report = compute(
         ledger_with(tmp_path, run_started("r1")).read(), integrations=frozenset({"git-host"})
     )
 
-    assert report.measure("changes_merged") is None
+    merged = report.measure("changes_merged")
+    assert merged is not None
+    assert merged.availability is Availability.UNAVAILABLE
+    assert "nothing in this build computes" in merged.reason
 
 
 # -------------------------------------------------------------------------- gate rates

@@ -17,6 +17,7 @@ from typing import Any
 from software_factory.definition.loader import Definition
 from software_factory.definition.models import AgentRole, Effect, Stage
 from software_factory.definition.resolve import resolve_for_agent
+from software_factory.digests import digest_parts
 from software_factory.economics.spend import Ledgerless, SpendCap, charges_from
 from software_factory.evals.evidence import EvidenceBundle, EvidenceClass, EvidenceItem
 from software_factory.evals.gates import GateContext, GateReport, ViolationClass, run_gates
@@ -501,6 +502,11 @@ class Coordinator:
         return [Stage.TRIAGE, Stage.BUILD, Stage.REVIEW, Stage.HANDOFF]
 
     def _run_stage(self, item: WorkItem, stage: Stage, workspace: Workspace) -> StageOutcome:
+        # A run is one agent working one stage of one work item, and it needs its own id.
+        # Everything used `item.id`, so `transcript_refs` accumulated the same string once
+        # per stage: `Resumption.previous_runs` -- the FR-29.3 audit record -- was a list
+        # holding one id several times, identifying nothing.
+        run_id = f"{item.id}:{stage.value.lower()}:{len(item.history)}"
         role = ROLE_FOR_STAGE.get(stage, AgentRole.CUSTOM)
         agent = self._agent_for(role)
         agent_name = agent[0] if agent else role.value.lower()
@@ -595,7 +601,7 @@ class Coordinator:
 
         run = loop.run()
 
-        self._carry_forward(conversation, item, stage, run)
+        self._carry_forward(conversation, item, stage, run, run_id)
 
         # The entry `sf spend` and `cost_per_change` fold on. Without it the whole economics
         # layer reads an empty ledger and reports a factory running for free, which is the
@@ -611,7 +617,7 @@ class Coordinator:
                 "tier": routing.current,
                 "model": active_tier.model,
                 "workItem": item.id,
-                "run": item.id,
+                "run": run_id,
                 # Repairs are counted apart from primary work: a factory spending a third of
                 # its budget on repair has a different problem from one spending it on
                 # scoring, and one number cannot say which (FR-26.5).
@@ -792,7 +798,7 @@ class Coordinator:
                 EvidenceItem(
                     id="diff",
                     evidence_class=EvidenceClass.DIFF,
-                    digest=str(hash(diff)),
+                    digest=digest_parts(diff),
                     location=f"{item.id}/diff.patch",
                 )
             )
@@ -820,7 +826,9 @@ class Coordinator:
         """
         if stage not in (Stage.VERIFY, Stage.REVIEW):
             return None
-        if not self.recording_policy.expects_visual(item.work_class.value, user_facing=True):
+        if not self.recording_policy.expects_visual(
+            item.work_class.value, user_facing=item.user_facing
+        ):
             return None
         return NotRecorded(
             kind=RecordingKind.BROWSER,
@@ -828,8 +836,37 @@ class Coordinator:
             detail=f"no recorder is configured for {stage.value.lower()}",
         )
 
+    def _persist_transcript(self, run_id: str, run: RunResult) -> str:
+        """Write the run's transcript beside the ledger and return its reference.
+
+        `transcript_refs` was documented as "ledger references to the full transcripts. The
+        history stays retrievable; it just does not travel" -- and nothing anywhere wrote a
+        transcript, so the sentence rendered into every resuming agent's prompt described
+        something that did not exist. Written to a file rather than into the ledger because
+        transcripts are large and the ledger is walked in full by `verify`.
+        """
+        directory = self.ledger.path.parent / "transcripts"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{run_id.replace('/', '_')}.json"
+        path.write_text(
+            json.dumps(
+                [
+                    {"role": message.role.value, "content": message.content}
+                    for message in run.transcript
+                ],
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return str(path)
+
     def _carry_forward(
-        self, conversation: ConversationState, item: WorkItem, stage: Stage, run: RunResult
+        self,
+        conversation: ConversationState,
+        item: WorkItem,
+        stage: Stage,
+        run: RunResult,
+        run_id: str,
     ) -> None:
         """Record what this run learned, for the next run of the same specialist.
 
@@ -837,26 +874,43 @@ class Coordinator:
         and what is still open. Everything else is in the transcript, which stays
         retrievable -- a summary that carried everything would be a second transcript.
         """
-        conversation.transcript_refs.append(item.id)
+        conversation.transcript_refs.append(self._persist_transcript(run_id, run))
         output = run.output or {}
 
-        for text in _as_texts(output.get("decisions")):
-            conversation.add(Note(kind=NoteKind.DECISION, text=text, run_id=item.id, stage=stage))
-        for text in _as_texts(output.get("attempted")):
-            conversation.add(Note(kind=NoteKind.ATTEMPT, text=text, run_id=item.id, stage=stage))
-        for text in _as_texts(output.get("constraints")):
-            conversation.add(Note(kind=NoteKind.CONSTRAINT, text=text, run_id=item.id, stage=stage))
-        for text in _as_texts(output.get("artifacts")):
-            conversation.add(Note(kind=NoteKind.ARTIFACT, text=text, run_id=item.id, stage=stage))
+        for key, kind in (
+            ("decisions", NoteKind.DECISION),
+            ("attempted", NoteKind.ATTEMPT),
+            ("constraints", NoteKind.CONSTRAINT),
+            ("artifacts", NoteKind.ARTIFACT),
+        ):
+            texts, problem = _as_texts(output.get(key))
+            for text in texts:
+                conversation.add(Note(kind=kind, text=text, run_id=run_id, stage=stage))
+            if problem:
+                # Recorded rather than dropped. A model returning `{"decisions": {...}}`
+                # lost its decisions with nothing anywhere saying so, which is exactly the
+                # case where "the agent forgot" and "the harness dropped it" have completely
+                # different fixes.
+                self.ledger.append(
+                    EntryType.VIOLATION,
+                    actor="coordinator",
+                    subject=item.id,
+                    payload={
+                        "kind": "malformed_carry_forward",
+                        "field": key,
+                        "stage": stage.value,
+                        "detail": problem,
+                    },
+                )
         # Calibration unknowns are open questions by construction: the agent said it did not
         # know. Losing them between runs turns an unanswered question into an assumption
         # nobody made deliberately.
         for text in run.calibration.unknowns if run.calibration else []:
             conversation.add(
-                Note(kind=NoteKind.OPEN_QUESTION, text=str(text), run_id=item.id, stage=stage)
+                Note(kind=NoteKind.OPEN_QUESTION, text=str(text), run_id=run_id, stage=stage)
             )
 
-        record = compact(conversation, run_id=item.id)
+        record = compact(conversation, run_id=run_id)
         if record is not None:
             self.ledger.append(
                 EntryType.COMPACTION,
@@ -1075,15 +1129,26 @@ def local_coordinator(
     )
 
 
-def _as_texts(value: object) -> list[str]:
+def _as_texts(value: object) -> tuple[list[str], str]:
     """Model output is untrusted in shape as well as content.
 
     A field the schema says is a list of strings can arrive as a string, a list of objects,
-    or absent. Coercing here keeps the carried state well-formed rather than letting a
-    malformed field become a note that breaks the next run's summary.
+    or absent. Returns the usable strings *and* a note about what could not be used, because
+    the module's whole thesis is that a silent drop and a model that said nothing must not
+    look the same.
+
+    `str()` used to be applied to every entry, so a `null` in the list became a carried note
+    reading literally `"None"` and a nested object leaked a Python `repr` into a summary the
+    next run reads as prose. Non-strings are skipped and counted instead.
     """
+    if value is None:
+        return [], ""
     if isinstance(value, str):
-        return [value] if value.strip() else []
+        return ([value] if value.strip() else []), ""
     if isinstance(value, list):
-        return [str(entry) for entry in value if str(entry).strip()]
-    return []
+        usable = [entry for entry in value if isinstance(entry, str) and entry.strip()]
+        skipped = len(value) - len(usable)
+        return usable, (
+            f"{skipped} entry/entries were not text and were not carried" if skipped else ""
+        )
+    return [], f"the field arrived as {type(value).__name__}, not a list of strings"

@@ -13,12 +13,12 @@ grant rather than honouring it.
 | Capability | Person only |
 | --- | --- |
 | `approve_spec` | **yes** |
-| `answer_question` | no |
+| `answer_question` | **yes** |
 | `widen_blast_radius` | **yes** |
 | `force_promote_skill` | **yes** |
 | `adopt_definition_change` | **yes** |
 | `approve_self_referential_change` | **yes** |
-| `emergency_stop` | no |
+| `emergency_stop` | **yes** |
 | `erase_data` | **yes** |
 | `override_gate` | **yes** |
 | `cancel_work` | **yes** |

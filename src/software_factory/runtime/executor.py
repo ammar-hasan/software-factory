@@ -184,8 +184,17 @@ class LocalExecutor:
         *,
         allow_unsandboxed: bool = False,
         level: SandboxLevel | None = None,
+        describes_itself_as: str = "local executor",
     ) -> None:
+        """`describes_itself_as` names this executor in its refusals.
+
+        The ssh worker composes this one, and its allowlist refusal read "the local executor
+        cannot enforce...", naming a component the operator never configured and sending
+        them to look at the wrong thing. It has to be a constructor argument rather than an
+        attribute set afterwards, because the refusal happens here.
+        """
         self.policy = policy
+        self.describes_itself_as = describes_itself_as
         self.level = level or detect_sandbox_level()
         if self.level is SandboxLevel.NONE and not allow_unsandboxed:
             raise ExecutorError(
@@ -200,12 +209,17 @@ class LocalExecutor:
             # the only honest option: silently treating an allowlist as open egress while
             # `sf audit` reports it as a control is worse than not offering it, because
             # the operator would be reading a guarantee that does not exist.
+            # Named from the instance. The ssh worker composes this executor, so its
+            # refusal read "the local executor cannot enforce...", naming a component the
+            # operator did not configure and sending them to the wrong place. The
+            # remediation was wrong too: the container executor refuses `allowlist` for the
+            # same reason, so it is not the answer either.
             raise ExecutorError(
-                "the local executor cannot enforce a per-host network allowlist",
+                f"the {describes_itself_as} cannot enforce a per-host network allowlist",
                 remediation=(
                     "Set `network: none` to deny egress, or `network: open` to accept "
-                    "unrestricted egress deliberately. Per-host filtering needs the "
-                    "container executor."
+                    "unrestricted egress deliberately. Per-host filtering needs an egress "
+                    "proxy in front of the runner; no executor here does it alone."
                 ),
             )
 

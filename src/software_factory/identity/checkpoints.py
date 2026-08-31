@@ -236,9 +236,17 @@ class CheckpointBook:
         changes: list[tuple[str, CheckpointStatus]] = []
         for checkpoint in sorted(self.checkpoints.values(), key=lambda c: c.id):
             due = checkpoint.due_state(now)
-            if due is not checkpoint.status:
-                checkpoint.status = due
-                changes.append((checkpoint.id, due))
+            if due is checkpoint.status:
+                continue
+            # A sweeper that was not running between the two deadlines jumped straight from
+            # OPEN to PARKED, and the reminder -- the thing that would have got the question
+            # answered before it parked -- was never sent. `due_state` computing the terminal
+            # state from the clock is right; skipping the states passed through is not, so
+            # the intermediate transition is emitted before the terminal one.
+            if checkpoint.status is CheckpointStatus.OPEN and due is CheckpointStatus.PARKED:
+                changes.append((checkpoint.id, CheckpointStatus.REMINDED))
+            checkpoint.status = due
+            changes.append((checkpoint.id, due))
         return changes
 
     def open_for(self, work_item_id: str) -> list[Checkpoint]:

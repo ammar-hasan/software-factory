@@ -329,7 +329,12 @@ class SshWorkerExecutor:
                     "reach the network, or declare `network: open` and mean it."
                 ),
             )
-        self._inner = LocalExecutor(policy, level=SandboxLevel.NONE, allow_unsandboxed=True)
+        self._inner = LocalExecutor(
+            policy,
+            level=SandboxLevel.NONE,
+            allow_unsandboxed=True,
+            describes_itself_as="ssh worker",
+        )
 
     @property
     def sandbox_level(self) -> SandboxLevel:

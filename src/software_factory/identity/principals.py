@@ -88,6 +88,13 @@ PERSON_ONLY: frozenset[Capability] = frozenset(
         Capability.WIDEN_BLAST_RADIUS,
         Capability.CANCEL_WORK,
         Capability.SKIP_STAGE,
+        # Both were missing, and both are checkpoints in `ANSWERED_BY`. An automation
+        # holding `emergency_stop` can halt the factory on a rule nobody reviewed at the
+        # moment it fires; an agent holding `answer_question` clears the checkpoint that
+        # exists *because* a person needed to answer, which does not delegate the question
+        # so much as delete it.
+        Capability.EMERGENCY_STOP,
+        Capability.ANSWER_QUESTION,
     }
 )
 
@@ -187,24 +194,53 @@ class Directory:
     def __init__(self, principals: list[Principal] | None = None) -> None:
         self._by_id: dict[str, Principal] = {}
         self._by_identity: dict[str, str] = {}
+        self._sealed = False
         for principal in principals or []:
             self.add(principal)
 
     def add(self, principal: Principal) -> None:
         if principal.id in self._by_id:
             raise ValueError(f"duplicate principal id {principal.id!r}")
+        if self._sealed:
+            raise ValueError(
+                "this directory is sealed; capabilities may not be granted at run time. "
+                "Change the definition and reload."
+            )
         self._by_id[principal.id] = principal
-        for identity in principal.identities:
+        for declared in principal.identities:
+            # Normalised here rather than only at lookup. `add` stored identities verbatim
+            # and `resolve_identity` lower-cased its key, so a directory built directly --
+            # in a test, or by any caller not going through the loader -- silently lost
+            # every mixed-case identity, and the collision check compared un-normalised
+            # strings so `GitHub:Amaya` and `git-host:amaya` did not collide either.
+            provider, separator, handle = declared.partition(":")
+            identity = (
+                f"{provider.strip().casefold()}:{handle.strip().casefold()}"
+                if separator
+                else declared.strip().casefold()
+            )
             existing = self._by_identity.get(identity)
             if existing is not None and existing != principal.id:
                 raise ValueError(
-                    f"provider identity {identity!r} maps to both {existing!r} and "
+                    f"provider identity {declared!r} maps to both {existing!r} and "
                     f"{principal.id!r}; an ambiguous identity cannot attribute a decision"
                 )
             self._by_identity[identity] = principal.id
 
     def get(self, principal_id: str) -> Principal | None:
         return self._by_id.get(principal_id)
+
+    def frozen(self) -> Directory:
+        """A copy that refuses further mutation.
+
+        The class docstring says "nothing here mutates at run time", and `add` is public and
+        grants capabilities. Both readings are defensible -- construction needs a way to add
+        -- so the honest resolution is a method that makes the claim true where it is
+        relied on, rather than a docstring asserting it of a class that does not enforce it.
+        """
+        copy = Directory(self.all())
+        copy._sealed = True
+        return copy
 
     def resolve_identity(self, provider: str, handle: str) -> Principal | None:
         """Map a provider identity to a principal, or ``None`` if it is unmapped.
@@ -213,8 +249,16 @@ class Directory:
         accepts work from strangers. It only stops being normal when a *decision* is
         attempted -- see :meth:`authorise`, which refuses an unknown principal by name.
         """
-        principal_id = self._by_identity.get(f"{provider}:{handle}".lower())
-        return self._by_id.get(principal_id) if principal_id else None
+        # Each part folded separately. Folding the joined string only strips the outer
+        # whitespace, so a handle with leading space still missed.
+        key = f"{provider.strip().casefold()}:{handle.strip().casefold()}"
+        principal_id = self._by_identity.get(key)
+        principal = self._by_id.get(principal_id) if principal_id else None
+        # Deactivating a principal revokes their intake trust too. It did not: `authorise`
+        # refuses an inactive principal, but this is the check that decides whether an
+        # automation requiring a known author accepts an event -- so a departed maintainer's
+        # handle still started work on their say-so.
+        return principal if principal is not None and principal.active else None
 
     def all(self) -> list[Principal]:
         return sorted(self._by_id.values(), key=lambda p: p.id)

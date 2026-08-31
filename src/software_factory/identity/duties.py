@@ -39,6 +39,12 @@ class ApprovalRequest:
     proposer_id: str
     self_referential: bool = False
     definition_change: bool = False
+    """Whether this changes the factory's own definition (FR-25.3's other half).
+
+    It was accepted and read by nothing, which is worse than absent: a caller setting it
+    reasonably believes they have asked for something. A definition change needs the
+    capability that adopts one, so it now decides `capability` rather than sitting unread.
+    """
 
     @property
     def required_approvals(self) -> int:
@@ -48,11 +54,17 @@ class ApprovalRequest:
 
     @property
     def capability(self) -> Capability:
-        return (
-            Capability.APPROVE_SELF_REFERENTIAL_CHANGE
-            if self.self_referential
-            else Capability.ADOPT_DEFINITION_CHANGE
-        )
+        """Which authority approving this exercises.
+
+        A self-referential change -- one altering a scorer, a gate or an eval -- is the
+        strongest case and takes its own capability. A definition change takes the one that
+        adopts definition changes. Anything else is an ordinary spec approval.
+        """
+        if self.self_referential:
+            return Capability.APPROVE_SELF_REFERENTIAL_CHANGE
+        if self.definition_change:
+            return Capability.ADOPT_DEFINITION_CHANGE
+        return Capability.APPROVE_SPEC
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +116,13 @@ def approve(
     """
     request = state.request
 
-    if principal_id == request.proposer_id:
+    # Resolved to a principal id before comparing. `proposer_id` is a string the caller
+    # supplies, and a proposer recorded by their provider handle -- which is how an event's
+    # author arrives -- did not match their own principal id, so self-approval and the group
+    # check both passed for the one person they exist to stop.
+    proposer = _principal_id_for(directory, request.proposer_id)
+
+    if principal_id == proposer:
         return Refused(
             "duties.self_approval",
             f"{principal_id!r} proposed {request.subject!r} and cannot be its approver",
@@ -140,12 +158,12 @@ def approve(
         # break. `validate.py` even tells the operator to "grant it to a second principal in
         # a different group", so the configuration was being checked for a property the
         # runtime did not enforce: the operator was told it held, and it did not.
-        others = [request.proposer_id, *(d.principal_id for d in state.approvals)]
+        others = [proposer, *(d.principal_id for d in state.approvals)]
         for other in others:
             conflict = _shares_group(directory, principal_id, other)
             if conflict is None:
                 continue
-            role = "the proposer" if other == request.proposer_id else "an existing approver"
+            role = "the proposer" if other == proposer else "an existing approver"
             return Refused(
                 "duties.same_group",
                 (
@@ -159,6 +177,22 @@ def approve(
             )
 
     return ApprovalState(request=request, approvals=(*state.approvals, decision))
+
+
+def _principal_id_for(directory: Directory, reference: str) -> str:
+    """A principal id from either a principal id or a `provider:handle` identity.
+
+    Returns the reference unchanged when it resolves to nothing, so an unknown proposer
+    still fails the self-approval check by string equality rather than silently passing it.
+    """
+    if directory.get(reference) is not None:
+        return reference
+    provider, separator, handle = reference.partition(":")
+    if separator:
+        resolved = directory.resolve_identity(provider, handle)
+        if resolved is not None:
+            return resolved.id
+    return reference
 
 
 def _shares_group(directory: Directory, left_id: str, right_id: str) -> str | None:

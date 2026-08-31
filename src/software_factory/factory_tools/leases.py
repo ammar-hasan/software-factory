@@ -185,23 +185,54 @@ class LeaseBook:
         action: ActionClass,
         *,
         holder: str,
+        token: str,
         now: datetime | None = None,
     ) -> Lease | Held:
-        """Extend a lease you hold. Refuses if it has already been taken by someone else."""
+        """Extend a lease you hold.
+
+        Three defects lived here, and none had ever been seen because nothing called this
+        -- tests included. It rebuilt the lease through `acquire` with `acquire`'s *default*
+        ttl, so renewing a sixty-minute lease shortened it to five; it read the intent off
+        whatever was in the table, so renewing after expiry transferred the lease to a new
+        holder while still describing the old one's work; and it identified the caller by
+        name alone.
+        """
+        now = now or utc_now()
+        existing = self.held(work_item_id, action, now=now)
+        if existing is None:
+            return Held(
+                lease=Lease(
+                    work_item_id=work_item_id,
+                    action=action,
+                    holder=holder,
+                    intent="(expired)",
+                    acquired_at=now,
+                    ttl=timedelta(0),
+                ),
+                message=f"no active lease on {work_item_id} for {action.value}",
+                remediation=(
+                    "Acquire it rather than renewing. A renewal that creates a lease would "
+                    "hand it to whoever asked last, describing the previous holder's work."
+                ),
+            )
         return self.acquire(
             work_item_id,
             action,
             holder=holder,
-            intent=(
-                self.leases[(work_item_id, action)].intent
-                if (work_item_id, action) in self.leases
-                else "continuing"
-            ),
+            intent=existing.intent,
+            ttl=existing.ttl,
             now=now,
+            token=token,
         )
 
     def release(
-        self, work_item_id: str, action: ActionClass, *, holder: str, token: str = ""
+        self,
+        work_item_id: str,
+        action: ActionClass,
+        *,
+        holder: str,
+        token: str = "",
+        now: datetime | None = None,
     ) -> bool:
         """Give up a lease. Returns False when it was not yours -- which is worth knowing,
         because releasing someone else's lease silently would be a way to defeat the whole
@@ -210,7 +241,9 @@ class LeaseBook:
         Checked on the token for the same reason `acquire` is: a name anyone can type is not
         a claim to anything.
         """
-        lease = self.leases.get((work_item_id, action))
+        # `held` rather than a raw lookup, so an expired lease is not "yours" to release.
+        # `release` took no clock at all, so it could not check.
+        lease = self.held(work_item_id, action, now=now)
         if lease is None or lease.holder != holder:
             return False
         if not secrets.compare_digest(token, lease.token):

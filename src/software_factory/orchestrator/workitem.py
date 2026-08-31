@@ -168,6 +168,15 @@ class WorkItem:
     """Pinned for the item's duration, so its stages stay comparable (PRD FR-24.2)."""
 
     base_commit: str = ""
+    user_facing: bool | None = None
+    """Whether this change alters what a person sees. ``None`` means nobody has said.
+
+    The recording policy takes this as a parameter and its only production caller supplied
+    the literal `True`, so every feature and defect was treated as user-facing and the
+    parameter distinguished nothing. `None` is carried rather than defaulted because the
+    honest answer for an unclassified item is "unknown", and the policy can then decide
+    conservatively rather than being told something nobody established.
+    """
     """The commit this work item's change is based on.
 
     Pinned for the same reason as the definition revision, and needed for a second: FR-19.4

@@ -2075,3 +2075,404 @@ def test_o17_all_five_note_kinds_can_be_produced_by_a_conformant_response() -> N
         ("artifacts", NoteKind.ARTIFACT),
     ):
         assert key in schema["properties"], kind
+
+
+# ============================================================== minor findings
+
+
+def test_i13_deactivating_a_principal_revokes_their_intake_trust() -> None:
+    """`authorise` refuses an inactive principal; `resolve_identity` did not.
+
+    That is the check deciding whether an automation requiring a known author accepts an
+    event, so a departed maintainer's handle still started work on their say-so.
+    """
+    directory = Directory(
+        [
+            Principal(
+                id="bo",
+                kind=PrincipalKind.PERSON,
+                identities=frozenset({"git-host:bo"}),
+                active=False,
+            )
+        ]
+    )
+
+    assert directory.resolve_identity("git-host", "bo") is None
+
+
+def test_i15_a_directory_built_directly_keeps_its_mixed_case_identities() -> None:
+    """`add` stored identities verbatim and `resolve_identity` lower-cased its key, so any
+    directory not built through the loader silently lost every mixed-case identity."""
+    directory = Directory(
+        [Principal(id="amaya", kind=PrincipalKind.PERSON, identities=frozenset({"GitHost:Amaya"}))]
+    )
+
+    assert directory.resolve_identity("githost", "amaya") is not None
+    assert directory.resolve_identity("GITHOST", " Amaya ") is not None
+
+
+def test_i16_a_sealed_directory_refuses_a_run_time_grant() -> None:
+    """The class documents that "nothing here mutates at run time" while `add` is public and
+    grants capabilities. A method that makes the claim true beats a docstring asserting it
+    of a class that does not enforce it."""
+    directory = Directory([person("amaya", Capability.APPROVE_SPEC)]).frozen()
+
+    with pytest.raises(ValueError, match="sealed"):
+        directory.add(Principal(id="mallory", kind=PrincipalKind.PERSON))
+
+
+def test_i17_an_automation_cannot_hold_the_capabilities_that_mean_a_person_acted() -> None:
+    """`emergency_stop` and `answer_question` are both checkpoints in `ANSWERED_BY`.
+
+    An automation holding the first halts the factory on a rule nobody reviewed at the
+    moment it fires; an agent holding the second clears the checkpoint that exists
+    *because* a person needed to answer, which deletes the question rather than delegating
+    it.
+    """
+    for capability in (Capability.EMERGENCY_STOP, Capability.ANSWER_QUESTION):
+        with pytest.raises(ValueError, match="cannot hold"):
+            Principal(
+                id="bot",
+                kind=PrincipalKind.AUTOMATION,
+                capabilities=frozenset({capability}),
+            )
+
+
+def test_i19_a_missed_reminder_window_still_sends_the_reminder() -> None:
+    """A sweeper not running between the two deadlines jumped straight to PARKED, so the
+    reminder -- the thing that would have got the question answered before it parked -- was
+    never sent."""
+    from datetime import timedelta
+
+    from software_factory.identity.checkpoints import (
+        Checkpoint,
+        CheckpointBook,
+        CheckpointKind,
+        CheckpointStatus,
+    )
+
+    book = CheckpointBook(directory=Directory([person("amaya", Capability.APPROVE_SPEC)]))
+    opened = utc_now()
+    book.open(
+        Checkpoint(
+            id="cp-1",
+            kind=CheckpointKind.SPEC_APPROVAL,
+            work_item_id="wi-1",
+            question="approve the delta?",
+            asked_by="architect",
+            opened_at=opened,
+        )
+    )
+
+    changes = book.sweep(now=opened + timedelta(hours=49))
+
+    assert (("cp-1", CheckpointStatus.REMINDED)) in changes
+    assert (("cp-1", CheckpointStatus.PARKED)) in changes
+
+
+def test_i20_a_definition_change_needs_the_capability_that_adopts_one() -> None:
+    """`definition_change` was accepted and read by nothing, which is worse than absent: a
+    caller setting it reasonably believes they have asked for something."""
+    from software_factory.identity import ApprovalRequest
+
+    plain = ApprovalRequest(subject="spec/x", proposer_id="amaya")
+    definition = ApprovalRequest(
+        subject="factory.yaml", proposer_id="amaya", definition_change=True
+    )
+
+    assert plain.capability is Capability.APPROVE_SPEC
+    assert definition.capability is Capability.ADOPT_DEFINITION_CHANGE
+
+
+def test_i14_a_proposer_recorded_by_handle_cannot_approve_their_own_change() -> None:
+    """`proposer_id` is a caller-supplied string, and a proposer recorded by their provider
+    handle -- which is how an event's author arrives -- did not match their own principal
+    id, so self-approval passed for the one person it exists to stop."""
+    from software_factory.identity import ApprovalRequest, ApprovalState, approve
+
+    directory = Directory(
+        [
+            Principal(
+                id="amaya",
+                kind=PrincipalKind.PERSON,
+                capabilities=frozenset({Capability.APPROVE_SPEC}),
+                identities=frozenset({"git-host:amaya"}),
+            )
+        ]
+    )
+    state = ApprovalState(request=ApprovalRequest(subject="spec/x", proposer_id="git-host:amaya"))
+
+    refused = approve(directory, state, principal_id="amaya", rationale="looks fine")
+
+    assert isinstance(refused, Refused)
+    assert refused.code == "duties.self_approval"
+
+
+def test_n17_identifiers_differing_only_in_whitespace_are_different_events() -> None:
+    """Stripping was a smaller version of the collision the length-prefixing exists to
+    prevent: `"42"` and `" 42"` are different identifiers to a provider that accepts both,
+    and normalising them hands the suppression primitive back through whitespace."""
+    from software_factory.intake import Provider
+    from software_factory.intake.events import event_identity
+
+    assert event_identity(Provider.GIT_HOST, "acme", "42") != event_identity(
+        Provider.GIT_HOST, "acme", " 42"
+    )
+
+
+def test_n19_provider_and_event_compare_the_way_the_filter_does() -> None:
+    """`selects` compared them case-sensitively while `matches()` folds the same two keys,
+    so one spelling selected and the other did not for reasons nothing explains."""
+    from software_factory.intake.pipeline import Automation
+
+    automation = Automation(
+        name="a",
+        agent="conductor",
+        prompt="p",
+        provider="Git-Host",
+        event="Issue.Opened",
+        require_known_author=False,
+    )
+
+    assert automation.selects(factory_event())
+
+
+def test_n21_case_folding_handles_more_than_ascii() -> None:
+    """`str.lower()` is not case-insensitivity outside ASCII, and without normalisation a
+    label typed with a combining accent does not match the same label composed."""
+    assert matching({"label": "STRASSE"}, label="straße")
+    assert matching({"label": "café"}, label="café")
+
+
+def test_n20_renewing_a_lease_keeps_the_ttl_it_was_given() -> None:
+    """`renew` rebuilt through `acquire` with `acquire`'s default ttl, so renewing a
+    sixty-minute lease shortened it to five."""
+    from datetime import timedelta
+
+    from software_factory.factory_tools.leases import ActionClass, Lease, LeaseBook
+
+    book = LeaseBook()
+    now = utc_now()
+    first = book.acquire(
+        "wi-1",
+        ActionClass.OPEN_CHANGE,
+        holder="run-1",
+        intent="opening",
+        ttl=timedelta(minutes=60),
+        now=now,
+    )
+    assert isinstance(first, Lease)
+
+    renewed = book.renew(
+        "wi-1",
+        ActionClass.OPEN_CHANGE,
+        holder="run-1",
+        token=first.token,
+        now=now + timedelta(minutes=5),
+    )
+
+    assert isinstance(renewed, Lease)
+    assert renewed.ttl == timedelta(minutes=60)
+
+
+def test_n20_renewing_an_expired_lease_does_not_transfer_it() -> None:
+    """It read the intent off whatever was in the table, so renewing after expiry handed the
+    lease to a new holder while still describing the old one's work."""
+    from datetime import timedelta
+
+    from software_factory.factory_tools.leases import ActionClass, Held, LeaseBook
+
+    book = LeaseBook()
+    now = utc_now()
+    book.acquire(
+        "wi-1",
+        ActionClass.OPEN_CHANGE,
+        holder="run-1",
+        intent="opening the release change",
+        ttl=timedelta(minutes=5),
+        now=now,
+    )
+
+    taken = book.renew(
+        "wi-1", ActionClass.OPEN_CHANGE, holder="run-2", token="", now=now + timedelta(hours=1)
+    )
+
+    assert isinstance(taken, Held)
+    assert "no active lease" in taken.message
+
+
+def test_n20_an_expired_lease_is_not_yours_to_release() -> None:
+    """`release` took no clock at all, so it could not check expiry."""
+    from datetime import timedelta
+
+    from software_factory.factory_tools.leases import ActionClass, Lease, LeaseBook
+
+    book = LeaseBook()
+    now = utc_now()
+    lease = book.acquire(
+        "wi-1",
+        ActionClass.COMMENT,
+        holder="run-1",
+        intent="x",
+        ttl=timedelta(minutes=5),
+        now=now,
+    )
+    assert isinstance(lease, Lease)
+
+    assert (
+        book.release(
+            "wi-1",
+            ActionClass.COMMENT,
+            holder="run-1",
+            token=lease.token,
+            now=now + timedelta(hours=1),
+        )
+        is False
+    )
+
+
+def test_o20_every_run_escalating_reports_as_every_run() -> None:
+    """Distinct escalated *work items* over a denominator of *runs*: one item escalating at
+    all three of its stages reported 33% when every run had escalated."""
+    import tempfile
+
+    from software_factory.ledger import EntryType, Ledger
+    from software_factory.observability.metrics import compute
+
+    with tempfile.TemporaryDirectory() as directory:
+        ledger = Ledger(Path(directory) / "ledger.jsonl")
+        for index in range(3):
+            ledger.append(EntryType.RUN_STARTED, actor="builder", subject=f"run-{index}")
+            ledger.append(EntryType.ESCALATION, actor="builder", subject="wi-1")
+
+        measure = compute(ledger.read()).measure("escalation_rate")
+
+    assert measure.value == 1.0
+
+
+def test_o21_the_diff_digest_is_the_same_in_every_process() -> None:
+    """`str(hash(diff))` is `PYTHONHASHSEED`-dependent, so two runs producing an identical
+    diff recorded different digests and a digest recorded yesterday could not be recomputed
+    today. `ledger/entry.py` already documents this exact hazard."""
+    import subprocess
+    import sys
+
+    script = (
+        "from software_factory.digests import digest_parts;"
+        "print(digest_parts('diff --git a/x b/x\\n+line\\n'))"
+    )
+    seen = {
+        subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        for _ in range(3)
+    }
+
+    assert len(seen) == 1
+
+
+def test_o22_a_partial_budget_uses_the_declared_budget_for_the_rest() -> None:
+    """A caller passing `{DECISION: 3}` silently got 10 for every other kind -- a number
+    appearing nowhere else and matching none of the declared budgets."""
+    from software_factory.definition.models import Stage
+    from software_factory.harness.conversation import (
+        KIND_BUDGET,
+        ConversationState,
+        Note,
+        NoteKind,
+        compact,
+    )
+
+    state = ConversationState(work_item_id="wi-1", agent="builder")
+    for index in range(KIND_BUDGET[NoteKind.ATTEMPT]):
+        state.add(
+            Note(
+                kind=NoteKind.ATTEMPT,
+                text=f"tried {index}",
+                run_id=f"run-{index}",
+                stage=Stage.BUILD,
+            )
+        )
+
+    assert compact(state, run_id="run-x", budget={NoteKind.DECISION: 3}) is None
+
+
+def test_o23_a_null_entry_does_not_become_a_note_saying_none() -> None:
+    """`str()` on every entry turned a `null` into a carried note reading literally "None",
+    and leaked a Python repr into a summary the next run reads as prose."""
+    from software_factory.orchestrator.coordinator import _as_texts
+
+    texts, problem = _as_texts(["ok", None, {"k": 1}])
+
+    assert texts == ["ok"]
+    assert "not text" in problem
+
+
+def test_o23_a_dict_shaped_field_is_reported_rather_than_dropped() -> None:
+    """A model returning `{"decisions": {...}}` lost its decisions with nothing saying so --
+    exactly the case where "the agent forgot" and "the harness dropped it" have completely
+    different fixes."""
+    from software_factory.orchestrator.coordinator import _as_texts
+
+    texts, problem = _as_texts({"1": "decided x"})
+
+    assert texts == []
+    assert "dict" in problem
+
+
+def test_o24_the_carried_state_digest_distinguishes_the_stage() -> None:
+    """Two genuinely different carried states digested identically, so the converse of the
+    property `Resumption.carried_digest` exists for did not hold."""
+    from software_factory.definition.models import Stage
+    from software_factory.harness.conversation import ConversationState, Note, NoteKind
+
+    def state_at(stage: Stage) -> str:
+        state = ConversationState(work_item_id="wi-1", agent="builder")
+        state.add(Note(kind=NoteKind.DECISION, text="kept the signature", run_id="r1", stage=stage))
+        return state.digest()
+
+    assert state_at(Stage.BUILD) != state_at(Stage.REVIEW)
+
+
+def test_o25_a_chore_that_nobody_called_user_facing_is_not_treated_as_one() -> None:
+    """`user_facing=True` was supplied as a constant by the only production caller, so the
+    one parameter distinguishing user-facing work from the rest distinguished nothing."""
+    from software_factory.evals.recording import RecordingPolicy
+
+    policy = RecordingPolicy()
+
+    assert policy.expects_visual("feature", user_facing=None) is True
+    assert policy.expects_visual("feature", user_facing=False) is False
+    assert policy.expects_visual("chore", user_facing=True) is False
+
+
+def test_o26_an_ssh_workers_refusal_names_the_ssh_worker(tmp_path) -> None:
+    """It said "the local executor cannot enforce...", naming a component the operator did
+    not configure -- and pointed at the container executor, which refuses `allowlist` for
+    the same reason."""
+    from software_factory.definition.models import NetworkPolicy
+    from software_factory.runtime.executor import ExecutorError
+    from software_factory.runtime.executors import SshWorkerExecutor
+
+    with pytest.raises(ExecutorError) as caught:
+        SshWorkerExecutor(
+            sandbox(tmp_path, network=NetworkPolicy.ALLOWLIST),
+            host="worker.internal",
+            remote_workspace="/srv/factory",
+            ssh="/usr/bin/ssh",
+        )
+
+    assert "ssh worker" in str(caught.value)
+    assert "egress proxy" in caught.value.remediation
+
+
+def test_o27_a_factory_that_has_never_run_has_no_measurement_share(tmp_path) -> None:
+    """`0.0` rendered as "0% measurement" -- a definite statement about a ratio that is
+    undefined."""
+    from software_factory.ledger import Ledger
+    from software_factory.observability.metrics import compute
+
+    runs = compute(Ledger(tmp_path / "ledger.jsonl").read()).runs
+
+    assert runs.measurement_share is None
+    assert runs.as_dict()["measurementShare"] is None

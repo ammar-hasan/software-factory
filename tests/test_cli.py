@@ -698,7 +698,13 @@ def test_metrics_reports_unavailable_rather_than_zero(tmp_path: Path) -> None:
     assert "git-host" in merged["reason"]
 
 
-def test_metrics_stops_reporting_unavailable_once_the_integration_exists(tmp_path: Path) -> None:
+def test_metrics_changes_the_reason_when_the_integration_exists(tmp_path: Path) -> None:
+    """Configuring the adapter must not delete the row.
+
+    This asserted the row disappeared, which is what the code did and is the wrong answer:
+    nothing in this build computes `changes_merged`, so an operator following the reason
+    text's own instruction lost three metrics from the dashboard.
+    """
     from software_factory.ledger import EntryType, Ledger
 
     ledger = Ledger(tmp_path / "ledger.jsonl")
@@ -710,7 +716,9 @@ def test_metrics_stops_reporting_unavailable_once_the_integration_exists(tmp_pat
         ).output
     )["metrics"]
 
-    assert not any(m["name"] == "changes_merged" for m in body["measures"])
+    merged = next(m for m in body["measures"] if m["name"] == "changes_merged")
+    assert merged["availability"] == "unavailable"
+    assert "nothing in this build computes" in merged["reason"]
 
 
 def test_metrics_separates_work_from_measurement(tmp_path: Path) -> None:

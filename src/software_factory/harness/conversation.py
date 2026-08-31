@@ -183,8 +183,16 @@ class ConversationState:
         Lets FR-29.3's "what one run carried into the next" be *checked* rather than
         described: two runs claiming the same carried state and digesting differently were
         handed different things.
+
+        Each field is its own length-prefixed part, and `stage` is one of them. Joining with
+        `:` was not injective *within* a note -- the collision class `digests.py` exists to
+        avoid -- and omitting the stage meant two genuinely different carried states
+        digested identically, so the converse of the property above did not hold.
         """
-        return digest_parts(*(f"{n.kind.value}:{n.text}:{n.run_id}" for n in self.notes))
+        parts: list[str] = []
+        for note in self.notes:
+            parts += [note.kind.value, note.text, note.run_id, note.stage.value]
+        return digest_parts(*parts)
 
     def render(self) -> str:
         """The summary a resuming run is given. Grouped by kind, oldest first within a kind.
@@ -234,7 +242,11 @@ def compact(
 
     for kind in NoteKind:
         of_kind = state.of_kind(kind)
-        limit = budget.get(kind, 10)
+        # Falling back to `KIND_BUDGET`, not to a literal. A caller passing `{DECISION: 3}`
+        # silently got 10 for every other kind -- a number that appears nowhere else and
+        # matches none of the declared budgets, so a partial override quietly rewrote the
+        # policy for the kinds it did not mention.
+        limit = budget.get(kind, KIND_BUDGET.get(kind, 10))
         if len(of_kind) <= limit:
             kept.extend(of_kind)
             continue

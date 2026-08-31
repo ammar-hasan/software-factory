@@ -297,7 +297,7 @@ function renderOverview(d) {
   return `<p class="note">${esc(r.note)}</p>`
     + `<table><tr><th>runs</th><th>count</th><th></th></tr>`
     + `<tr><td>total</td><td>${esc(r.total)}</td><td class="note">`
-    + `${esc(Math.round(r.measurementShare * 100))}% measurement</td></tr>`
+    + `${r.measurementShare === null ? '—' : esc(Math.round(r.measurementShare * 100)) + '%'} measurement</td></tr>`
     + `<tr><td>work</td><td>${esc(r.work)}</td><td></td></tr>`
     + `<tr><td>evaluation</td><td>${esc(r.evaluation)}</td><td></td></tr>`
     + `<tr><td>benchmark</td><td>${esc(r.benchmark)}</td><td></td></tr>`

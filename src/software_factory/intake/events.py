@@ -22,6 +22,7 @@ an agent can reach. Access came from what was authorised on the provider, and li
 from __future__ import annotations
 
 import enum
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -163,8 +164,12 @@ def event_identity(provider: Provider, *parts: str) -> str:
     makes ``("a/b",)`` and ``("a", "b")`` produce the same id, which is a collision anyone
     who controls one identifier can produce deliberately -- and a forged id turns "this
     event was already handled" into a way of suppressing an event that was not.
+
+    Parts are used verbatim. Stripping them was a smaller version of the same collision:
+    `"42"` and `" 42"` are different identifiers to a provider that accepts both, and
+    normalising them here hands the same suppression primitive back through whitespace.
     """
-    return digest_parts(provider.value, *(part.strip() for part in parts))
+    return digest_parts(provider.value, *parts)
 
 
 def matches(filter_spec: dict[str, Any], event: FactoryEvent) -> bool:
@@ -260,12 +265,24 @@ def _any_of(expected: Any, actual: Any) -> bool:
     return bool(wanted & _as_set(actual))
 
 
+def _fold(value: Any) -> str:
+    """Case-fold and NFKC-normalise one filter value.
+
+    `str.lower()` is not case-insensitivity outside ASCII -- German `ß` does not lower to
+    `ss`, and `İ` lowers to a two-codepoint sequence -- and without normalisation a label
+    typed with a combining accent does not match the same label composed. A filter that
+    fails because of how someone's editor encoded a character is a filter that gets deleted
+    rather than fixed, which is the argument the case-insensitivity was added for.
+    """
+    return unicodedata.normalize("NFKC", str(value).strip()).casefold()
+
+
 def _as_set(value: Any) -> set[str]:
     if isinstance(value, str):
-        return {value.strip().lower()}
+        return {_fold(value)}
     if isinstance(value, Sequence) and not isinstance(value, bytes | str):
-        return {str(item).strip().lower() for item in value}
-    return {str(value).strip().lower()}
+        return {_fold(item) for item in value}
+    return {_fold(value)}
 
 
 def overlapping_keys(left: dict[str, Any], right: dict[str, Any]) -> bool:

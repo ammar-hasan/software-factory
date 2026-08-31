@@ -61,9 +61,18 @@ class Automation:
     def selects(self, event: FactoryEvent) -> bool:
         if not self.enabled:
             return False
-        if self.provider != event.provider.value or self.event != event.event:
+        # Folded, because `matches()` folds `provider` and `event` when they appear as
+        # filter keys. The same two fields comparing case-sensitively here and
+        # case-insensitively there means one spelling selects and the other does not, for
+        # reasons nothing in the definition explains.
+        if not _same(self.provider, event.provider.value) or not _same(self.event, event.event):
             return False
         return matches(self.filter, event)
+
+
+def _same(left: str, right: str) -> bool:
+    """The comparison `matches()` uses, applied to the two keys it does not see."""
+    return left.strip().casefold() == right.strip().casefold()
 
 
 @dataclass(frozen=True, slots=True)
