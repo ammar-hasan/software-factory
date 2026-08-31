@@ -1803,6 +1803,28 @@ issues in one run has found one thing and reported it forty times.
 **FR-31.4 (P1) — A discovery carries its own evidence.** A sibling work item with no locator is a
 report a human has to re-derive, which costs more than the discovery saved.
 
+### 7.34 Sub-agent delegation
+
+Inducted from the source analysis (item 2). The gap was not that delegation was missing: it is
+that nothing *forbade* it. An unspecified capability that arrives anyway arrives without a
+budget, without attribution, and without a view that shows it happened -- and a specialist that
+dispatches a sub-run is a small step from one that calls tools.
+
+**FR-34.1 (P0) — A run may name its parent.** A delegated run records which run dispatched it.
+
+**FR-34.2 (P0) — A child's spend counts against its parent.** All the way to the root.
+Otherwise delegation is a way to exceed a work item's budget by asking someone else to spend
+it: a budget bounds a run, and a run that can create runs bounds nothing.
+
+**FR-34.3 (P0) — Depth and fan-out are declared and bounded.** Unbounded delegation is
+unbounded spend, and the failure mode is quiet -- a run that looks stalled while forty
+descendants work.
+
+**FR-34.4 (P0) — The tree is a view.** Which agents served this request, in what relation, and
+what each cost. Spend is already attributed by agent (FR-26.5); what was missing was the shape,
+and a run whose own spend is small and whose descendants' is not is exactly the case a flat
+per-agent report renders as innocent.
+
 ### 7.32 Post-handoff explanation
 
 Inducted from the source analysis (item 6). A reviewer looking at a change cannot ask why it was

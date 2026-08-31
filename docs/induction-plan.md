@@ -196,13 +196,19 @@ silently kept:
 | 6 — post-handoff explanation | FR-32 | **Done.** `sf explain` answers from the recorded conversation, never by re-running, and says so when the record is silent. |
 | 8 — a provisioned agent suite | FR-2.1 | **Done.** `sf validate` requires a conductor *and* a specialist; the requirement was weaker than every real factory including the scaffold. |
 | 1 — computer use | — | Not built. Waiting on the measurement below. |
-| 2 — sub-agent delegation | — | Not built. Moderate, unblocks nothing. |
+| 2 — sub-agent delegation | FR-34 | **Done.** Depth and fan-out bounded and declared, a child's spend folded up to its root, and `sf delegation` as the tree. |
 | 5 — recording post-production | — | Not built. Depends on 1, and on watch-through data. |
 | 7 — benchmarks driving routing | — | Not built. Waiting on §11.2's result. |
 
-The four that are done are the four the sequencing section below called small and independent.
-The four that are not are the ones with a measurement in front of them, and building them first
-would be building on the assumption the measurement exists to test.
+Five are done: the four the sequencing section below called small and independent, plus item 2,
+which is moderate and had nothing in front of it. The three that remain are the ones with a
+measurement in front of them, and building those first would be building on the assumption the
+measurement exists to test.
+
+Item 2's framing shifted while building it. The plan treats it as a feature to add; the module
+treats it as a hazard to bound, because the gap was never that delegation was missing -- it was
+that nothing forbade it, and an unspecified capability that arrives anyway arrives without a
+budget, without attribution, and without a view that shows it happened.
 
 One thing the work changed about the plan. Item 3's cap was going to be a `maxItems` on the
 schema, and that would have been wrong: a schema violation rejects the *whole stage output*, so

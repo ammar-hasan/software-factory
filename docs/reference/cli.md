@@ -24,6 +24,7 @@ cannot be scripted, and PR-2 makes the local path the reference one.
 | `sf spend` | Spend against a cap, attributed by cause, agent, stage, and work item. |
 | `sf principals` | Who this factory recognises, and what each of them may decide. |
 | `sf stages` | Print the default stage graph and which stages cannot be skipped. |
+| `sf delegation` | Which agents served each request, in what relation, and what each cost (FR-34.4). |
 | `sf explain` | Ask a handed-off work item why it did something (FR-32). |
 | `sf providers` | What each tier will actually call, and whether it can right now. |
 | `sf doctor` | Report what works in this environment and what does not (FR-28.1). |

@@ -124,6 +124,28 @@ class SpendCap:
         return CapState.OK
 
 
+def attribute_to_roots(charges: list[Charge], parents: dict[str, str]) -> dict[str, float]:
+    """Fold each charge up to the run that ultimately caused it (FR-34.2).
+
+    A child's spend counts against its parent, all the way to the root. Without this,
+    delegation is a way to exceed a work item's budget by asking someone else to spend it:
+    the budget bounds a run, and a run that can create runs bounds nothing.
+
+    Cycles are impossible by construction -- `DelegationBook.record` refuses a run that
+    already has a parent and refuses self-parenting -- but the walk is bounded anyway,
+    because a ledger is a file and a file can be edited.
+    """
+    totals: dict[str, float] = {}
+    for charge in charges:
+        run = charge.run_id or charge.work_item_id
+        seen: set[str] = set()
+        while run in parents and run not in seen:
+            seen.add(run)
+            run = parents[run]
+        totals[run] = totals.get(run, 0.0) + charge.units
+    return totals
+
+
 def charges_from(entries: Iterable[Any]) -> list[Charge]:
     """Fold ledger entries into charges.
 

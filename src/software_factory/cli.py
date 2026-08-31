@@ -1812,6 +1812,55 @@ def checkpoints_resolve(
 
 
 @app.command()
+def delegation(
+    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    as_json: JsonOpt = False,
+) -> None:
+    """Which agents served each request, in what relation, and what each cost (FR-34.4).
+
+    Spend is already attributed by agent. What this adds is the shape: a run whose own spend
+    is small and whose descendants' is not is exactly the case a flat per-agent report
+    renders as innocent.
+
+    A factory that never delegates gets a flat list, which is the same view rather than a
+    different one -- a reader should not have to know which case they are in.
+    """
+    from software_factory.orchestrator.delegation import tree_from
+
+    try:
+        roots = tree_from(Ledger(path).read())
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    delegated = [root for root in roots if root.children]
+
+    if as_json:
+        _emit(
+            {
+                "ok": True,
+                "runs": len(roots),
+                "delegating": len(delegated),
+                "tree": [root.as_dict() for root in roots],
+            }
+        )
+        raise typer.Exit(EXIT_OK)
+
+    if not roots:
+        console.print("[dim]No runs in this ledger.[/]")
+        raise typer.Exit(EXIT_OK)
+
+    for root in roots:
+        console.print(root.render())
+    if not delegated:
+        console.print(
+            "\n[dim]No run delegated. This is the flat case, shown by the same view: a "
+            "reader should not have to know which case they are in.[/]"
+        )
+    raise typer.Exit(EXIT_OK)
+
+
+@app.command()
 def explain(
     path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
     work_item_id: Annotated[str, typer.Argument(help="Which work item to ask about.")],

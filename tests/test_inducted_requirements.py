@@ -404,3 +404,162 @@ def test_a_review_driven_proposal_measured_against_reverts_is_allowed() -> None:
     sound = trusted_scorer(outcome_partner="revert-rate")
 
     assert may_propose(LoopState(), cluster, target="agents/builder", scorer=sound) is None
+
+
+# ---------------------------------------------------------------- FR-34 delegation
+
+
+def test_delegation_is_bounded_in_depth() -> None:
+    """Unbounded delegation is unbounded spend, and the failure mode is quiet: a run that
+    looks stalled while forty descendants work (FR-34.3)."""
+    from software_factory.orchestrator.delegation import (
+        MAX_DELEGATION_DEPTH,
+        DelegationBook,
+        Refused,
+    )
+
+    book = DelegationBook()
+    parent = "run-0"
+    for level in range(MAX_DELEGATION_DEPTH):
+        child = f"run-{level + 1}"
+        assert book.record(parent_run_id=parent, child_run_id=child) is None
+        parent = child
+
+    refusal = book.record(parent_run_id=parent, child_run_id="run-too-deep")
+
+    assert isinstance(refusal, Refused)
+    assert refusal.code == "delegation.too_deep"
+
+
+def test_delegation_is_bounded_in_fan_out() -> None:
+    """A run needing five sub-agents has not decomposed its work, it has scattered it."""
+    from software_factory.orchestrator.delegation import MAX_FAN_OUT, DelegationBook, Refused
+
+    book = DelegationBook()
+    for index in range(MAX_FAN_OUT):
+        assert book.record(parent_run_id="run-0", child_run_id=f"child-{index}") is None
+
+    refusal = book.record(parent_run_id="run-0", child_run_id="one-too-many")
+
+    assert isinstance(refusal, Refused)
+    assert refusal.code == "delegation.fan_out"
+
+
+def test_a_run_cannot_be_its_own_parent() -> None:
+    """Which would make the depth check non-terminating."""
+    from software_factory.orchestrator.delegation import DelegationBook, Refused
+
+    refusal = DelegationBook().record(parent_run_id="run-0", child_run_id="run-0")
+
+    assert isinstance(refusal, Refused)
+    assert refusal.code == "delegation.self"
+
+
+def test_a_run_has_one_parent() -> None:
+    """Or its cost is attributable to two places at once."""
+    from software_factory.orchestrator.delegation import DelegationBook, Refused
+
+    book = DelegationBook()
+    book.record(parent_run_id="run-a", child_run_id="child")
+
+    refusal = book.record(parent_run_id="run-b", child_run_id="child")
+
+    assert isinstance(refusal, Refused)
+    assert refusal.code == "delegation.already_parented"
+
+
+def test_a_childs_spend_counts_against_its_parent() -> None:
+    """Otherwise delegation is a way to exceed a work item's budget by asking someone else to
+    spend it: a budget bounds a run, and a run that can create runs bounds nothing (FR-34.2).
+    """
+    from software_factory.economics import Cause, Charge, attribute_to_roots
+
+    charges = [
+        Charge(
+            units=1.0,
+            work_item_id="wi-1",
+            agent="builder",
+            stage="BUILD",
+            cause=Cause.PRIMARY,
+            run_id="root",
+        ),
+        Charge(
+            units=8.0,
+            work_item_id="wi-1",
+            agent="prover",
+            stage="BUILD",
+            cause=Cause.PRIMARY,
+            run_id="child",
+        ),
+        Charge(
+            units=4.0,
+            work_item_id="wi-1",
+            agent="scout",
+            stage="BUILD",
+            cause=Cause.PRIMARY,
+            run_id="grandchild",
+        ),
+    ]
+
+    totals = attribute_to_roots(charges, {"child": "root", "grandchild": "child"})
+
+    assert totals == {"root": 13.0}
+
+
+def test_the_tree_shows_a_cheap_parent_with_expensive_children(tmp_path: Path) -> None:
+    """The case a flat per-agent report renders as innocent (FR-34.4)."""
+    from software_factory.orchestrator.delegation import tree_from
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append(
+        EntryType.RUN_STARTED,
+        actor="builder",
+        subject="wi-1",
+        payload={"run": "root", "stage": "BUILD"},
+    )
+    ledger.append(
+        EntryType.MODEL_CALLED,
+        actor="builder",
+        subject="wi-1",
+        payload={"run": "root", "costUnits": 0.5},
+    )
+    for index in range(3):
+        ledger.append(
+            EntryType.RUN_STARTED,
+            actor="prover",
+            subject="wi-1",
+            payload={"run": f"child-{index}", "stage": "BUILD", "parentRun": "root"},
+        )
+        ledger.append(
+            EntryType.MODEL_CALLED,
+            actor="prover",
+            subject="wi-1",
+            payload={"run": f"child-{index}", "costUnits": 9.0},
+        )
+
+    roots = tree_from(ledger.read())
+
+    assert len(roots) == 1
+    assert roots[0].cost_units == 0.5
+    assert roots[0].total_cost == 27.5
+    assert roots[0].depth == 2
+
+
+def test_a_factory_that_never_delegates_gets_the_same_view(tmp_path: Path) -> None:
+    """A reader should not have to know which case they are in."""
+    from software_factory.orchestrator.delegation import tree_from
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    for index in range(3):
+        ledger.append(
+            EntryType.RUN_STARTED,
+            actor="builder",
+            subject="wi-1",
+            payload={"run": f"run-{index}", "stage": "BUILD"},
+        )
+
+    roots = tree_from(ledger.read())
+
+    assert len(roots) == 3
+    assert all(not root.children for root in roots)
+    assert all(root.depth == 1 for root in roots)
