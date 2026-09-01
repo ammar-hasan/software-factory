@@ -1388,31 +1388,22 @@ def test_every_command_can_explain_itself() -> None:
     decorators and docstrings, so a command whose help crashes is a command nobody can
     discover — and it crashes for everyone, on the first thing they try, before they have
     any reason to believe the tool works.
+
+    The command tree is walked through Click's own registry (`.commands` on each group)
+    rather than by parsing rendered `--help` text: Rich draws that panel differently
+    depending on the terminal it thinks it is talking to, and a parser tuned to one
+    rendering is a parser that finds zero commands on a runner with a different one.
     """
-    import re
+    import typer.main
 
-    def commands(prefix: list[str]) -> list[str]:
-        output = runner.invoke(app, [*prefix, "--help"]).output
-        names, inside = [], False
-        for line in output.splitlines():
-            if "Commands" in line:
-                inside = True
-                continue
-            if inside and line.startswith("╰"):
-                break
-            if inside:
-                # The name sits at the start of its row; a wrapped description does not.
-                match = re.match(r"^│ ([a-z][a-z0-9-]*)\s{2,}", line)
-                if match:
-                    names.append(match.group(1))
-        return names
-
-    top = commands([])
-    assert len(top) > 30, f"only {len(top)} commands found; the help parser missed the panel"
+    root = typer.main.get_command(app)
+    top = sorted(getattr(root, "commands", {}))
+    assert len(top) > 30, f"only {len(top)} commands found; the command tree is smaller than expected"
 
     checked, broken = 0, []
     for name in top:
-        for argv in [[name, sub] for sub in commands([name])] or [[name]]:
+        subs = sorted(getattr(root.commands[name], "commands", {}))
+        for argv in [[name, sub] for sub in subs] or [[name]]:
             checked += 1
             result = runner.invoke(app, [*argv, "--help"])
             if result.exit_code != 0 or "Traceback" in result.output:

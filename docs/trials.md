@@ -27,18 +27,18 @@ Came to rest at: HANDOFF
 
 Gates:
     TRIAGE   calibration-present    pass
-    TRIAGE   blast-radius-clean     pass
+    TRIAGE   blast-radius-clean     unenforceable — no sandboxing was in effect, so writes outside the workspace were not observed; this gate checked nothing
     DESIGN   calibration-present    pass
-    DESIGN   blast-radius-clean     pass
+    DESIGN   blast-radius-clean     unenforceable — no sandboxing was in effect, so writes outside the workspace were not observed; this gate checked nothing
     DESIGN   spec-agreement         pass
     BUILD    calibration-present    pass
-    BUILD    blast-radius-clean     pass
+    BUILD    blast-radius-clean     unenforceable — no sandboxing was in effect, so writes outside the workspace were not observed; this gate checked nothing
     BUILD    secret-clean           pass
     BUILD    build-green            unenforceable — this repository has no build step, so this gate cannot be enforced; the change carries that label
     BUILD    tests-pass             unenforceable — this repository has no runnable validation, so this gate cannot be enforced; the change carries that label
     BUILD    regression-proven      skip — not defect-class work
     REVIEW   calibration-present    pass
-    REVIEW   blast-radius-clean     pass
+    REVIEW   blast-radius-clean     unenforceable — no sandboxing was in effect, so writes outside the workspace were not observed; this gate checked nothing
     REVIEW   secret-clean           pass
     REVIEW   tests-pass             unenforceable — this repository has no runnable validation, so this gate cannot be enforced; the change carries that label
     REVIEW   spec-agreement         pass
@@ -53,7 +53,7 @@ Gates:
 
 **What this establishes.**
 - The full path runs on a repository the factory has never seen: TRIAGE → DESIGN → BUILD → REVIEW → HANDOFF.
-- At least one gate reported *unenforceable* rather than passing (build-green, tests-pass). This is the property the trial exists for: a repository with no validation cannot satisfy a validation gate, and saying so is different from passing.
+- At least one gate reported *unenforceable* rather than passing (blast-radius-clean, build-green, tests-pass). This is the property the trial exists for: a repository with no validation cannot satisfy a validation gate, and saying so is different from passing.
 - A work item reached HANDOFF with a real diff and an evidence bundle over real artifacts.
 
 **What it does not.**
@@ -71,23 +71,23 @@ Came to rest at: HANDOFF
 
 Gates:
     TRIAGE   calibration-present    pass
-    TRIAGE   blast-radius-clean     pass
+    TRIAGE   blast-radius-clean     unenforceable — no sandboxing was in effect, so writes outside the workspace were not observed; this gate checked nothing
     BUILD    calibration-present    pass
-    BUILD    blast-radius-clean     pass
+    BUILD    blast-radius-clean     unenforceable — no sandboxing was in effect, so writes outside the workspace were not observed; this gate checked nothing
     BUILD    secret-clean           pass
     BUILD    build-green            pass
     BUILD    tests-pass             pass — 2 tests
     BUILD    regression-proven      FAIL — no new test
     TRIAGE   calibration-present    pass
-    TRIAGE   blast-radius-clean     pass
+    TRIAGE   blast-radius-clean     unenforceable — no sandboxing was in effect, so writes outside the workspace were not observed; this gate checked nothing
     BUILD    calibration-present    pass
-    BUILD    blast-radius-clean     pass
+    BUILD    blast-radius-clean     unenforceable — no sandboxing was in effect, so writes outside the workspace were not observed; this gate checked nothing
     BUILD    secret-clean           pass
     BUILD    build-green            pass
     BUILD    tests-pass             pass — 3 tests
     BUILD    regression-proven      pass — 1 test(s) fail at parent on an assertion and pass at tip
     REVIEW   calibration-present    pass
-    REVIEW   blast-radius-clean     pass
+    REVIEW   blast-radius-clean     unenforceable — no sandboxing was in effect, so writes outside the workspace were not observed; this gate checked nothing
     REVIEW   secret-clean           pass
     REVIEW   tests-pass             pass — 3 tests
     REVIEW   spec-agreement         pass
@@ -122,9 +122,9 @@ What would clear it: The test failed before its body ran, so it proves the code 
 
 Gates:
     TRIAGE   calibration-present    pass
-    TRIAGE   blast-radius-clean     pass
+    TRIAGE   blast-radius-clean     unenforceable — no sandboxing was in effect, so writes outside the workspace were not observed; this gate checked nothing
     BUILD    calibration-present    pass
-    BUILD    blast-radius-clean     pass
+    BUILD    blast-radius-clean     unenforceable — no sandboxing was in effect, so writes outside the workspace were not observed; this gate checked nothing
     BUILD    secret-clean           pass
     BUILD    build-green            pass
     BUILD    tests-pass             pass — 3 tests

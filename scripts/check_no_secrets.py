@@ -25,6 +25,9 @@ ALLOWED = {
     Path("tests/test_memory.py"),
     Path("tests/test_validate.py"),
     Path("tests/test_evals.py"),
+    Path("tests/test_slack.py"),
+    Path("tests/test_ui.py"),
+    Path("stress/scenarios.py"),
 }
 
 # Tooling caches echo test names and fixture content back at us, so they would report
