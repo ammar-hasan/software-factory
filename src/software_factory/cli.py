@@ -2724,6 +2724,213 @@ def _due_schedules(root: Path, ledger_path: Path, as_json: bool) -> list[Any]:
     return schedule.with_history(entries).due(now=datetime.now(UTC))
 
 
+workspace_app = typer.Typer(
+    help="More than one factory in one tree: list, validate, and compare them.",
+    no_args_is_help=True,
+)
+app.add_typer(workspace_app, name="workspace")
+
+WorkspaceArg = Annotated[
+    Path,
+    typer.Argument(help="Path to the directory containing workspace.yaml."),
+]
+
+
+@workspace_app.command("init")
+def workspace_init(
+    root: WorkspaceArg = Path(),
+    name: Annotated[str, typer.Option("--name", help="Workspace name.")] = "workspace",
+    factory: Annotated[
+        list[str] | None,
+        typer.Option("--factory", help="A factory root, relative to the workspace. Repeatable."),
+    ] = None,
+    as_json: JsonOpt = False,
+) -> None:
+    """Write a workspace file listing factory roots (FR-1.5)."""
+    from software_factory.definition.workspace import WORKSPACE_FILE, scaffold_workspace
+
+    members = factory or []
+    if not members:
+        console.print(
+            "[red]a workspace needs at least one factory[/]  pass --factory <path>, repeatable"
+        )
+        raise typer.Exit(EXIT_UNUSABLE)
+    if (root / WORKSPACE_FILE).exists():
+        console.print(f"[red]{root / WORKSPACE_FILE} already exists[/]")
+        raise typer.Exit(EXIT_UNUSABLE)
+
+    path = scaffold_workspace(root, name=name, members=members)
+    if as_json:
+        _emit({"ok": True, "wrote": str(path), "factories": members})
+    else:
+        console.print(f"[green]wrote[/] {path}")
+    raise typer.Exit(EXIT_OK)
+
+
+@workspace_app.command("list")
+def workspace_list(root: WorkspaceArg = Path(), as_json: JsonOpt = False) -> None:
+    """Every factory in the workspace, side by side.
+
+    A member that failed to load is listed with its reason rather than dropped: a workspace
+    listing four factories and reporting three hides the broken one, and the broken one is
+    the reason to look.
+    """
+    from software_factory.definition.workspace import load_workspace, summarise
+
+    try:
+        workspace = load_workspace(root)
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    rows = [s.as_dict() for s in summarise(workspace)]
+    if as_json:
+        _emit({"ok": True, "workspace": workspace.document.name, "factories": rows})
+        raise typer.Exit(EXIT_OK)
+
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("factory", "repositories", "agents", "automations", "runs", "handoffs"):
+        table.add_column(column, overflow="fold")
+    for row in rows:
+        if not row["loaded"]:
+            table.add_row(f"[red]{row['name']}[/]", f"[dim]{row['error']}[/]", "—", "—", "—", "—")
+            continue
+        table.add_row(
+            str(row["name"]),
+            ", ".join(row["repositories"]),
+            str(row["agents"]),
+            str(row["automations"]),
+            # A factory with no ledger has not been run *or* has not been found. Those are
+            # different facts, and on a comparison table the second must not read as a
+            # team doing nothing.
+            "—" if row["runs"] is None else str(row["runs"]),
+            "—" if row["handoffs"] is None else str(row["handoffs"]),
+        )
+    console.print(table)
+    if any(not row["ledgerPresent"] for row in rows if row["loaded"]):
+        console.print(
+            "[dim]— means no ledger was found at the declared state directory, which is "
+            "not the same as a factory that has done nothing[/]"
+        )
+    raise typer.Exit(EXIT_OK)
+
+
+@workspace_app.command("validate")
+def workspace_validate(root: WorkspaceArg = Path(), as_json: JsonOpt = False) -> None:
+    """Validate every factory, plus the rules that only exist across factories.
+
+    FR-1.4 requires a warning when two factories in the same tree overlap on a repository.
+    That is a P0 requirement no single-factory lint can perform, so it was unimplementable
+    rather than unimplemented -- and nobody was going to notice by reading a command that
+    only ever sees one factory.
+    """
+    from software_factory.definition.workspace import load_workspace
+
+    try:
+        workspace = load_workspace(root)
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    issues = [issue.as_dict() for issue in workspace.report.issues]
+    overlaps = {r: list(n) for r, n in workspace.overlaps().items()}
+    ok = workspace.report.ok
+
+    if as_json:
+        _emit(
+            {
+                "ok": ok,
+                "workspace": workspace.document.name,
+                "factories": len(workspace.factories),
+                "loaded": len(workspace.loaded),
+                "overlaps": overlaps,
+                "issues": issues,
+            }
+        )
+        raise typer.Exit(EXIT_OK if ok else EXIT_FAILED)
+
+    console.print(
+        f"[bold]{workspace.document.name}[/] — {len(workspace.loaded)} of "
+        f"{len(workspace.factories)} factories loaded"
+    )
+    for issue in issues:
+        colour = "red" if issue["severity"] == "error" else "yellow"
+        console.print(f"[{colour}]{issue['severity']}[/] {issue['code']}: {issue['message']}")
+    if not issues:
+        console.print("[green]clean[/] — no cross-factory problems")
+    raise typer.Exit(EXIT_OK if ok else EXIT_FAILED)
+
+
+@workspace_app.command("metrics")
+def workspace_metrics(
+    root: WorkspaceArg = Path(),
+    days: Annotated[int, typer.Option("--days", help="Window, in days.")] = 7,
+    as_json: JsonOpt = False,
+) -> None:
+    """Fold every factory's ledger over one window, side by side.
+
+    The honest form of a cross-team analytics tier: the same folds this project already
+    applies to one ledger, applied to several, with the same refusal to render an absence
+    as a zero.
+    """
+    from datetime import timedelta
+
+    from software_factory.definition.workspace import load_workspace
+    from software_factory.ledger import Ledger
+    from software_factory.observability.metrics import Window, compute
+
+    try:
+        workspace = load_workspace(root)
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    window = Window.last(timedelta(days=days))
+    rows: list[dict[str, Any]] = []
+    for factory in workspace.loaded:
+        if not factory.ledger_path.is_file():
+            rows.append({"factory": factory.name, "available": False, "reason": "no ledger found"})
+            continue
+        report = compute(list(Ledger(factory.ledger_path).read()), window=window)
+        rows.append(
+            {
+                "factory": factory.name,
+                "available": True,
+                "runs": report.runs.total,
+                "measures": [m.as_dict() for m in report.measures],
+            }
+        )
+
+    if as_json:
+        _emit({"ok": True, "workspace": workspace.document.name, "days": days, "factories": rows})
+        raise typer.Exit(EXIT_OK)
+
+    table = Table(show_header=True, header_style="bold", box=None)
+    table.add_column("factory", overflow="fold")
+    table.add_column("runs")
+    names = sorted({m["name"] for row in rows if row.get("available") for m in row["measures"]})
+    for name in names:
+        table.add_column(name, overflow="fold")
+    for row in rows:
+        if not row.get("available"):
+            table.add_row(
+                f"[dim]{row['factory']}[/]", f"[dim]{row['reason']}[/]", *["—"] * len(names)
+            )
+            continue
+        by_name = {m["name"]: m for m in row["measures"]}
+        cells = []
+        for name in names:
+            measure = by_name.get(name)
+            if measure is None or measure["value"] is None:
+                cells.append("[dim]—[/]")
+            else:
+                cells.append(str(measure["value"]))
+        table.add_row(str(row["factory"]), str(row["runs"]), *cells)
+    console.print(table)
+    console.print("[dim]— means unavailable or insufficient data, never zero[/]")
+    raise typer.Exit(EXIT_OK)
+
+
 def main() -> None:
     """Console-script entry point."""
     app()
