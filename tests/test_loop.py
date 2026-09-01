@@ -12,7 +12,7 @@ import re
 import pytest
 
 from software_factory.definition.models import AgentRole, Effect, Ladder
-from software_factory.harness import BlastRadius, Grants, RoutingState
+from software_factory.harness import BlastRadius, Grants, RoutingState, Scaffold
 from software_factory.harness.awareness import (
     AwarenessPack,
     Citation,
@@ -749,3 +749,75 @@ def test_the_echoed_error_cannot_close_the_harness_region_it_is_reported_in() ->
     unescaped = re.findall(r"(?<!\\)</harness>", advice)
     assert len(unescaped) == 1
     assert advice.endswith("</harness>")
+
+
+# ------------------------------------------------------------------ small-tier scaffolding
+#
+# `scaffolds_for` existed, was correct, was tested, and was called by nothing. So the
+# mechanism this project rests on -- a modest model does well because the harness supplies
+# the practice it would otherwise have to remember -- had never once been applied to a run.
+# The reference definition sets `scaffoldAtOrBelow: local-small` and starts every run there,
+# so every default run should have been scaffolded and none was.
+
+
+def scaffolded_ladder(at_or_below: str = "local-small") -> Ladder:
+    raw = ladder().model_dump(by_alias=True)
+    raw["scaffoldAtOrBelow"] = at_or_below
+    return Ladder.model_validate(raw)
+
+
+def test_a_run_at_a_scaffolded_tier_is_told_how_work_is_done_here() -> None:
+    provider = StubProvider([says(valid_output())])
+    turn = loop(provider, schema=OUTPUT_SCHEMA)
+    turn.routing = RoutingState(ladder=scaffolded_ladder(), current="local-small")
+
+    result = turn.run()
+
+    assert result.status is RunStatus.COMPLETED
+    prompt = "\n".join(m.content for m in provider.calls[0])
+    # Every one of the six, by name, with what it asks.
+    for scaffold in Scaffold:
+        assert scaffold.value in prompt, f"{scaffold.value} never reached the model"
+    assert "Split the task into numbered steps" in prompt
+    assert "Resolve the symbols, paths and test targets" in prompt
+
+
+def test_a_run_above_the_scaffolding_tier_is_not_scaffolded() -> None:
+    """Tier-conditioned and never silent: a high-tier run must not quietly behave like a
+    low-tier one, and the low-tier practice is not free."""
+    provider = StubProvider([says(valid_output())])
+    turn = loop(provider, schema=OUTPUT_SCHEMA)
+    turn.routing = RoutingState(ladder=scaffolded_ladder(), current="mid")
+
+    result = turn.run()
+
+    prompt = "\n".join(m.content for m in provider.calls[0])
+    assert "Split the task into numbered steps" not in prompt
+    assert result.scaffolds == []
+
+
+def test_the_run_records_which_scaffolds_were_in_force() -> None:
+    """R-5 asks that each scaffold be individually measurable, and a factory cannot compare
+    a scaffolded run against an unscaffolded one if the runs do not say which they were."""
+    provider = StubProvider([says(valid_output())])
+    turn = loop(provider, schema=OUTPUT_SCHEMA)
+    turn.routing = RoutingState(ladder=scaffolded_ladder(), current="local-small")
+
+    result = turn.run()
+
+    assert set(result.scaffolds) == {s.value for s in Scaffold}
+    assert result.as_dict()["scaffolds"] == result.scaffolds
+
+
+def test_the_untrusted_task_stays_last_even_when_scaffolding_is_added() -> None:
+    """Order is the contract: a later section never silently overrides an earlier one, and
+    content the factory did not write is the last thing in the prompt."""
+    provider = StubProvider([says(valid_output())])
+    turn = loop(provider, schema=OUTPUT_SCHEMA)
+    turn.routing = RoutingState(ladder=scaffolded_ladder(), current="local-small")
+
+    turn.run()
+
+    sent = provider.calls[0]
+    assert 'untrusted="true"' in sent[-1].content
+    assert "how work is done here" in sent[-2].content

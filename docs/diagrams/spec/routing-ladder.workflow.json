@@ -1,0 +1,245 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Routing ladder \u2014 a run starts low and has to earn its way up",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    {
+      "id": "run",
+      "label": "The run"
+    },
+    {
+      "id": "checks",
+      "label": "What the ladder asks before spending a rung"
+    },
+    {
+      "id": "refused",
+      "label": "Refused \u2014 the run stays where it is",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "place",
+      "label": "Start low",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "detect",
+      "label": "A recorded trigger",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "decide",
+      "label": "Earn the rung",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "groups": [
+    {
+      "id": "budget_band",
+      "label": "Asked before any trigger is examined",
+      "lane": "checks",
+      "fromCol": 2,
+      "toCol": 2,
+      "variant": "security"
+    }
+  ],
+  "mainPath": [
+    "lowest_tier",
+    "scaffolded",
+    "headroom",
+    "trigger",
+    "justify",
+    "climb"
+  ],
+  "semanticChecks": {
+    "allowedRoots": [
+      "lowest_tier"
+    ],
+    "allowedTerminals": [
+      "climb",
+      "stay"
+    ],
+    "requiredPaths": [
+      {
+        "from": "lowest_tier",
+        "to": "climb"
+      },
+      {
+        "from": "lowest_tier",
+        "to": "stay"
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "id": "lowest_tier",
+      "lane": "run",
+      "col": 0,
+      "type": "external",
+      "label": "Start low",
+      "sublabel": "lowest tier that covers the stage",
+      "width": 170
+    },
+    {
+      "id": "scaffolded",
+      "lane": "run",
+      "col": 1,
+      "type": "backend",
+      "label": "Scaffolded",
+      "sublabel": "six behaviours, applied for it",
+      "width": 170
+    },
+    {
+      "id": "headroom",
+      "lane": "checks",
+      "col": 2,
+      "type": "messagebus",
+      "label": "Any rung left?",
+      "sublabel": "maxEscalations, ceilingTier",
+      "width": 170
+    },
+    {
+      "id": "trigger",
+      "lane": "checks",
+      "col": 3,
+      "type": "cloud",
+      "label": "A recorded trigger",
+      "sublabel": "one of five; nothing else",
+      "width": 170
+    },
+    {
+      "id": "justify",
+      "lane": "checks",
+      "col": 4,
+      "type": "backend",
+      "label": "Its own test",
+      "sublabel": "the trigger must also be earned",
+      "width": 170
+    },
+    {
+      "id": "climb",
+      "lane": "run",
+      "col": 5,
+      "type": "backend",
+      "label": "One rung up",
+      "sublabel": "reason and both tiers recorded",
+      "width": 170
+    },
+    {
+      "id": "stay",
+      "lane": "refused",
+      "col": 5,
+      "type": "messagebus",
+      "label": "Stay",
+      "sublabel": "refusal carries a code",
+      "width": 170
+    },
+    {
+      "id": "no_headroom",
+      "lane": "refused",
+      "col": 2,
+      "type": "messagebus",
+      "label": "At the ceiling",
+      "sublabel": "or out of escalations",
+      "tag": "conditional",
+      "width": 170
+    }
+  ],
+  "edges": [
+    {
+      "id": "start-scaffold",
+      "from": "lowest_tier",
+      "to": "scaffolded",
+      "variant": "emphasis"
+    },
+    {
+      "id": "scaffold-headroom",
+      "from": "scaffolded",
+      "to": "headroom",
+      "variant": "emphasis"
+    },
+    {
+      "id": "headroom-none",
+      "from": "headroom",
+      "to": "no_headroom",
+      "label": "no",
+      "variant": "default",
+      "role": "branch"
+    },
+    {
+      "id": "none-stay",
+      "from": "no_headroom",
+      "to": "stay",
+      "variant": "default"
+    },
+    {
+      "id": "headroom-trigger",
+      "from": "headroom",
+      "to": "trigger",
+      "label": "yes",
+      "variant": "emphasis"
+    },
+    {
+      "id": "trigger-justify",
+      "from": "trigger",
+      "to": "justify",
+      "variant": "emphasis"
+    },
+    {
+      "id": "justify-climb",
+      "from": "justify",
+      "to": "climb",
+      "label": "test met",
+      "variant": "emphasis"
+    },
+    {
+      "id": "justify-stay",
+      "from": "justify",
+      "to": "stay",
+      "label": "test not met",
+      "variant": "default",
+      "role": "branch"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "The five triggers are the complete set",
+      "items": [
+        "gate_repeat \u2014 the same gate failed twice with an identical signature",
+        "low_confidence \u2014 below 0.50, and only after retrieval was tried",
+        "schema_repeat \u2014 the output failed validation twice or more",
+        "complexity \u2014 a supplied signal at or above 0.80",
+        "explicit \u2014 a stated reason a reviewer can check"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Firing is not the same as being granted",
+      "items": [
+        "Each trigger carries its own test, and failing it refuses the climb with a code",
+        "Low confidence with no retrieval attempted is refused: context is cheaper than a tier",
+        "Two different gate failures are progress; the same failure twice is being stuck",
+        "A trigger outside the five is refused, never granted for want of a rule"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Below the scaffolding tier, six behaviours are automatic",
+      "items": [
+        "decompose, verify-then-advance, checkpoint-per-step",
+        "narrow-working-set, pre-resolve, one-question-at-a-time",
+        "The harness supplies the practice so the model does not have to remember it"
+      ]
+    }
+  ]
+}

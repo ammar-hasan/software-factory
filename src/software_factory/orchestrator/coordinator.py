@@ -1093,20 +1093,31 @@ class Coordinator:
             checkpoints=True,
         )
 
-        pack = self._assemble(item, stage, role, workspace, registry, grants)
-        self.ledger.append(
-            EntryType.PACK_ASSEMBLED,
-            actor=agent_name,
-            subject=item.id,
-            payload={"stage": stage.value, "digest": pack.digest(), "tokens": pack.tokens()},
-        )
-
+        # Resolved before the pack, because the tier decides how large the pack may be.
         ladder = self.definition.factory.ladder
         tier = execution.tier or (starting_tier(ladder) if ladder else "local-small")
         routing = (
             RoutingState(ladder=ladder, current=tier)
             if ladder
             else RoutingState(ladder=self._synthetic_ladder(), current="local-small")
+        )
+
+        pack = self._assemble(
+            item, stage, role, workspace, registry, grants, budget_tokens=self._pack_budget(routing)
+        )
+        self.ledger.append(
+            EntryType.PACK_ASSEMBLED,
+            actor=agent_name,
+            subject=item.id,
+            payload={
+                "stage": stage.value,
+                "digest": pack.digest(),
+                "tokens": pack.tokens(),
+                # What the pack was allowed, beside what it used. Without the bound, a pack
+                # that was truncated and one that had nothing more to say read identically.
+                "budgetTokens": pack.budget_tokens,
+                "tier": routing.current,
+            },
         )
 
         # `agent` and `purpose` are what `observability.metrics` folds on. Without them the
@@ -1276,6 +1287,26 @@ class Coordinator:
 
     # ------------------------------------------------------------------------- pack
 
+    def _pack_budget(self, routing: RoutingState) -> int:
+        """How many tokens of awareness this tier may be given.
+
+        `workingSetCeiling` is declared on every tier of every ladder this project ships and
+        was read by nothing, so the pack was a flat 6,000 tokens whether the run was on a
+        32k local model or a 200k hosted one. Today the configured budget is under every
+        declared ceiling, so this changes no run -- and that is the point: a bound that only
+        starts mattering the day somebody raises the budget has to be in place *before* that
+        day, or the raise silently overflows the smallest tier's window and the factory
+        reports a model that suddenly got worse.
+
+        A bound, not a target. A tier with a large window does not need a larger pack; the
+        pack is as big as the evidence is, and the ceiling only says how big it may get.
+        """
+        try:
+            ceiling = routing.tier.working_set_ceiling
+        except (KeyError, IndexError, AttributeError):
+            return self.pack_budget_tokens
+        return min(self.pack_budget_tokens, ceiling) if ceiling else self.pack_budget_tokens
+
     def _assemble(
         self,
         item: WorkItem,
@@ -1284,6 +1315,7 @@ class Coordinator:
         workspace: Workspace,
         registry: Any,
         grants: Grants,
+        budget_tokens: int | None = None,
     ) -> AwarenessPack:
         """Assemble the pack from deterministic sources.
 
@@ -1292,7 +1324,7 @@ class Coordinator:
         inspection. Only `conventions` may carry model-derived content, and every item
         there cites the memory it came from.
         """
-        assembler = PackAssembler(role=role, budget_tokens=self.pack_budget_tokens)
+        assembler = PackAssembler(role=role, budget_tokens=budget_tokens or self.pack_budget_tokens)
         surface = workspace.changed_paths() or set(self._top_level(workspace))
         scope_ref = self._repository_scope()
 
@@ -1970,6 +2002,7 @@ def local_coordinator(
     provider: Provider,
     allow_unsandboxed: bool = False,
     spend_cap: SpendCap | None = None,
+    pack_budget_tokens: int = 6000,
 ) -> Coordinator:
     """Assemble a coordinator for a single-machine run. The reference topology."""
     return Coordinator(
@@ -1979,6 +2012,7 @@ def local_coordinator(
         ledger=Ledger(state_dir / "ledger.jsonl"),
         allow_unsandboxed=allow_unsandboxed,
         spend_cap=spend_cap,
+        pack_budget_tokens=pack_budget_tokens,
     )
 
 
