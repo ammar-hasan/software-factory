@@ -25,6 +25,7 @@ from software_factory.definition.models import (
 )
 from software_factory.definition.resolve import resolve_execution
 from software_factory.errors import Severity, ValidationIssue, ValidationReport
+from software_factory.harness.adapters import canonical_harness, known_harnesses
 
 #: Phrases in a skill body that claim an authority skills do not have (FR-7.11).
 #: Skills change what an agent knows how to do, never what it can reach, so a body
@@ -194,6 +195,8 @@ def _check_agent_references(definition: Definition, report: ValidationReport) ->
     for agent in definition.agents.values():
         execution = agent.definition.execution
         _check_runner_ref(definition, report, execution, agent.path, f"agent {agent.name!r}")
+        if execution.harness:
+            _check_harness_ref(report, execution.harness.type, agent.path, f"agent {agent.name!r}")
         fallback = agent.definition.fallback
         if fallback and fallback not in definition.agents:
             report.add(
@@ -254,6 +257,13 @@ def _check_automation_references(definition: Definition, report: ValidationRepor
             automation.path,
             f"automation {automation.name!r}",
         )
+        if automation.definition.execution.harness:
+            _check_harness_ref(
+                report,
+                automation.definition.execution.harness.type,
+                automation.path,
+                f"automation {automation.name!r}",
+            )
         for trigger in automation.definition.triggers:
             if not trigger.filter and trigger.provider != "schedule":
                 report.add(
@@ -277,6 +287,9 @@ def _check_automation_references(definition: Definition, report: ValidationRepor
 
 def _check_scorer_references(definition: Definition, report: ValidationReport) -> None:
     for scorer in definition.scorers.values():
+        _check_harness_ref(
+            report, scorer.definition.judge.type, scorer.path, f"scorer {scorer.name!r} judge"
+        )
         for agent_name in scorer.definition.agents:
             if agent_name not in definition.agents:
                 report.add(
@@ -305,7 +318,13 @@ def _check_judge_independence(
     agent = definition.agents[agent_name]
     subject = resolve_execution(definition.factory.agent_defaults, agent.definition.execution)
     judge = scorer.definition.judge
-    same_harness = (subject.harness.type if subject.harness else "oz") == judge.type
+    # Canonical names on both sides. `oz` and `loom` are two spellings of the built-in
+    # harness, and comparing them raw made a judge that named it look independent of a
+    # subject that merely declared a tier -- which is exactly the blind spot this check
+    # exists to find.
+    same_harness = canonical_harness(
+        subject.harness.type if subject.harness else None
+    ) == canonical_harness(judge.type)
     # `_engine_model`, shared with `_same_engine`. These two checks answer the same
     # question -- is the reviewer running on the reviewed's engine -- and disagreed: this
     # one never fell back to `tier`, so two agents on one tier and harness were the same
@@ -376,8 +395,8 @@ def _engine_model(execution: ExecutionDefaults) -> str | None:
 
 
 def _same_engine(left: ExecutionDefaults, right: ExecutionDefaults) -> bool:
-    left_harness = left.harness.type if left.harness else "oz"
-    right_harness = right.harness.type if right.harness else "oz"
+    left_harness = canonical_harness(left.harness.type if left.harness else None)
+    right_harness = canonical_harness(right.harness.type if right.harness else None)
     return left_harness == right_harness and _engine_model(left) == _engine_model(right)
 
 
@@ -750,6 +769,48 @@ def _check_ladder(definition: Definition, report: ValidationReport) -> None:
                 ),
             )
         )
+
+    for tier in ladder.tiers:
+        _check_harness_ref(report, tier.harness, definition.root, f"tier {tier.name!r}")
+        if tier.runner is not None and tier.runner not in definition.runners:
+            report.add(
+                ValidationIssue(
+                    severity=Severity.ERROR,
+                    code="runner.unknown",
+                    message=f"tier {tier.name!r} selects unknown runner {tier.runner!r}",
+                    path=definition.root,
+                    key="ladder",
+                    depends_on=(tier.runner,),
+                    accepted=tuple(sorted(definition.runners)),
+                    remediation="Define `runners/<name>.yaml`, or select a runner that exists.",
+                )
+            )
+
+
+def _check_harness_ref(report: ValidationReport, harness: str | None, path: Path, who: str) -> None:
+    """A harness named but not implemented is a validation error, not a dead run (FR-2.4).
+
+    `HarnessSpec.type` accepted any name for as long as it existed, because nothing
+    resolved it. Now that a run dispatches on it, an unrecognised name has to be caught
+    before the setup is paid for -- the run would otherwise reach the coordinator's
+    dispatch and end there, reporting a spelling mistake as a failed stage.
+    """
+    if harness is None or canonical_harness(harness) in known_harnesses():
+        return
+    report.add(
+        ValidationIssue(
+            severity=Severity.ERROR,
+            code="harness.unknown",
+            message=f"{who} selects unknown harness {harness!r}",
+            path=path,
+            key="harness",
+            accepted=known_harnesses(),
+            remediation=(
+                "Select a harness this build implements, or pin a `tier`/`model` to use "
+                "the built-in one."
+            ),
+        )
+    )
 
 
 def _check_automation_overlap(definition: Definition, report: ValidationReport) -> None:

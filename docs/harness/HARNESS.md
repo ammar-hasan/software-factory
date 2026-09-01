@@ -368,6 +368,30 @@ tiers:
 Each declares provider, model, context window, effective working-set ceiling, cost, and capability
 tags. Agents declare a **starting tier**, not a model, unless deliberately pinned.
 
+A rung may also declare a `harness` and a `runner`, so what a ladder chooses is a
+*(harness, model, runner)* triple rather than a model tier alone:
+
+```
+  - name: mid
+    provider: local
+    model: mid-hosted
+    harness: codex     # which agent runtime drives the stage; the built-in `loom` when unset
+    runner: linux      # which runners/<name>.yaml it executes on; the agent's when unset
+```
+
+**R-1b** — A harness is not a model. It decides what the model sees and what it may do: context
+assembly, tool set, approval rules, sandbox, and what a finished run emits. Two harnesses on one
+model are therefore two engines, which is why the independence checks compare both, and why a
+rung that changes harness buys something a larger model cannot supply.
+
+**R-1c** — An agent that pins `harness:` has declared it instead of a tier, so its pin beats the
+rung. A rung's `runner` is the other way round: `agentDefaults.runner` is inherited factory-wide,
+so the rung is the more specific statement of the two.
+
+**R-1d** — A named harness with no runtime behind it fails the run with `SETUP_FAILED` and says
+so. It is never served by the built-in harness instead: a stage that reports Codex and ran `loom`
+makes every later comparison between them worthless.
+
 ### 8.2 Start low
 
 **R-1** — Default starting tier is the lowest tier whose capability tags cover the stage's declared

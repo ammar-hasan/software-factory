@@ -900,9 +900,13 @@ def test_the_declared_budget_is_what_the_loop_is_given(
             seen.append(kwargs.get("budget"))
             super().__init__(*args, **kwargs)
 
-    import software_factory.orchestrator.coordinator as coordinator_module
+    # Patched where the loop is now *constructed*, which is the built-in harness adapter
+    # rather than the coordinator: the coordinator resolves a harness and hands it a
+    # request, so a recorder installed on the coordinator's own name would see nothing and
+    # the assertion below would pass on an empty list.
+    import software_factory.harness.adapters as adapters_module
 
-    coordinator_module.TurnLoop = Recording  # type: ignore[misc]
+    adapters_module.TurnLoop = Recording  # type: ignore[misc]
     try:
         local_coordinator(
             load_strict(root),
@@ -914,7 +918,7 @@ def test_the_declared_budget_is_what_the_loop_is_given(
             allow_unsandboxed=True,
         ).run(item(WorkClass.CHORE))
     finally:
-        coordinator_module.TurnLoop = original  # type: ignore[misc]
+        adapters_module.TurnLoop = original  # type: ignore[misc]
 
     assert seen, "no run was started, so nothing was bound by anything"
     assert all(budget.tokens == 12345 for budget in seen), [b.tokens for b in seen]

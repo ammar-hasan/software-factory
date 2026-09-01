@@ -36,6 +36,7 @@ from software_factory.evals.recording import (
     Unavailable,
     visual_evidence_statement,
 )
+from software_factory.harness.adapters import HarnessRequest, resolve_harness
 from software_factory.harness.awareness import (
     AwarenessPack,
     Citation,
@@ -53,7 +54,7 @@ from software_factory.harness.conversation import (
     compact,
     resume,
 )
-from software_factory.harness.loop import Budget, RunResult, RunStatus, TurnLoop
+from software_factory.harness.loop import Budget, RunResult, RunStatus
 from software_factory.harness.routing import RoutingState, starting_tier
 from software_factory.harness.sections import (
     conventions_builder,
@@ -1144,7 +1145,14 @@ class Coordinator:
         task = item.request if letters.empty else f"{item.request}\n\n{letters.render()}"
         highest_read = max((m.seq for m in letters.unread), default=0)
 
-        loop = TurnLoop(
+        # Which engine, not only which model. An agent that pins a harness has declared it
+        # instead of a tier -- the schema makes the three mutually exclusive -- so its pin
+        # beats the rung. A rung's `runner` is the other way round: nothing makes it
+        # exclusive with a tier, and `agentDefaults.runner` is inherited factory-wide, so
+        # the rung is the more specific statement of the two.
+        harness_name = execution.harness.type if execution.harness else routing.tier.harness
+        harness = resolve_harness(harness_name)
+        request = HarnessRequest(
             provider=self.provider,
             registry=registry,
             grants=grants,
@@ -1155,6 +1163,7 @@ class Coordinator:
             role_prompt=prompt,
             task=task,
             output_schema=STAGE_SCHEMAS.get(stage),
+            runner=routing.tier.runner or execution.runner,
             should_stop=lambda: self._stop_reason(item),
             on_tool=self._tool_recorder(item, stage, agent_name, run_id),
         )
@@ -1174,7 +1183,7 @@ class Coordinator:
                 payload={"resumption": resumption.as_dict()},
             )
 
-        run = loop.run()
+        run = harness.run(request)
         if highest_read:
             self.mailbox.mark_read(agent_name, highest_read)
 
@@ -1194,6 +1203,11 @@ class Coordinator:
                 "agent": agent_name,
                 "tier": routing.current,
                 "model": active_tier.model,
+                # Which engine produced the work, beside which model. Two harnesses on one
+                # model do different things with it, so a ledger that records only the
+                # model cannot answer whether Codex or `loom` was the better fit for a
+                # stage -- and answering that is the whole reason a rung may choose one.
+                "harness": harness.name,
                 "workItem": item.id,
                 "run": run_id,
                 # Repairs are counted apart from primary work: a factory spending a third of

@@ -261,6 +261,25 @@ class Tier(Strict):
     name: Name
     provider: Name
     model: str
+    harness: Name | None = None
+    """Which agent runtime drives a run at this rung; the built-in one when unset.
+
+    On the ladder and not only on an agent, because escalation is a change of engine and
+    not only of model. A harness decides what the model sees and what it may do -- context
+    assembly, tool set, approval rules, sandbox -- so a rung that hands the work to Claude
+    Code or Codex differs from the one below it in ways a larger model cannot supply. A
+    ladder that can only change the model can only ever buy a bigger version of the same
+    failure.
+    """
+
+    runner: Name | None = None
+    """Which `runners/<name>.yaml` a run at this rung executes on; the agent's when unset.
+
+    The third axis of a rung, beside harness and model: a stage that escalates to a harness
+    needing a container, or to work that needs more memory than the default shape, is asking
+    for a different machine as much as a different engine.
+    """
+
     context_window: int = Field(alias="contextWindow", gt=0)
     working_set_ceiling: int = Field(alias="workingSetCeiling", gt=0)
     max_output_tokens: int = Field(default=0, alias="maxOutputTokens", gt=0)

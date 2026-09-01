@@ -10,7 +10,7 @@ from pathlib import Path
 
 from software_factory.definition import lint, load, validate
 
-from .conftest import agent, write
+from .conftest import FACTORY_YAML, agent, write
 
 VALIDATION_SKILL = """\
 ---
@@ -66,6 +66,55 @@ def test_unknown_runner_reference_is_an_error(factory_root: Path) -> None:
     errors = [i for i in report.errors if i.code == "runner.unknown"]
     assert errors
     assert "linux" in errors[0].accepted
+
+
+def test_unknown_harness_reference_is_an_error(factory_root: Path) -> None:
+    """A harness nobody implements has to fail at validation, not halfway through a run."""
+    write(
+        factory_root / "agents" / "builder" / "agent.md",
+        agent("BUILDER", harness="{type: warp-agent}"),
+    )
+
+    definition, report = load(factory_root)
+    validate(definition, report)
+
+    errors = [i for i in report.errors if i.code == "harness.unknown"]
+    assert errors
+    assert "claude-code" in errors[0].accepted
+
+
+def test_a_tier_may_declare_a_harness_and_a_runner(factory_root: Path) -> None:
+    write(
+        factory_root / "factory.yaml",
+        FACTORY_YAML.replace(
+            "      capabilities: [code, tools, reasoning]",
+            "      harness: codex\n      runner: linux\n      capabilities: [code, tools, reasoning]",
+        ),
+    )
+
+    definition, report = load(factory_root)
+    validate(definition, report)
+
+    assert report.ok, report.as_dict()
+    assert definition.factory.ladder is not None
+    assert definition.factory.ladder.tiers[1].harness == "codex"
+
+
+def test_a_tier_selecting_an_unknown_runner_is_an_error(factory_root: Path) -> None:
+    write(
+        factory_root / "factory.yaml",
+        FACTORY_YAML.replace(
+            "      capabilities: [code, tools, reasoning]",
+            "      runner: macos\n      capabilities: [code, tools, reasoning]",
+        ),
+    )
+
+    definition, report = load(factory_root)
+    validate(definition, report)
+
+    errors = [i for i in report.errors if i.code == "runner.unknown"]
+    assert errors
+    assert "mid" in errors[0].message
 
 
 def test_unknown_automation_target_is_an_error(factory_root: Path) -> None:
