@@ -1,0 +1,17 @@
+{
+  "registration": {
+    "hypothesis": "A small model inside this harness reaches a higher pass rate, at lower fully-loaded cost per passing task, than a competent off-the-shelf single-agent setup running a large model.",
+    "minimumEffect": 0.1,
+    "alpha": 0.05,
+    "requiredTasks": 120,
+    "requiredRepositories": 5,
+    "requiredTaskClasses": 4,
+    "attemptBudget": 1,
+    "repairBudget": 1,
+    "registeredAt": "2026-09-01T03:52:39.133836+00:00"
+  },
+  "lockedDigest": "",
+  "tasks": [],
+  "attempts": [],
+  "amendments": []
+}

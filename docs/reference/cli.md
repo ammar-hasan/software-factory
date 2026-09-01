@@ -42,6 +42,10 @@ cannot be scripted, and PR-2 makes the local path the reference one.
 | `sf chat verify` | Check one delivery's signature against this workspace's signing secret. |
 | `sf checkpoints list` | What is waiting on a person, who can clear it, and how overdue it is (FR-16.1). |
 | `sf checkpoints resolve` | Answer a checkpoint as a named principal, recording the decision. |
+| `sf experiment amend` | Change the protocol after trials have started, visibly. |
+| `sf experiment register` | Write the protocol, before any trial runs. |
+| `sf experiment routing` | What the measured results say about which tier each task class should use. |
+| `sf experiment status` | What the experiment currently concludes. |
 | `sf govern classes` | What each persisted class can contain, how long it is kept, and why. |
 | `sf govern erase` | Answer a subject-erasure request, and say honestly what cannot be erased (FR-27.3). |
 | `sf govern seal` | Seal complete ledger segments so an archived prefix stays verifiable. |

@@ -4063,6 +4063,232 @@ def plan_supervisor(
     _run_or_show(plan, root=root, repo=repo, state=state, dry_run=not execute, as_json=as_json)
 
 
+experiment_app = typer.Typer(
+    help="The central-bet experiment (PRD 11.2), and the routing it justifies.",
+    no_args_is_help=True,
+)
+app.add_typer(experiment_app, name="experiment")
+
+
+def _experiment(path: Path):  # type: ignore[no-untyped-def]
+    from software_factory.evals.experiment import load
+
+    if not path.exists():
+        console.print(f"[red]no experiment at {path}[/]")
+        console.print("[dim]Register one with `sf experiment register`.[/]")
+        raise typer.Exit(EXIT_UNUSABLE)
+    return load(path)
+
+
+@experiment_app.command("register")
+def experiment_register(
+    hypothesis: Annotated[str, typer.Argument(help="What would be true if the bet is right.")],
+    effect: Annotated[
+        float, typer.Option("--effect", help="Pass-rate difference that counts, e.g. 0.10.")
+    ] = 0.10,
+    tasks: Annotated[int, typer.Option("--tasks", help="Corpus size the analysis needs.")] = 120,
+    repositories: Annotated[int, typer.Option("--repositories", help="Distinct repos.")] = 5,
+    classes: Annotated[int, typer.Option("--classes", help="Distinct task classes.")] = 4,
+    at: Annotated[Path, typer.Option("--at", help="Where the experiment lives.")] = Path(
+        "docs/experiment.json"
+    ),
+    as_json: JsonOpt = False,
+) -> None:
+    """Write the protocol, before any trial runs.
+
+    Refuses to overwrite an experiment that already has trials. A registration edited after
+    results start arriving is a results section written in advance, which is the one thing
+    pre-registration exists to prevent.
+    """
+    from software_factory.errors import FactoryError
+    from software_factory.evals.experiment import Experiment, Registration, load, save
+
+    if at.exists():
+        existing = load(at)
+        if existing.attempts:
+            console.print(f"[red]{at} already has {len(existing.attempts)} trial(s)[/]")
+            console.print(
+                "[dim]Use `sf experiment amend` instead. A protocol edited after results "
+                "arrive is a results section written in advance.[/]"
+            )
+            raise typer.Exit(EXIT_UNUSABLE)
+
+    try:
+        registration = Registration(
+            hypothesis=hypothesis,
+            minimum_effect=effect,
+            required_tasks=tasks,
+            required_repositories=repositories,
+            required_task_classes=classes,
+        )
+    except FactoryError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(EXIT_UNUSABLE) from exc
+
+    save(Experiment(registration=registration), at)
+    if as_json:
+        _emit({"ok": True, "path": str(at), "registration": registration.as_dict()})
+        raise typer.Exit(EXIT_OK)
+    console.print(f"[green]registered[/] {at}")
+    console.print(f"[dim]digest {registration.digest()[:12]} — locks at the first trial[/]")
+    raise typer.Exit(EXIT_OK)
+
+
+@experiment_app.command("status")
+def experiment_status(
+    at: Annotated[Path, typer.Option("--at", help="Where the experiment lives.")] = Path(
+        "docs/experiment.json"
+    ),
+    as_json: JsonOpt = False,
+) -> None:
+    """What the experiment currently concludes.
+
+    An experiment with no trials says `insufficient_data`, which is the honest answer and
+    not a placeholder. It is deliberately impossible for this command to report a result the
+    factory has not measured.
+    """
+    from software_factory.evals.experiment import Verdict
+
+    experiment = _experiment(at)
+    result = experiment.evaluate()
+
+    if as_json:
+        _emit({"ok": True, **result.as_dict()})
+        raise typer.Exit(EXIT_OK)
+
+    colours = {
+        Verdict.SUPPORTED: "green",
+        Verdict.FALSIFIED: "red",
+        Verdict.INSUFFICIENT_DATA: "yellow",
+    }
+    console.print(f"[bold]{experiment.registration.hypothesis}[/]")
+    console.print(f"\n[{colours[result.verdict]}]{result.verdict.value}[/] — {result.reason}\n")
+
+    if result.criteria:
+        table = Table(show_header=True, header_style="bold", box=None)
+        for column in ("criterion", "kind", "result", "effect", "p", "detail"):
+            table.add_column(column, overflow="fold")
+        for criterion in result.criteria:
+            mark = {None: "[yellow]—[/]", True: "[green]met[/]", False: "[red]failed[/]"}[
+                criterion.met
+            ]
+            table.add_row(
+                criterion.id,
+                "primary" if criterion.primary else "secondary",
+                mark,
+                "" if criterion.effect is None else f"{criterion.effect:+.1%}",
+                "" if criterion.p_value is None else f"{criterion.p_value:.4f}",
+                criterion.detail,
+            )
+        console.print(table)
+
+    if result.must_remove:
+        console.print(f"\n[bold red]must be removed:[/] {', '.join(result.must_remove)}")
+        console.print(
+            "[dim]PRD 11.2: a subsystem whose ablation does not reduce the pass rate is "
+            "removed, not retained for plausibility.[/]"
+        )
+    for note in result.excluded:
+        console.print(f"[dim]excluded: {note}[/]")
+    if result.contamination_suspect:
+        console.print(
+            f"[dim]{result.contamination_suspect} task(s) flagged as possible training "
+            "contamination, reported separately rather than dropped[/]"
+        )
+    if experiment.amendments:
+        console.print(
+            f"\n[yellow]{len(experiment.amendments)} amendment(s) after the first trial[/]"
+        )
+        for amendment in experiment.amendments:
+            console.print(f"  [dim]{amendment.at:%Y-%m-%d}: {amendment.reason}[/]")
+    raise typer.Exit(EXIT_OK)
+
+
+@experiment_app.command("routing")
+def experiment_routing(
+    at: Annotated[Path, typer.Option("--at", help="Where the experiment lives.")] = Path(
+        "docs/experiment.json"
+    ),
+    as_json: JsonOpt = False,
+) -> None:
+    """What the measured results say about which tier each task class should use.
+
+    Proposals, never applied. The experiment measures; an operator decides. A benchmark that
+    silently rewrote the ladder would make the next benchmark a comparison against a
+    configuration nobody chose.
+    """
+    from software_factory.evals.experiment import routing_proposals
+
+    proposals = routing_proposals(_experiment(at))
+    if as_json:
+        _emit({"ok": True, "proposals": [p.as_dict() for p in proposals]})
+        raise typer.Exit(EXIT_OK)
+    if not proposals:
+        console.print("[dim]nothing to propose — no scoreable tasks[/]")
+        raise typer.Exit(EXIT_OK)
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("task class", "tier", "tasks", "why"):
+        table.add_column(column, overflow="fold")
+    for proposal in proposals:
+        colour = "yellow" if proposal.confidence == "insufficient_data" else "green"
+        table.add_row(
+            proposal.task_class,
+            f"[{colour}]{proposal.tier}[/]",
+            str(proposal.tasks),
+            proposal.reason,
+        )
+    console.print(table)
+    console.print("\n[dim]Proposals. Nothing was changed.[/]")
+    raise typer.Exit(EXIT_OK)
+
+
+@experiment_app.command("amend")
+def experiment_amend(
+    reason: Annotated[str, typer.Argument(help="What changed and why.")],
+    effect: Annotated[float, typer.Option("--effect", help="New minimum effect.")] = 0.0,
+    tasks: Annotated[int, typer.Option("--tasks", help="New corpus requirement.")] = 0,
+    at: Annotated[Path, typer.Option("--at", help="Where the experiment lives.")] = Path(
+        "docs/experiment.json"
+    ),
+    as_json: JsonOpt = False,
+) -> None:
+    """Change the protocol after trials have started, visibly.
+
+    Allowed, because a protocol that cannot be corrected gets worked around instead. The
+    cost is that the change is dated, reasoned, and reported alongside every result.
+    """
+    from software_factory.errors import FactoryError
+    from software_factory.evals.experiment import Registration, save
+
+    experiment = _experiment(at)
+    current = experiment.registration
+    try:
+        experiment.amend(
+            reason,
+            Registration(
+                hypothesis=current.hypothesis,
+                minimum_effect=effect or current.minimum_effect,
+                alpha=current.alpha,
+                required_tasks=tasks or current.required_tasks,
+                required_repositories=current.required_repositories,
+                required_task_classes=current.required_task_classes,
+                attempt_budget=current.attempt_budget,
+                repair_budget=current.repair_budget,
+                registered_at=current.registered_at,
+            ),
+        )
+    except FactoryError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(EXIT_UNUSABLE) from exc
+    save(experiment, at)
+    if as_json:
+        _emit({"ok": True, "amendments": [a.as_dict() for a in experiment.amendments]})
+    else:
+        console.print(f"[yellow]amended[/] — {reason}")
+        console.print("[dim]Reported alongside every result from here on.[/]")
+    raise typer.Exit(EXIT_OK)
+
+
 # The module-as-script entry point stays at the very bottom, and it matters that it does.
 # Run as `python -m software_factory.cli`, this file executes top to bottom: a guard placed
 # mid-file calls `app()` and exits *before* any command group defined below it is
