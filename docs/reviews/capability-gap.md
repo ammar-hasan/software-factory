@@ -159,3 +159,42 @@ control and skill invocation are all doors. None of them is intellectually diffi
 system that works and a system somebody can operate.
 
 That is the finding.
+
+---
+
+## What has been closed since this analysis
+
+Written after the fact, so the ranking above stands as it was made rather than being
+rewritten to look prescient.
+
+| Gap | Rank | Status |
+| --- | --- | --- |
+| Scheduled work never fires | HIGH | **Closed.** `sf schedule list/due/run`; a missed window fires once and reports what it skipped; due-ness derived from the ledger. |
+| No way to run more than one factory | HIGH | **Closed.** `sf workspace init/list/validate/metrics`; FR-1.4's repository-overlap rule can now fire at all. |
+| Nothing can call the factory but a person | HIGH | **Closed.** `sf api serve`, authenticated on every request including reads, capability-checked, keys stored hashed. |
+| No fleet control | MEDIUM-HIGH | **Half closed.** `sf stop` ends a run between turns. Agent-to-agent messaging is still absent. |
+| Skills cannot be invoked | MEDIUM | **Closed.** Declared arguments, `sf skill render` and `sf skill run`. |
+| Computer use | MEDIUM | **Closed.** `UI` effect class, session contract, declared `ui.*` tools, mandatory recording, credential refusal. |
+| Chat and git-host integrations | — | **Closed.** Both ship; the git host also makes three outcome metrics computable. |
+| Run routing has no labels or pool | MEDIUM | Open. |
+| Conversation mining | MEDIUM | Open. Cheaper now that the chat adapter is real. |
+
+## What the live runs changed about this analysis
+
+The analysis above was written from documents. Then the factory was run five times against a
+real hosted model, and that found four defects in the keystone gate alone — none of which
+1,400 tests had caught, all in the same direction: **the gate refused correct work.**
+
+* The commit a run sits on was declared and never written, so the gate compared against a
+  commit that does not exist in any young repository.
+* A test's failure class was decided by the length of its name, because the classifier read
+  a line the test runner truncates to terminal width.
+* The gate required *every* new test to fail at the parent, so writing invariant tests
+  beside a regression test was punished.
+* A single malformed tool call discarded a run that had passed every gate.
+
+None of these was reachable from the test suite, because every test in it was written by
+somebody who already knew what the gate meant. That is the finding worth carrying: **a
+harness is not verified by its own authors' tests.** The gap that mattered most was not in
+the comparison table at all — it was that nothing here had ever met a model it did not
+script.

@@ -195,9 +195,9 @@ silently kept:
 | 4 — review comments as an improvement input | FR-33 | **Done.** `Source.REVIEW_COMMENT` clusters beside assurance failures and never merges with them; a review-driven proposal measured against comment count is refused by name. |
 | 6 — post-handoff explanation | FR-32 | **Done.** `sf explain` answers from the recorded conversation, never by re-running, and says so when the record is silent. |
 | 8 — a provisioned agent suite | FR-2.1 | **Done.** `sf validate` requires a conductor *and* a specialist; the requirement was weaker than every real factory including the scaffold. |
-| 1 — computer use | — | Not built. Waiting on the measurement below. |
+| 1 — computer use | FR-22.3 | **Done.** A `UI` effect class, a session contract beside `BlastRadius`, declared `ui.*` tools registered only when a session exists, mandatory recording, and typed text refused when it matches a secret the run holds. Built ahead of the measurement below, deliberately: the capability was promised in FR-22.3 and had no grant model, which is a worse state than not having it. |
 | 2 — sub-agent delegation | FR-34 | **Done.** Depth and fan-out bounded and declared, a child's spend folded up to its root, and `sf delegation` as the tree. |
-| 5 — recording post-production | — | Not built. Depends on 1, and on watch-through data. |
+| 5 — recording post-production | — | Not built. Item 1 now exists, so the dependency is cleared; the watch-through measurement still gates it. |
 | 7 — benchmarks driving routing | — | Not built. Waiting on §11.2's result. |
 
 Five are done: the four the sequencing section below called small and independent, plus item 2,

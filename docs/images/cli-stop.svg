@@ -1,0 +1,51 @@
+<svg class="rich-terminal" viewBox="0 0 1238 98.8" xmlns="http://www.w3.org/2000/svg">
+    <!-- Generated with Rich https://www.textualize.io -->
+    <style>
+
+    
+    
+
+    .terminal-1157200001-matrix {
+        font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace;
+        font-size: 20px;
+        line-height: 24.4px;
+        font-variant-east-asian: full-width;
+    }
+
+    .terminal-1157200001-title {
+        font-size: 18px;
+        font-weight: bold;
+        font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace;
+    }
+
+    .terminal-1157200001-r1 { fill: #98a84b;font-weight: bold }
+.terminal-1157200001-r2 { fill: #c5c8c6 }
+.terminal-1157200001-r3 { fill: #98729f }
+.terminal-1157200001-r4 { fill: #ff2c7a }
+    </style>
+
+    <defs>
+    <clipPath id="terminal-1157200001-clip-terminal">
+      <rect x="0" y="0" width="1219.0" height="47.8" />
+    </clipPath>
+    <clipPath id="terminal-1157200001-line-0">
+    <rect x="0" y="1.5" width="1220" height="24.65"/>
+            </clipPath>
+    </defs>
+
+    <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1236" height="96.8" rx="8"/><text class="terminal-1157200001-title" fill="#c5c8c6" text-anchor="middle" x="618" y="27">sf&#160;stop</text>
+            <g transform="translate(26,22)">
+            <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
+            <circle cx="22" cy="0" r="7" fill="#febc2e"/>
+            <circle cx="44" cy="0" r="7" fill="#28c840"/>
+            </g>
+        
+    <g transform="translate(9, 41)" clip-path="url(#terminal-1157200001-clip-terminal)">
+    
+    <g class="terminal-1157200001-matrix">
+    <text class="terminal-1157200001-r1" x="0" y="20" textLength="12.2" clip-path="url(#terminal-1157200001-line-0)">$</text><text class="terminal-1157200001-r2" x="12.2" y="20" textLength="268.4" clip-path="url(#terminal-1157200001-line-0)">&#160;sf&#160;stop&#160;list&#160;--state&#160;</text><text class="terminal-1157200001-r3" x="280.6" y="20" textLength="207.4" clip-path="url(#terminal-1157200001-line-0)">/tmp/tmph45hfi6v/</text><text class="terminal-1157200001-r4" x="488" y="20" textLength="61" clip-path="url(#terminal-1157200001-line-0)">state</text><text class="terminal-1157200001-r2" x="1220" y="20" textLength="12.2" clip-path="url(#terminal-1157200001-line-0)">
+</text><text class="terminal-1157200001-r2" x="0" y="44.4" textLength="219.6" clip-path="url(#terminal-1157200001-line-1)">nothing&#160;is&#160;stopped</text><text class="terminal-1157200001-r2" x="1220" y="44.4" textLength="12.2" clip-path="url(#terminal-1157200001-line-1)">
+</text>
+    </g>
+    </g>
+</svg>

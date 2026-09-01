@@ -119,15 +119,20 @@ Under construction, and specific about where. What exists and is tested:
 | Identity | Principals, capabilities, separation of duties, human checkpoints |
 | Economics | Spend caps that stop intake and halt work, backpressure, fair scheduling |
 | Governance | Data classes, retention, subject erasure with an honest receipt |
-| Observability | Metrics folded from the ledger, and a local dashboard |
+| Observability | Metrics folded from the ledger, a local dashboard, and an authenticated HTTP API |
+| Integrations | A chat adapter and a git-host adapter, both replayable offline from a saved delivery |
+| Scheduling | Cron triggers that actually fire, with a missed window firing once rather than once per occurrence |
+| Workspaces | More than one factory in one tree, with cross-factory validation and metrics |
+| Computer use | A `UI` effect class, a session contract, declared `ui.*` tools, and a mandatory recording |
 
-**Honestly not there yet.** No provider is exercised against a live endpoint in CI, so the
-adapters are proven against recorded responses rather than against the real APIs. Three
-git-host metrics (`changes_merged`, `autonomy`, `cycle_time_to_merge`) have a row and a
-reason and no implementation. No integration adapter ships — intake is reachable through
-`sf intake` and the tool server, and nothing listens to a webhook. The behavioural half of
-the executor parity suite skips without a container daemon and a reachable worker, and says
-so rather than passing. See the [milestone plan](docs/PRD.md).
+**Honestly not there yet.** The behavioural half of the executor parity suite skips without
+a container daemon and a reachable worker, and says so rather than passing. Agent-to-agent
+messaging is absent — `sf stop` ends a fleet, and nothing lets one running agent talk to
+another. Run routing has no worker labels and no pool. Conversation mining is designed and
+unbuilt. And no provider is exercised against a live endpoint *in CI*: the suite drives real
+providers over a real socket against a server speaking the hosts' wire formats, which is the
+strongest claim a suite can make on its own, and `scripts/live_trial.py` is the one command
+that goes further. See the [milestone plan](docs/PRD.md).
 
 ## Does it work?
 
@@ -148,11 +153,30 @@ constants, so the keystone gate had never once compared a real test run at the t
 real one at the parent. It blocked a fix with no test for the weaker reason that no evidence
 existed at all.
 
-**The model is scripted in all three**, because no live provider is reachable from the
-environment they were run in. That boundary is the point: the trials establish that *given*
-an output, the factory does the right thing with it — and nothing at all about whether a
-modest model inside this harness produces good output, which is the central bet and what
-[§11.2](docs/PRD.md) exists to test.
+**The model is scripted in all three**, deliberately: a suite that needs a live model is a
+suite nobody runs. The trials establish that *given* an output, the factory does the right
+thing with it.
+
+### And then it met a model that was not scripted
+
+`scripts/live_trial.py` runs one real work item through a real endpoint. Five runs against a
+small hosted model found **four defects in the keystone gate alone** — none of which 1,400
+tests had caught, every one of them in the same direction: *the gate refused correct work.*
+
+| What the model did | What the factory said | What was actually wrong |
+| --- | --- | --- |
+| Fixed the defect, wrote five tests | "Write the test first, and watch it fail" | `base_commit` was declared and written by nothing, so the gate compared against a commit that does not exist in a one-commit repository |
+| Wrote descriptive test names | "The test failed before its body ran" | The failure class was read from a line the test runner truncates to terminal width, so the *length of a test's name* decided whether it counted |
+| Wrote a regression test and an invariant | "This test proves nothing" | The gate required *every* new test to fail at the parent, punishing the practice it exists to encourage |
+| Emitted one literal tab inside JSON | Run over | A malformed tool call discarded a 29-turn build that had already passed every gate |
+
+Between the second and third fixes, a run passed `regression-proven` outright. And on one
+run the gate refused a test for exactly the right reason — *"it proves the code did not
+exist, not that the behaviour was wrong"* — which is FR-13.3a working in the wild.
+
+The finding worth carrying is not any of the four. It is that **a harness is not verified by
+its own authors' tests**: every test in the suite was written by somebody who already knew
+what the gate meant, so none of them could disagree with it.
 
 ## Reviews
 

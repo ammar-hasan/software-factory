@@ -5,59 +5,59 @@
     
     
 
-    .terminal-1597970247-matrix {
+    .terminal-2514097894-matrix {
         font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace;
         font-size: 20px;
         line-height: 24.4px;
         font-variant-east-asian: full-width;
     }
 
-    .terminal-1597970247-title {
+    .terminal-2514097894-title {
         font-size: 18px;
         font-weight: bold;
         font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace;
     }
 
-    .terminal-1597970247-r1 { fill: #98a84b;font-weight: bold }
-.terminal-1597970247-r2 { fill: #c5c8c6 }
-.terminal-1597970247-r3 { fill: #c5c8c6;font-weight: bold }
-.terminal-1597970247-r4 { fill: #ff2c7a;font-weight: bold }
-.terminal-1597970247-r5 { fill: #98a84b }
+    .terminal-2514097894-r1 { fill: #98a84b;font-weight: bold }
+.terminal-2514097894-r2 { fill: #c5c8c6 }
+.terminal-2514097894-r3 { fill: #c5c8c6;font-weight: bold }
+.terminal-2514097894-r4 { fill: #ff2c7a;font-weight: bold }
+.terminal-2514097894-r5 { fill: #98a84b }
     </style>
 
     <defs>
-    <clipPath id="terminal-1597970247-clip-terminal">
+    <clipPath id="terminal-2514097894-clip-terminal">
       <rect x="0" y="0" width="1219.0" height="121.0" />
     </clipPath>
-    <clipPath id="terminal-1597970247-line-0">
+    <clipPath id="terminal-2514097894-line-0">
     <rect x="0" y="1.5" width="1220" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1597970247-line-1">
+<clipPath id="terminal-2514097894-line-1">
     <rect x="0" y="25.9" width="1220" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1597970247-line-2">
+<clipPath id="terminal-2514097894-line-2">
     <rect x="0" y="50.3" width="1220" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1597970247-line-3">
+<clipPath id="terminal-2514097894-line-3">
     <rect x="0" y="74.7" width="1220" height="24.65"/>
             </clipPath>
     </defs>
 
-    <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1236" height="170" rx="8"/><text class="terminal-1597970247-title" fill="#c5c8c6" text-anchor="middle" x="618" y="27">sf&#160;explain</text>
+    <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1236" height="170" rx="8"/><text class="terminal-2514097894-title" fill="#c5c8c6" text-anchor="middle" x="618" y="27">sf&#160;explain</text>
             <g transform="translate(26,22)">
             <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
             <circle cx="22" cy="0" r="7" fill="#febc2e"/>
             <circle cx="44" cy="0" r="7" fill="#28c840"/>
             </g>
         
-    <g transform="translate(9, 41)" clip-path="url(#terminal-1597970247-clip-terminal)">
+    <g transform="translate(9, 41)" clip-path="url(#terminal-2514097894-clip-terminal)">
     
-    <g class="terminal-1597970247-matrix">
-    <text class="terminal-1597970247-r1" x="0" y="20" textLength="12.2" clip-path="url(#terminal-1597970247-line-0)">$</text><text class="terminal-1597970247-r2" x="12.2" y="20" textLength="146.4" clip-path="url(#terminal-1597970247-line-0)">&#160;sf&#160;explain&#160;</text><text class="terminal-1597970247-r3" x="158.6" y="20" textLength="12.2" clip-path="url(#terminal-1597970247-line-0)">&lt;</text><text class="terminal-1597970247-r4" x="170.8" y="20" textLength="73.2" clip-path="url(#terminal-1597970247-line-0)">ledger</text><text class="terminal-1597970247-r3" x="244" y="20" textLength="12.2" clip-path="url(#terminal-1597970247-line-0)">&gt;</text><text class="terminal-1597970247-r2" x="256.2" y="20" textLength="207.4" clip-path="url(#terminal-1597970247-line-0)">&#160;wi_c143d87d40be&#160;</text><text class="terminal-1597970247-r5" x="463.6" y="20" textLength="427" clip-path="url(#terminal-1597970247-line-0)">&quot;was&#160;the&#160;customer&#160;told&#160;about&#160;this?&quot;</text><text class="terminal-1597970247-r2" x="1220" y="20" textLength="12.2" clip-path="url(#terminal-1597970247-line-0)">
-</text><text class="terminal-1597970247-r2" x="0" y="44.4" textLength="963.8" clip-path="url(#terminal-1597970247-line-1)">The&#160;record&#160;does&#160;not&#160;say.&#160;This&#160;answers&#160;from&#160;what&#160;the&#160;run&#160;wrote&#160;down&#160;at&#160;the&#160;time&#160;</text><text class="terminal-1597970247-r2" x="1220" y="44.4" textLength="12.2" clip-path="url(#terminal-1597970247-line-1)">
-</text><text class="terminal-1597970247-r2" x="0" y="68.8" textLength="951.6" clip-path="url(#terminal-1597970247-line-2)">--&#160;its&#160;decisions,&#160;what&#160;it&#160;tried,&#160;the&#160;constraints&#160;it&#160;found&#160;--&#160;and&#160;nothing&#160;here&#160;</text><text class="terminal-1597970247-r2" x="1220" y="68.8" textLength="12.2" clip-path="url(#terminal-1597970247-line-2)">
-</text><text class="terminal-1597970247-r2" x="0" y="93.2" textLength="927.2" clip-path="url(#terminal-1597970247-line-3)">bears&#160;on&#160;the&#160;question.&#160;Re-running&#160;would&#160;produce&#160;an&#160;answer&#160;about&#160;a&#160;different&#160;</text><text class="terminal-1597970247-r2" x="1220" y="93.2" textLength="12.2" clip-path="url(#terminal-1597970247-line-3)">
-</text><text class="terminal-1597970247-r2" x="0" y="117.6" textLength="390.4" clip-path="url(#terminal-1597970247-line-4)">execution,&#160;so&#160;it&#160;is&#160;not&#160;offered.</text><text class="terminal-1597970247-r2" x="1220" y="117.6" textLength="12.2" clip-path="url(#terminal-1597970247-line-4)">
+    <g class="terminal-2514097894-matrix">
+    <text class="terminal-2514097894-r1" x="0" y="20" textLength="12.2" clip-path="url(#terminal-2514097894-line-0)">$</text><text class="terminal-2514097894-r2" x="12.2" y="20" textLength="146.4" clip-path="url(#terminal-2514097894-line-0)">&#160;sf&#160;explain&#160;</text><text class="terminal-2514097894-r3" x="158.6" y="20" textLength="12.2" clip-path="url(#terminal-2514097894-line-0)">&lt;</text><text class="terminal-2514097894-r4" x="170.8" y="20" textLength="73.2" clip-path="url(#terminal-2514097894-line-0)">ledger</text><text class="terminal-2514097894-r3" x="244" y="20" textLength="12.2" clip-path="url(#terminal-2514097894-line-0)">&gt;</text><text class="terminal-2514097894-r2" x="256.2" y="20" textLength="207.4" clip-path="url(#terminal-2514097894-line-0)">&#160;wi_b657013f46b2&#160;</text><text class="terminal-2514097894-r5" x="463.6" y="20" textLength="427" clip-path="url(#terminal-2514097894-line-0)">&quot;was&#160;the&#160;customer&#160;told&#160;about&#160;this?&quot;</text><text class="terminal-2514097894-r2" x="1220" y="20" textLength="12.2" clip-path="url(#terminal-2514097894-line-0)">
+</text><text class="terminal-2514097894-r2" x="0" y="44.4" textLength="963.8" clip-path="url(#terminal-2514097894-line-1)">The&#160;record&#160;does&#160;not&#160;say.&#160;This&#160;answers&#160;from&#160;what&#160;the&#160;run&#160;wrote&#160;down&#160;at&#160;the&#160;time&#160;</text><text class="terminal-2514097894-r2" x="1220" y="44.4" textLength="12.2" clip-path="url(#terminal-2514097894-line-1)">
+</text><text class="terminal-2514097894-r2" x="0" y="68.8" textLength="951.6" clip-path="url(#terminal-2514097894-line-2)">--&#160;its&#160;decisions,&#160;what&#160;it&#160;tried,&#160;the&#160;constraints&#160;it&#160;found&#160;--&#160;and&#160;nothing&#160;here&#160;</text><text class="terminal-2514097894-r2" x="1220" y="68.8" textLength="12.2" clip-path="url(#terminal-2514097894-line-2)">
+</text><text class="terminal-2514097894-r2" x="0" y="93.2" textLength="927.2" clip-path="url(#terminal-2514097894-line-3)">bears&#160;on&#160;the&#160;question.&#160;Re-running&#160;would&#160;produce&#160;an&#160;answer&#160;about&#160;a&#160;different&#160;</text><text class="terminal-2514097894-r2" x="1220" y="93.2" textLength="12.2" clip-path="url(#terminal-2514097894-line-3)">
+</text><text class="terminal-2514097894-r2" x="0" y="117.6" textLength="390.4" clip-path="url(#terminal-2514097894-line-4)">execution,&#160;so&#160;it&#160;is&#160;not&#160;offered.</text><text class="terminal-2514097894-r2" x="1220" y="117.6" textLength="12.2" clip-path="url(#terminal-2514097894-line-4)">
 </text>
     </g>
     </g>

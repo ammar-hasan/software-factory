@@ -163,6 +163,9 @@ def capture_cli(factory: Path, ledger: Path, work_item: str, out: Path) -> None:
         ("cli-delegation", ["delegation", str(ledger)], {0}),
         ("cli-improve", ["improve", str(ledger)], {0}),
         ("cli-govern-classes", ["govern", "classes"], {0}),
+        ("cli-schedule", ["schedule", "list", str(factory)], {0}),
+        ("cli-skill", ["skill", "list", str(factory)], {0}),
+        ("cli-stop", ["stop", "list", "--state", str(ledger.parent)], {0}),
         (
             "cli-explain",
             ["explain", str(ledger), work_item, "what did you decide about the public signature?"],
