@@ -20,7 +20,7 @@ from software_factory.definition.models import Stage
 from software_factory.ledger import EntryType, Ledger
 from software_factory.orchestrator import SourceContext, WorkClass, WorkItem, new_id
 from software_factory.orchestrator.coordinator import Coordinator, local_coordinator
-from software_factory.providers import StubProvider, says
+from software_factory.providers import StubProvider, calls, says
 from software_factory.runtime.workspace import WorkspaceFactory
 from software_factory.scaffold import init_factory
 
@@ -856,3 +856,91 @@ def test_the_declared_budget_is_what_the_loop_is_given(
     assert seen, "no run was started, so nothing was bound by anything"
     assert all(budget.tokens == 12345 for budget in seen), [b.tokens for b in seen]
     assert all(budget.tool_calls == 7 for budget in seen)
+
+
+# ------------------------------------------------------------- tool calls in the ledger
+
+
+def test_every_tool_call_reaches_the_ledger(definition, repo: Path, tmp_path: Path) -> None:
+    """`TOOL_CALLED` was a ledger entry type nothing wrote.
+
+    The dashboard counted it, the run inspector rendered it, and conversation mining
+    searched for it — so every run reported zero tool calls, the inspector could not say
+    what a run did, and mining's whole skill-idea half was dead code searching an empty set.
+    The sixth control in this codebase that existed and was never called.
+    """
+    from software_factory.ledger import EntryType, Ledger
+
+    provider = StubProvider(
+        [
+            calls("repo.read", {"path": "importer.py"}),
+            says(triage_output()),
+            says(build_output()),
+            says(review_output()),
+            says(stage_output(summary="Handed off.")),
+        ]
+    )
+    coord = coordinator(definition, repo, tmp_path, provider)
+
+    coord.run(item(WorkClass.CHORE))
+
+    recorded = [
+        entry for entry in Ledger(coord.ledger.path).read() if entry.type is EntryType.TOOL_CALLED
+    ]
+    assert recorded, "no tool call reached the ledger"
+    assert recorded[0].payload["tool"] == "repo.read"
+    assert recorded[0].payload["ok"] is True
+    assert recorded[0].payload["run"]
+
+
+def test_a_tool_call_is_recorded_by_shape_not_by_value(
+    definition, repo: Path, tmp_path: Path
+) -> None:
+    """A tool call carries file contents, command lines and sometimes a secret an agent was
+    given, and the ledger is the one store here that is append-only and never redacted
+    after the fact. The argument *names* are what makes a call diagnosable; the values are
+    what makes it a liability."""
+    from software_factory.ledger import EntryType, Ledger
+
+    provider = StubProvider(
+        [
+            calls("repo.read", {"path": "importer.py"}),
+            says(triage_output()),
+            says(build_output()),
+            says(review_output()),
+            says(stage_output(summary="Handed off.")),
+        ]
+    )
+    coord = coordinator(definition, repo, tmp_path, provider)
+
+    coord.run(item(WorkClass.CHORE))
+
+    payload = next(
+        e.payload for e in Ledger(coord.ledger.path).read() if e.type is EntryType.TOOL_CALLED
+    )
+    assert payload["arguments"] == ["path"]
+    assert "importer.py" not in json.dumps(payload)
+
+
+def test_a_failed_tool_call_is_recorded_as_failed(definition, repo: Path, tmp_path: Path) -> None:
+    """A ledger that records only what worked describes a run that never struggled."""
+    from software_factory.ledger import EntryType, Ledger
+
+    provider = StubProvider(
+        [
+            calls("repo.read", {"path": "does-not-exist.py"}),
+            says(triage_output()),
+            says(build_output()),
+            says(review_output()),
+            says(stage_output(summary="Handed off.")),
+        ]
+    )
+    coord = coordinator(definition, repo, tmp_path, provider)
+
+    coord.run(item(WorkClass.CHORE))
+
+    payload = next(
+        e.payload for e in Ledger(coord.ledger.path).read() if e.type is EntryType.TOOL_CALLED
+    )
+    assert payload["ok"] is False
+    assert payload["failure"], "a failure with no class cannot be grouped or explained"

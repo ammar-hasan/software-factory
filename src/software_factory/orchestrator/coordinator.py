@@ -10,6 +10,7 @@ and record what happened.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1153,6 +1154,7 @@ class Coordinator:
             task=task,
             output_schema=STAGE_SCHEMAS.get(stage),
             should_stop=lambda: self._stop_reason(item),
+            on_tool=self._tool_recorder(item, stage, agent_name, run_id),
         )
         conversation = self.conversations.setdefault(
             (item.id, agent_name), ConversationState(work_item_id=item.id, agent=agent_name)
@@ -1700,6 +1702,39 @@ class Coordinator:
         )
 
     # --------------------------------------------------------------------- plumbing
+
+    def _tool_recorder(
+        self, item: WorkItem, stage: Stage, agent: str, run: str
+    ) -> Callable[[str, dict[str, Any], Any], None]:
+        """Record every tool call in the ledger, as it happens.
+
+        Per call rather than per run. The count is the smaller half of the value: the
+        reason this is here is that a stage could run for six minutes and the ledger would
+        say nothing, so an operator watching a live fleet had no signal between stage
+        boundaries and no way to tell a slow run from a stuck one.
+
+        Arguments are recorded by *shape*, not by value. A tool call carries file contents,
+        command lines and sometimes a secret an agent was given, and a ledger is the one
+        place in this system that is append-only and never redacted after the fact.
+        """
+
+        def record(name: str, arguments: dict[str, Any], outcome: Any) -> None:
+            failure = getattr(outcome, "kind", None)
+            self.ledger.append(
+                EntryType.TOOL_CALLED,
+                actor=agent,
+                subject=item.id,
+                payload={
+                    "run": run,
+                    "stage": stage.value,
+                    "tool": name,
+                    "ok": failure is None,
+                    "failure": getattr(failure, "value", "") or "",
+                    "arguments": sorted(arguments),
+                },
+            )
+
+        return record
 
     def agent_for_stage(self, stage: Stage) -> str:
         """Which agent will run this stage.

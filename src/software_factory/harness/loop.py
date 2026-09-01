@@ -223,6 +223,19 @@ class TurnLoop:
     per_mtok_in: float = 0.0
     per_mtok_out: float = 0.0
     should_stop: Any = None
+    on_tool: Any = None
+    """Called after every tool call, with `(name, arguments, outcome)`.
+
+    A callback rather than a ledger, because the harness does not have one and must not
+    grow one: it runs in tests, in replay, and inside the parity suite, none of which have
+    a factory around them. The coordinator supplies the callback that records.
+
+    It exists because `TOOL_CALLED` was a ledger entry type the dashboard counted, the run
+    inspector rendered, and conversation mining searched for -- and nothing wrote it. Every
+    run reported zero tool calls, the inspector could not say what a run did, and mining's
+    whole skill-idea half was dead code searching an empty set. A stage could also run for
+    six minutes without the ledger recording anything at all, because the only per-turn
+    record that existed was never written."""
     """A callable returning a reason to stop, or empty/None to continue.
 
     Checked between turns rather than only between stages. A stage is the unit a schedule
@@ -434,6 +447,8 @@ class TurnLoop:
             outcome = self.registry.call(call.name, call.arguments, grants=self.grants)
             result.spend.tool_calls += 1
             result.tool_calls.append((call.name, isinstance(outcome, ToolSuccess)))
+            if self.on_tool is not None:
+                self.on_tool(call.name, call.arguments, outcome)
 
             if isinstance(outcome, ToolFailure):
                 payload: dict[str, Any] = outcome.as_dict()
