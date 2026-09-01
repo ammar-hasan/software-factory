@@ -256,10 +256,11 @@ state = { pack, working_set, budget, tier, step }
 loop:
   1. compose prompt: role body | policy | pack | working set | task | contract
   2. call model at current tier
-  3. if tool calls: validate grant → check contract → dispatch → record → append results
-  4. if final: validate against output_schema (§7)
-  5. check budget; check compaction threshold (§6.4)
-  6. check escalation triggers (§8.3)
+  3. if the turn carried nothing usable: diagnose it (truncated | filtered | empty) and advise (§7 O-3.1)
+  4. if tool calls: validate grant → check contract → dispatch → record → append results
+  5. if final: validate against output_schema (§7)
+  6. check budget; check compaction threshold (§6.4)
+  7. check escalation triggers (§8.3)
 until final-and-valid | budget_exceeded | contract_violation | cancelled
 ```
 
@@ -312,6 +313,18 @@ structure; free prose is never a stage's interface.
 repair attempts (default 3). Each attempt is recorded.
 **O-3** — After exhaustion the harness escalates one tier (§8.3) and retries once. After that the run
 ends `gate_failed` with the validation errors as findings.
+**O-3.1 — A turn that carried no usable answer is diagnosed before it is repaired.** A truncated
+answer, a filtered one, and an empty one are three different faults and only one of them is a schema
+mistake. Each gets feedback naming *its* fault, and the run that ends on one ends with *its* reason.
+Treating them alike is not a cosmetic error: a model told to correct its JSON when its answer was cut
+off at the output limit will re-send an answer of the same length and be cut off in the same place, so
+the repair budget is spent without a single turn of progress. Every stop reason a provider can report
+is acted on here or the enum's promise that the loop acts on all of them is false.
+**O-3.2 — A validation error must be findable, not merely exact.** E-13 requires the error verbatim;
+verbatim is necessary and not sufficient. `at position 1587` is exact and useless: a model cannot count
+to the 1587th character of its own output, so the repair turn goes to guessing. Report the line and
+column, and quote the text on either side of the fault. The agent's own text quoted back into a prompt
+is escaped like any other untrusted content (L-3) — it is the one region of the prompt the model wrote.
 **O-4** — Every output carries a `CalibrationStatement`:
 
 ```

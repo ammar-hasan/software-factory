@@ -597,6 +597,98 @@ def test_a_provider_failure_is_reported_as_one_not_as_a_gate_failure(wire, tmp_p
     )
 
 
+def test_a_truncated_answer_is_not_reported_as_a_missing_calibration_block(wire, tmp_path) -> None:
+    """The same diagnosis bug as above, one status further along, found by a real trial.
+
+    A DESIGN stage was cut off at the endpoint's output limit on every attempt. The run
+    ended `gate_failed` with `output was cut off ...`, the calibration gate then failed
+    because there was no output to calibrate, and the work item was blocked with "Emit the
+    calibration block required by the stage's output schema" -- again sending somebody to
+    rewrite a prompt that was never the problem.
+
+    `RunStatus.GATE_FAILED` reads like an eval gate failing, which is why it was left out
+    of the run failures the first time. Nothing in the orchestrator sets it: the turn loop
+    is its only writer and it always means the model's output never validated, so its
+    reason is always the better one.
+    """
+    import subprocess
+
+    from software_factory.definition import load_strict
+    from software_factory.orchestrator import SourceContext, WorkClass, WorkItem, new_id
+    from software_factory.orchestrator.coordinator import local_coordinator
+    from software_factory.orchestrator.workitem import Blocker
+    from software_factory.scaffold import init_factory
+
+    recorder, base = wire
+    # One answer, repeated for every turn: cut off mid-string, exactly as an output cap
+    # does it. The content is well-formed JSON right up to where it stops.
+    recorder.answers = [
+        (
+            200,
+            openai_answer(
+                choices=[
+                    {
+                        "index": 0,
+                        "finish_reason": "length",
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"findings": "strip_bom returns its input unch',
+                        },
+                    }
+                ]
+            ),
+        )
+    ]
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "importer.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.test",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.test",
+        "PATH": __import__("os").environ.get("PATH", ""),
+        "HOME": str(tmp_path),
+    }
+    for args in (("init", "--quiet", "-b", "main"), ("add", "-A"), ("commit", "-q", "-m", "x")):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, env=env)
+
+    factory = tmp_path / "factory"
+    init_factory(factory, name="wire", owner="acme", repo="importer")
+    item = WorkItem(
+        id=new_id(),
+        factory="wire",
+        title="anything",
+        request="anything",
+        source=SourceContext(provider="cli", kind="test", ref="wire"),
+        work_class=WorkClass.CHORE,
+    )
+
+    local_coordinator(
+        load_strict(factory),
+        repo=repo,
+        state_dir=tmp_path / "state",
+        provider=OpenAICompatibleProvider(base_url=f"{base}/v1", name="wire-test"),
+        allow_unsandboxed=True,
+    ).run(item)
+
+    assert item.blocker is Blocker.GATE_FAILED_TERMINAL
+    action = item.blocker_action or ""
+    assert "cut off" in action, action
+    assert "calibration" not in action.lower(), (
+        "a truncated answer was reported as a calibration problem"
+    )
+    # The model was told what to do about it, in the turn where it could still act.
+    sent = [
+        m["content"]
+        for r in recorder.requests
+        for m in r["body"]["messages"]
+        if isinstance(m.get("content"), str)
+    ]
+    assert any("cut off at the output limit" in c for c in sent)
+
+
 def test_a_run_records_the_commit_its_work_sits_on(wire, tmp_path) -> None:
     """`WorkItem.base_commit` was declared and written by nothing.
 

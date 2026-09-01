@@ -86,6 +86,47 @@ def calls(name: str, arguments: dict[str, Any], *, call_id: str = "call-1") -> C
     )
 
 
+def truncated(text: str) -> Completion:
+    """A completion the provider cut off at its output limit.
+
+    Scriptable because the loop must treat it as a length problem and not as a malformed
+    answer, and there is no way to assert that without being able to produce one.
+    """
+    return Completion(
+        text=text,
+        stop_reason=StopReason.LENGTH,
+        usage=Usage.observed(input_tokens=100, output_tokens=4096),
+        model="stub",
+    )
+
+
+def filtered(reason: str = "") -> Completion:
+    """A completion the provider's own content filter stopped."""
+    return Completion(
+        text="",
+        stop_reason=StopReason.FILTERED,
+        error=reason or None,
+        usage=Usage.observed(input_tokens=100, output_tokens=0),
+        model="stub",
+    )
+
+
+def silent() -> Completion:
+    """A turn that carried neither text nor a tool call.
+
+    What a dropped tool call looks like from inside the loop: the adapter could not decode
+    the call, so it is absent, and a model that emits calls without prose leaves no text
+    either. Indistinguishable from silence, and the loop must say so rather than describe
+    it as a missing final answer.
+    """
+    return Completion(
+        text="",
+        stop_reason=StopReason.COMPLETE,
+        usage=Usage.observed(input_tokens=100, output_tokens=0),
+        model="stub",
+    )
+
+
 def fails(reason: str) -> Completion:
     """A completion that reports a provider-side failure without raising.
 

@@ -27,7 +27,10 @@ from software_factory.providers.stub import (
     UnavailableProvider,
     calls,
     fails,
+    filtered,
     says,
+    silent,
+    truncated,
 )
 from software_factory.providers.transport import (
     RetryingTransport,
@@ -59,9 +62,12 @@ __all__ = [
     "calls",
     "endpoint_for",
     "fails",
+    "filtered",
     "known_providers",
     "redact_headers",
     "resolve",
     "says",
+    "silent",
     "spec_for",
+    "truncated",
 ]
