@@ -1379,3 +1379,44 @@ def test_the_message_survives_the_group_handler(tmp_path: Path) -> None:
     assert result.exit_code == EXIT_UNUSABLE
     assert "no factory.yaml" in result.output
     assert "Run `sf init` here" in result.output
+
+
+def test_every_command_can_explain_itself() -> None:
+    """`--help` is the first thing anybody runs, and nothing checked all of it.
+
+    Swept across every command and subcommand rather than spot-checked. Help is built from
+    decorators and docstrings, so a command whose help crashes is a command nobody can
+    discover — and it crashes for everyone, on the first thing they try, before they have
+    any reason to believe the tool works.
+    """
+    import re
+
+    def commands(prefix: list[str]) -> list[str]:
+        output = runner.invoke(app, [*prefix, "--help"]).output
+        names, inside = [], False
+        for line in output.splitlines():
+            if "Commands" in line:
+                inside = True
+                continue
+            if inside and line.startswith("╰"):
+                break
+            if inside:
+                # The name sits at the start of its row; a wrapped description does not.
+                match = re.match(r"^│ ([a-z][a-z0-9-]*)\s{2,}", line)
+                if match:
+                    names.append(match.group(1))
+        return names
+
+    top = commands([])
+    assert len(top) > 30, f"only {len(top)} commands found; the help parser missed the panel"
+
+    checked, broken = 0, []
+    for name in top:
+        for argv in [[name, sub] for sub in commands([name])] or [[name]]:
+            checked += 1
+            result = runner.invoke(app, [*argv, "--help"])
+            if result.exit_code != 0 or "Traceback" in result.output:
+                broken.append(f"sf {' '.join(argv)} --help -> {result.exit_code}")
+
+    assert checked > 60, f"only {checked} commands swept"
+    assert broken == [], broken
