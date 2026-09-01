@@ -252,6 +252,9 @@ def compute(
     ]
     if "git-host" in integrations:
         measures.append(_changes_opened(in_window))
+        measures.append(_changes_merged(in_window))
+        measures.append(_autonomy(in_window))
+        measures.append(_cycle_time_to_merge(in_window))
 
     for name, integration in sorted(REQUIRES_INTEGRATION.items()):
         if integration not in integrations:
@@ -413,6 +416,116 @@ def _changes_opened(entries: list[LedgerEntry]) -> Measure:
     return Measure(
         name="changes_opened", value=float(len(opened)), unit="changes", sample=len(opened)
     )
+
+
+def _merged_in(entries: list[LedgerEntry]) -> list[dict[str, Any]]:
+    """The changes observed as merged in this window, deduplicated by change reference.
+
+    Observed, not inferred. A handoff is the factory saying it produced something; a merge
+    is the repository saying somebody took it, and only the second is an outcome. Where the
+    repository has not been observed, these lists are empty and the metrics below report
+    `insufficient_data` -- which is FR-15.14's rule, and is why a factory with no post-merge
+    feedback must not show a merge rate at all.
+    """
+    latest: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        if entry.type is not EntryType.CHANGE_OBSERVED:
+            continue
+        if str(entry.payload.get("state")) != "merged":
+            continue
+        # Last observation of a change wins: a change observed twice is one change, and
+        # counting observations would let a redelivery inflate the merge rate.
+        latest[str(entry.payload.get("change"))] = entry.payload
+    return list(latest.values())
+
+
+def _changes_merged(entries: list[LedgerEntry]) -> Measure:
+    """O-1, delivered change rate: changes the repository says were merged."""
+    merged = _merged_in(entries)
+    if not merged:
+        return insufficient(
+            "changes_merged",
+            "no merged change has been observed in this window; a handoff is the factory "
+            "saying it produced something, and only the repository can say it was taken",
+        )
+    return Measure(
+        name="changes_merged", value=float(len(merged)), unit="changes", sample=len(merged)
+    )
+
+
+def _autonomy(entries: list[LedgerEntry]) -> Measure:
+    """O-5: the share of merged factory changes with zero human code commits.
+
+    Computed only over changes whose human-commit count is actually *known*. A factory that
+    cannot tell whose commits are on a branch and treats unknown as zero reports perfect
+    autonomy for every change it has ever produced, which is the most flattering possible
+    reading of the least information -- exactly what FR-15.4 forbids.
+    """
+    merged = _merged_in(entries)
+    known = [c for c in merged if isinstance(c.get("humanCommits"), int)]
+    if not known:
+        return insufficient(
+            "autonomy",
+            "no merged change carries a human-commit count; without the factory's own "
+            "login the host cannot say whose commits are on a branch, and treating that "
+            "as zero would report perfect autonomy for every change",
+        )
+    untouched = [c for c in known if int(c["humanCommits"]) == 0]
+    return Measure(
+        name="autonomy",
+        value=round(len(untouched) / len(known), 4),
+        unit="share",
+        sample=len(known),
+        excludes=(
+            ()
+            if len(known) == len(merged)
+            else (f"{len(merged) - len(known)} merged changes with no commit attribution",)
+        ),
+    )
+
+
+def _cycle_time_to_merge(entries: list[LedgerEntry]) -> Measure:
+    """Median hours from a change opening to it merging.
+
+    Median rather than mean because one change that sat open over a holiday would otherwise
+    define the number, and the number exists to be compared week to week.
+    """
+    merged = _merged_in(entries)
+    spans: list[float] = []
+    for change in merged:
+        opened = _parse_iso(change.get("openedAt"))
+        closed = _parse_iso(change.get("mergedAt"))
+        if opened is None or closed is None or closed < opened:
+            continue
+        spans.append((closed - opened).total_seconds() / 3600.0)
+    if not spans:
+        return insufficient(
+            "cycle_time_to_merge",
+            "no merged change in this window carries both an opened and a merged time",
+        )
+    spans.sort()
+    middle = len(spans) // 2
+    median = spans[middle] if len(spans) % 2 else (spans[middle - 1] + spans[middle]) / 2
+    return Measure(
+        name="cycle_time_to_merge",
+        value=round(median, 3),
+        unit="hours (median)",
+        sample=len(spans),
+        excludes=(
+            ()
+            if len(spans) == len(merged)
+            else (f"{len(merged) - len(spans)} merged changes with incomplete timestamps",)
+        ),
+    )
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _cost_per_change(entries: list[LedgerEntry]) -> Measure:

@@ -2291,6 +2291,226 @@ def chat_health(as_json: JsonOpt = False) -> None:
     raise typer.Exit(EXIT_OK if report.accepts_events else EXIT_FAILED)
 
 
+change_app = typer.Typer(
+    help="Observe what the repository did with a change after handoff.",
+    no_args_is_help=True,
+)
+app.add_typer(change_app, name="change")
+
+GIT_HOST_TOKEN_ENV = "SF_GIT_HOST_TOKEN"
+GIT_HOST_SECRET_ENV = "SF_GIT_HOST_WEBHOOK_SECRET"
+
+
+def _git_host_credentials() -> Any:
+    from software_factory.integrations import GitHostCredentials
+
+    return GitHostCredentials(
+        token=os.environ.get(GIT_HOST_TOKEN_ENV, ""),
+        webhook_secret=os.environ.get(GIT_HOST_SECRET_ENV, ""),
+        factory_login=os.environ.get("SF_GIT_HOST_FACTORY_LOGIN", ""),
+    )
+
+
+@change_app.command("observe")
+def change_observe(
+    payload: Annotated[Path, typer.Argument(help="File holding a `pull_request` webhook body.")],
+    ledger_path: Annotated[
+        Path, typer.Option("--ledger", help="Where to record the observation.")
+    ] = Path(".factory/ledger.jsonl"),
+    event: Annotated[
+        str, typer.Option("--event", help="The host's event name (the X-GitHub-Event header).")
+    ] = "pull_request",
+    commits: Annotated[
+        Path | None,
+        typer.Option("--commits", help="File holding the branch's commit list, for autonomy."),
+    ] = None,
+    as_json: JsonOpt = False,
+) -> None:
+    """Record what the repository says happened to a change (FR-15.14).
+
+    This is the observation three outcome metrics have always been waiting on. `sf metrics`
+    reported `changes_merged`, `autonomy` and `cycle_time_to_merge` as unavailable because
+    nothing observed the repository after merge, and a factory that counted its own handoffs
+    as merges would be grading its own homework.
+
+    Reads a saved webhook body, so it works with the network denied. Pass `--commits` with
+    the branch's commit list to make autonomy (O-5) computable: without it the human-commit
+    count is *unknown*, and unknown is recorded as unknown rather than as zero -- treating
+    it as zero reports perfect autonomy for every change the factory ever produced.
+    """
+    from software_factory.integrations import GitHostAdapter
+    from software_factory.ledger import EntryType, Ledger
+
+    try:
+        raw = json.loads(payload.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        console.print(f"[red]cannot read {payload}[/]: {exc}")
+        raise typer.Exit(EXIT_UNUSABLE) from exc
+
+    raw["_event"] = event
+    if commits is not None:
+        try:
+            raw["_commits"] = json.loads(commits.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            console.print(f"[red]cannot read {commits}[/]: {exc}")
+            raise typer.Exit(EXIT_UNUSABLE) from exc
+
+    observation = GitHostAdapter(credentials=_git_host_credentials()).observe(raw)
+    if observation is None:
+        if as_json:
+            _emit({"ok": True, "recorded": False, "reason": "not a change lifecycle event"})
+        else:
+            console.print(
+                "[dim]nothing to record[/] — this delivery is not a change opening, "
+                "merging or closing. A push to the branch is not a state change."
+            )
+        raise typer.Exit(EXIT_OK)
+
+    Ledger(ledger_path).append(
+        EntryType.CHANGE_OBSERVED,
+        actor="git-host",
+        subject=observation.change,
+        payload=observation.as_payload(),
+    )
+
+    if as_json:
+        _emit({"ok": True, "recorded": True, "observation": observation.as_payload()})
+        raise typer.Exit(EXIT_OK)
+
+    console.print(f"[green]recorded[/] {observation.change} — {observation.state.value}")
+    if observation.human_commits is None:
+        console.print(
+            "  [yellow]human commits unknown[/] — autonomy stays unavailable rather than "
+            "reporting this change as fully autonomous"
+        )
+    else:
+        console.print(f"  human commits: {observation.human_commits}")
+    raise typer.Exit(EXIT_OK)
+
+
+@change_app.command("receive")
+def change_receive(
+    payload: Annotated[Path, typer.Argument(help="File holding a webhook body.")],
+    root: Annotated[
+        Path, typer.Option("--root", help="The factory definition directory.")
+    ] = Path(),
+    event: Annotated[
+        str, typer.Option("--event", help="The host's event name (the X-GitHub-Event header).")
+    ] = "issues",
+    as_json: JsonOpt = False,
+) -> None:
+    """Put a saved git-host delivery through intake, with no network at all.
+
+    FR-18.10's local parity for the second adapter, on the same terms as `sf chat receive`.
+    """
+    from software_factory.intake import Ignored, Started
+    from software_factory.intake import Refused as IntakeRefused
+    from software_factory.intake.loading import pipeline_from
+    from software_factory.integrations import GitHostAdapter
+
+    try:
+        raw = json.loads(payload.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        console.print(f"[red]cannot read {payload}[/]: {exc}")
+        raise typer.Exit(EXIT_UNUSABLE) from exc
+
+    try:
+        definition = load_strict(root)
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    raw["_event"] = event
+    adapter = GitHostAdapter(
+        credentials=_git_host_credentials(),
+        repositories=frozenset(r.slug() for r in definition.factory.repositories),
+    )
+    factory_event = adapter.normalise(raw)
+
+    if factory_event is None:
+        if as_json:
+            _emit({"ok": True, "ignored": True, "reason": "not an event this factory acts on"})
+        else:
+            console.print(
+                "[dim]ignored[/] — another repository, the factory's own comment, or an "
+                "action this factory does not act on. Most events are not for this factory."
+            )
+        raise typer.Exit(EXIT_OK)
+
+    outcomes = pipeline_from(definition).receive(factory_event)
+
+    if as_json:
+        _emit(
+            {
+                "ok": True,
+                "event": {
+                    "id": factory_event.id,
+                    "event": factory_event.event,
+                    "title": factory_event.title,
+                    "author": factory_event.author,
+                    "replyTo": factory_event.origin.ref,
+                    "backpressureSource": factory_event.origin.source_key,
+                    "attributes": factory_event.attributes,
+                },
+                "outcomes": [
+                    {
+                        "kind": type(o).__name__.lower(),
+                        "automation": getattr(o, "automation", None),
+                        "agent": getattr(o, "agent", None),
+                        "code": getattr(o, "code", None),
+                        "message": getattr(o, "message", None),
+                    }
+                    for o in outcomes
+                ],
+            }
+        )
+        raise typer.Exit(EXIT_OK)
+
+    console.print(f"[bold]{factory_event.event}[/]  [dim]from[/] {factory_event.author}")
+    console.print(f"  [dim]title[/]  {factory_event.title}")
+    console.print(f"  [dim]reply[/]  {factory_event.origin.render()}")
+    for outcome in outcomes:
+        if isinstance(outcome, Started):
+            console.print(f"[green]starts[/] {outcome.automation} → agent {outcome.agent}")
+        elif isinstance(outcome, Ignored):
+            console.print(f"[dim]ignored[/] — {outcome.reason}")
+        elif isinstance(outcome, IntakeRefused):
+            console.print(f"[yellow]refused[/] {outcome.code}: {outcome.message}")
+    raise typer.Exit(EXIT_OK)
+
+
+@change_app.command("verify")
+def change_verify(
+    body: Annotated[Path, typer.Argument(help="File holding the raw delivery body.")],
+    signature: Annotated[str, typer.Option("--signature", help="X-Hub-Signature-256.")],
+    as_json: JsonOpt = False,
+) -> None:
+    """Check one delivery's signature against this repository's webhook secret.
+
+    Note what is *not* here: a replay window. The host signs the body alone, with no
+    timestamp in the signed material, so nothing enforceable can be computed from a clock --
+    a window derived from an unsigned header is a window the sender chooses. Replay
+    protection is event identity and the deduplicator.
+    """
+    from software_factory.integrations import verify_git_host_signature
+
+    try:
+        verify_git_host_signature(
+            webhook_secret=os.environ.get(GIT_HOST_SECRET_ENV, ""),
+            body=body.read_bytes(),
+            signature=signature,
+        )
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    if as_json:
+        _emit({"ok": True, "verified": True})
+    else:
+        console.print("[green]verified[/] signed by this repository's webhook secret")
+    raise typer.Exit(EXIT_OK)
+
+
 def main() -> None:
     """Console-script entry point."""
     app()

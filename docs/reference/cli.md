@@ -28,6 +28,9 @@ cannot be scripted, and PR-2 makes the local path the reference one.
 | `sf explain` | Ask a handed-off work item why it did something (FR-32). |
 | `sf providers` | What each tier will actually call, and whether it can right now. |
 | `sf doctor` | Report what works in this environment and what does not (FR-28.1). |
+| `sf change observe` | Record what the repository says happened to a change (FR-15.14). |
+| `sf change receive` | Put a saved git-host delivery through intake, with no network at all. |
+| `sf change verify` | Check one delivery's signature against this repository's webhook secret. |
 | `sf chat health` | Ask Slack whether this app's token still works. |
 | `sf chat receive` | Put a saved Slack delivery through intake, with no network at all. |
 | `sf chat sign` | Print the headers Slack would send for this body. |

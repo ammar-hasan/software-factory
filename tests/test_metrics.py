@@ -182,13 +182,15 @@ def test_the_reason_names_the_missing_integration(tmp_path: Path) -> None:
 def test_configuring_the_integration_changes_the_reason_rather_than_the_row(
     tmp_path: Path,
 ) -> None:
-    """The row must not vanish.
+    """The row must not vanish, and it must not read as "nobody built this" once built.
 
-    This asserted that configuring the adapter *removed* the metric, and nothing in this
-    build computes `changes_merged` -- so an operator who did the thing the reason text told
-    them to do watched three metrics disappear from the dashboard. Configured-but-
-    unimplemented is a third state and needs its own row: a metric that is absent reads as
-    one nobody wanted.
+    Two wrong answers have lived here. First the row *disappeared* when the adapter was
+    configured, so an operator following the reason text's own instruction lost three
+    metrics. Then it said "nothing in this build computes this metric yet", which was true
+    and is now stale -- these three are computed. What remains correct is the distinction
+    the availability states exist for: with the adapter configured and no change yet
+    observed, the answer is `insufficient_data` (wait), not `unavailable` (fix your
+    configuration) and never zero.
     """
     report = compute(
         ledger_with(tmp_path, run_started("r1")).read(), integrations=frozenset({"git-host"})
@@ -196,8 +198,32 @@ def test_configuring_the_integration_changes_the_reason_rather_than_the_row(
 
     merged = report.measure("changes_merged")
     assert merged is not None
-    assert merged.availability is Availability.UNAVAILABLE
-    assert "nothing in this build computes" in merged.reason
+    assert merged.availability is Availability.INSUFFICIENT_DATA
+    assert "only the repository can say" in merged.reason
+
+
+def test_a_metric_that_needs_an_integration_nobody_implemented_still_gets_a_row(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The third state, kept and still tested now that no shipped metric is in it.
+
+    Configured-but-unimplemented is a real state a future metric will land in, and the
+    branch that reports it is exactly the kind of guard that rots into dead code and is
+    then deleted as unused -- reintroducing the vanishing row. Registering a metric that
+    nothing computes exercises it directly.
+    """
+    from software_factory.observability import metrics as metrics_module
+
+    monkeypatch.setitem(metrics_module.REQUIRES_INTEGRATION, "time_to_first_review", "git-host")
+
+    report = compute(
+        ledger_with(tmp_path, run_started("r1")).read(), integrations=frozenset({"git-host"})
+    )
+
+    found = report.measure("time_to_first_review")
+    assert found is not None
+    assert found.availability is Availability.UNAVAILABLE
+    assert "nothing in this build computes" in found.reason
 
 
 # -------------------------------------------------------------------------- gate rates

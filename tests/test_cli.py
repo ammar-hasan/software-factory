@@ -699,16 +699,26 @@ def test_metrics_reports_unavailable_rather_than_zero(tmp_path: Path) -> None:
 
 
 def test_metrics_changes_the_reason_when_the_integration_exists(tmp_path: Path) -> None:
-    """Configuring the adapter must not delete the row.
+    """Configuring the adapter must not delete the row, and must change what it says.
 
-    This asserted the row disappeared, which is what the code did and is the wrong answer:
-    nothing in this build computes `changes_merged`, so an operator following the reason
-    text's own instruction lost three metrics from the dashboard.
+    Without the adapter the answer is "fix your configuration". With it and nothing yet
+    observed the answer is "wait" -- and neither is zero, because a factory that reported
+    zero merged changes would be claiming an outcome it has never looked at.
     """
     from software_factory.ledger import EntryType, Ledger
 
     ledger = Ledger(tmp_path / "ledger.jsonl")
     ledger.append(EntryType.RUN_STARTED, actor="builder", subject="r1", payload={})
+
+    without = next(
+        m
+        for m in payload(runner.invoke(app, ["metrics", str(ledger.path), "--json"]).output)[
+            "metrics"
+        ]["measures"]
+        if m["name"] == "changes_merged"
+    )
+    assert without["availability"] == "unavailable"
+    assert "no git-host adapter is configured" in without["reason"]
 
     body = payload(
         runner.invoke(
@@ -717,8 +727,8 @@ def test_metrics_changes_the_reason_when_the_integration_exists(tmp_path: Path) 
     )["metrics"]
 
     merged = next(m for m in body["measures"] if m["name"] == "changes_merged")
-    assert merged["availability"] == "unavailable"
-    assert "nothing in this build computes" in merged["reason"]
+    assert merged["availability"] == "insufficient_data"
+    assert merged["value"] is None
 
 
 def test_metrics_separates_work_from_measurement(tmp_path: Path) -> None:

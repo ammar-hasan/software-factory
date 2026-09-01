@@ -89,6 +89,30 @@ class Transport(Protocol):
         ...
 
 
+@runtime_checkable
+class RequestTransport(Protocol):
+    """A transport that can issue any JSON request, not only a POST.
+
+    Separate from :class:`Transport` because model endpoints only ever POST, and widening
+    the protocol every provider is written against to serve one integration would make
+    every provider stub implement a method no provider calls. An integration needs `GET`
+    for the read-only calls a health check and a lookup are made of, and faking one with a
+    method-override header is a lie the host does not honour.
+    """
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        payload: dict[str, Any] | None = None,
+        timeout_s: float,
+    ) -> Response:
+        """Issue `method` and return the response, or raise :class:`ProviderError`."""
+        ...
+
+
 class UrllibTransport:
     """The only object in the package that opens a socket to a model endpoint."""
 
@@ -100,12 +124,27 @@ class UrllibTransport:
         payload: dict[str, Any],
         timeout_s: float = DEFAULT_TIMEOUT_S,
     ) -> Response:
-        data = json.dumps(payload).encode("utf-8")
+        return self.request("POST", url, headers=headers, payload=payload, timeout_s=timeout_s)
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        payload: dict[str, Any] | None = None,
+        timeout_s: float = DEFAULT_TIMEOUT_S,
+    ) -> Response:
+        # A body only when there is one. A GET carrying `null` is a GET some hosts refuse
+        # and others answer differently, and neither is what the caller asked for.
+        data = None if payload is None else json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
             url,
             data=data,
-            headers={"content-type": "application/json", **headers},
-            method="POST",
+            headers=(
+                {"content-type": "application/json", **headers} if data is not None else headers
+            ),
+            method=method,
         )
         if request.type not in ("http", "https"):
             # A `file:` or `gopher:` URL in a config file is either a mistake or an
@@ -231,3 +270,41 @@ class RetryingTransport:
             f"{last} (after {self._attempts} attempts)",
             retryable=True,
         )
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        payload: dict[str, Any] | None = None,
+        timeout_s: float = DEFAULT_TIMEOUT_S,
+    ) -> Response:
+        """The same backoff, for a transport that is not a model endpoint.
+
+        Delegated rather than duplicated: an integration wrapped in retries that used a
+        different schedule from the model path would make one of the two schedules a
+        surprise, and the surprising one is always the one nobody tested.
+        """
+        inner = self._inner
+        if not isinstance(inner, RequestTransport):
+            raise ProviderError(
+                f"{type(inner).__name__} cannot issue a {method}; it only posts JSON",
+                retryable=False,
+            )
+        last: ProviderError | None = None
+        for attempt in range(self._attempts):
+            try:
+                return inner.request(
+                    method, url, headers=headers, payload=payload, timeout_s=timeout_s
+                )
+            except ProviderError as exc:
+                if not exc.retryable:
+                    raise
+                last = exc
+                if attempt + 1 < self._attempts:
+                    delay = self._base_delay_s * (2**attempt)
+                    self.delays.append(delay)
+                    self._sleep(delay)
+        assert last is not None
+        raise ProviderError(f"{last} (after {self._attempts} attempts)", retryable=True)

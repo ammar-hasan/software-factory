@@ -6,6 +6,20 @@ is if the dependency points one way. An adapter satisfies a structural `Protocol
 imports the thing that will call it.
 """
 
+from software_factory.integrations.git_host import (
+    ChangeObservation,
+    ChangeState,
+    GitHostAdapter,
+    GitHostCredentials,
+    GitHostError,
+    GitHostSignatureError,
+)
+from software_factory.integrations.git_host import (
+    signature_header as git_host_signature_header,
+)
+from software_factory.integrations.git_host import (
+    verify_signature as verify_git_host_signature,
+)
 from software_factory.integrations.slack import (
     SlackAdapter,
     SlackCredentials,
@@ -16,10 +30,18 @@ from software_factory.integrations.slack import (
 )
 
 __all__ = [
+    "ChangeObservation",
+    "ChangeState",
+    "GitHostAdapter",
+    "GitHostCredentials",
+    "GitHostError",
+    "GitHostSignatureError",
     "SlackAdapter",
     "SlackCredentials",
     "SlackError",
     "SlackSignatureError",
     "challenge_for",
+    "git_host_signature_header",
+    "verify_git_host_signature",
     "verify_signature",
 ]

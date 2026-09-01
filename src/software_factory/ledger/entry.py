@@ -48,6 +48,13 @@ class EntryType(enum.StrEnum):
     BUDGET_EVENT = "budget.event"
     SEGMENT_SEALED = "segment.sealed"
     IMPROVEMENT_PROPOSAL = "improvement.proposal"
+    CHANGE_OBSERVED = "change.observed"
+    """What the repository says happened to a change after handoff (FR-15.14).
+
+    The one entry the outcome metrics that need post-merge observation fold over. A factory
+    that counted its own handoffs as merges would be grading its own homework, so O-1, O-5
+    and cycle time are computed from this and from nothing else -- and a change with no
+    observation is absent from the numerator *and* the denominator."""
 
 
 def utc_now() -> str:
