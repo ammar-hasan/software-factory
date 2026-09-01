@@ -386,7 +386,9 @@ def test_the_notice_is_injected_at_most_once() -> None:
 def test_budget_reports_the_tightest_bound() -> None:
     budget = Budget(tokens=1000, tool_calls=10)
 
-    assert budget.nearest_fraction(Spend(tokens=900, tool_calls=1)) == pytest.approx(0.9)
+    assert budget.nearest_fraction(
+        Spend(input_tokens=700, output_tokens=200, tool_calls=1)
+    ) == pytest.approx(0.9)
 
 
 # ----------------------------------------------------------------- output contracts

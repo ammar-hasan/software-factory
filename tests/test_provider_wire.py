@@ -739,3 +739,83 @@ def test_the_keystone_gate_is_unenforceable_when_the_parent_is_unknown() -> None
         GateContext(stage="VERIFY", work_class="defect", parent_resolved=True)
     )
     assert wrote_none.outcome is GateOutcome.FAIL, "a genuine absence must still fail"
+
+
+def test_input_and_output_tokens_are_recorded_apart(wire, tmp_path) -> None:
+    """The ledger recorded `input + output` under the key `inputTokens`.
+
+    So every reader saw a total labelled as one of its halves, and the other half was
+    recorded nowhere. Output tokens are the expensive side on essentially every hosted
+    provider — often three to five times the input price — so a cost figure nobody can
+    decompose is one nobody can check. Found by reading a real run's ledger and seeing
+    output tokens come back empty against a provider that had plainly produced some.
+    """
+    import subprocess
+
+    from software_factory.definition import load_strict
+    from software_factory.ledger import EntryType, Ledger
+    from software_factory.orchestrator import SourceContext, WorkClass, WorkItem, new_id
+    from software_factory.orchestrator.coordinator import local_coordinator
+    from software_factory.scaffold import init_factory
+
+    recorder, base = wire
+    recorder.answers = [
+        (
+            200,
+            openai_answer(
+                usage={"prompt_tokens": 700, "completion_tokens": 200, "total_tokens": 900},
+                choices=[
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps({**CARRIED, **output}),
+                        },
+                    }
+                ],
+            ),
+        )
+        for output in STAGE_OUTPUTS
+    ]
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.test",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.test",
+        "PATH": __import__("os").environ.get("PATH", ""),
+        "HOME": str(tmp_path),
+    }
+    for args in (("init", "--quiet", "-b", "main"), ("add", "-A"), ("commit", "-q", "-m", "x")):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, env=env)
+
+    factory = tmp_path / "factory"
+    init_factory(factory, name="wire", owner="acme", repo="a")
+    item = WorkItem(
+        id=new_id(),
+        factory="wire",
+        title="t",
+        request="r",
+        source=SourceContext(provider="cli", kind="test", ref="wire"),
+        work_class=WorkClass.CHORE,
+    )
+    state = tmp_path / "state"
+
+    local_coordinator(
+        load_strict(factory),
+        repo=repo,
+        state_dir=state,
+        provider=OpenAICompatibleProvider(base_url=f"{base}/v1", name="wire-test"),
+        allow_unsandboxed=True,
+    ).run(item)
+
+    calls = [e for e in Ledger(state / "ledger.jsonl").read() if e.type is EntryType.MODEL_CALLED]
+    assert calls, "no model call was recorded"
+    first = calls[0].payload
+    assert first["inputTokens"] == 700, "the total is still being recorded as the input half"
+    assert first["outputTokens"] == 200
+    assert first["totalTokens"] == 900

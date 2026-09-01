@@ -133,12 +133,28 @@ class Spend:
     """Time spent inside provider calls. Reported, never used as the wall-clock bound."""
 
     tool_calls: int = 0
-    tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    """Kept apart because they are not interchangeable.
+
+    Only the combined figure was tracked, and the ledger then recorded it under the key
+    `inputTokens` -- so every reader saw a total labelled as one of its halves, and the
+    other half was unrecoverable. Output tokens are the expensive side on essentially every
+    hosted provider, often three to five times the input price, so a cost figure nobody can
+    decompose is one nobody can check.
+    """
+
     cost_units: float = 0.0
     turns: int = 0
 
+    @property
+    def tokens(self) -> int:
+        """Both halves. Derived, so a caller wanting the total still gets one number."""
+        return self.input_tokens + self.output_tokens
+
     def add_usage(self, usage: Usage, *, per_mtok_in: float, per_mtok_out: float) -> None:
-        self.tokens += usage.input_tokens + usage.output_tokens
+        self.input_tokens += usage.input_tokens
+        self.output_tokens += usage.output_tokens
         self.cost_units += usage.cost(per_mtok_in=per_mtok_in, per_mtok_out=per_mtok_out)
         self.provider_latency_s += usage.latency_s
 

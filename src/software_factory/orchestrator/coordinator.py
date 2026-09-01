@@ -1027,7 +1027,12 @@ class Coordinator:
                 # produces `costUnits: 0.0`, which is indistinguishable from a call that
                 # really was free unless the entry says which.
                 "priced": bool(active_tier.cost_per_mtok_in or active_tier.cost_per_mtok_out),
-                "inputTokens": run.spend.tokens,
+                # Both halves, correctly named. This key carried `input + output` and
+                # called it input, so every reader saw a total labelled as one of its
+                # halves and the other half was not recorded anywhere.
+                "inputTokens": run.spend.input_tokens,
+                "outputTokens": run.spend.output_tokens,
+                "totalTokens": run.spend.tokens,
                 "costUnits": round(run.spend.cost_units, 6),
                 "providerLatencySeconds": round(run.spend.provider_latency_s, 3),
                 "wallClockSeconds": round(run.spend.elapsed_s, 3),
