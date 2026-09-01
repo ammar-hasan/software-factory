@@ -50,9 +50,7 @@ def gate_finding(
             "run": run,
             "gate": "spec-delta",
             "outcome": "fail",
-            "findings": [
-                {"criterion": criterion, "locator": locator, "remediation": remediation}
-            ],
+            "findings": [{"criterion": criterion, "locator": locator, "remediation": remediation}],
         },
     )
 
@@ -283,11 +281,11 @@ def test_an_answer_given_twice_by_different_agents_becomes_a_candidate(ledger: L
     agent will ask again because nothing wrote it down."""
     ids = runs(ledger, 6)
     first = _question(ledger, asker="builder", body="which database?")
-    _answer(ledger, by="architect", body="sqlite, the deployment is single-node", to=first,
-            run=ids[0])
+    _answer(
+        ledger, by="architect", body="sqlite, the deployment is single-node", to=first, run=ids[0]
+    )
     second = _question(ledger, asker="reviewer", body="which database?")
-    _answer(ledger, by="lead", body="sqlite, the deployment is single-node", to=second,
-            run=ids[1])
+    _answer(ledger, by="lead", body="sqlite, the deployment is single-node", to=second, run=ids[1])
 
     facts = [c for c in Mine().run(ledger.read()).memories if c.kind is Kind.FACT]
 

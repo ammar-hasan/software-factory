@@ -4345,6 +4345,73 @@ def mine_command(
     raise typer.Exit(EXIT_OK)
 
 
+media_app = typer.Typer(
+    help="Recordings: reading media in as research, and editing runs for review.",
+    no_args_is_help=True,
+)
+app.add_typer(media_app, name="media")
+
+
+@media_app.command("read")
+def media_read(
+    transcript: Annotated[Path, typer.Argument(help="A WebVTT or SRT transcript.")],
+    search: Annotated[
+        str | None, typer.Option("--search", help="Show only passages matching this.")
+    ] = None,
+    kind: Annotated[str, typer.Option("--kind", help="video, audio or screen-share.")] = "video",
+    as_json: JsonOpt = False,
+) -> None:
+    """Read a recording's transcript as research input.
+
+    Untrusted, always. A transcript is words somebody said, transcribed by a model that
+    guesses, in a file anybody could have edited -- so it is quoted, never obeyed, and a
+    claim resting only on it can never satisfy a gate.
+    """
+    from software_factory.errors import FactoryError
+    from software_factory.intake.media import MediaKind, parse_transcript
+
+    if not transcript.exists():
+        console.print(f"[red]no transcript at {transcript}[/]")
+        raise typer.Exit(EXIT_UNUSABLE)
+    try:
+        source = parse_transcript(
+            transcript.read_text(encoding="utf-8"),
+            ref=str(transcript),
+            kind=MediaKind(kind),
+        )
+    except (FactoryError, ValueError) as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(EXIT_UNUSABLE) from exc
+
+    passages = source.search(search) if search else source.passages
+    if as_json:
+        _emit({"ok": True, **source.as_dict(), "matched": [p.as_dict() for p in passages]})
+        raise typer.Exit(EXIT_OK)
+
+    console.print(
+        f"[bold]{source.ref}[/] [dim]{int(source.duration.total_seconds())}s, "
+        f"{len(source.passages)} passage(s), trust {source.trust.value}[/]\n"
+    )
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("at", "speaker", "said", ""):
+        table.add_column(column, overflow="fold")
+    for passage in passages:
+        table.add_row(
+            f"{int(passage.at.total_seconds()) // 60}:{int(passage.at.total_seconds()) % 60:02d}",
+            passage.speaker or "[dim]—[/]",
+            passage.text,
+            "" if passage.usable else "[yellow]low confidence[/]",
+        )
+    console.print(table)
+    if source.unintelligible:
+        console.print(
+            f"\n[yellow]{len(source.unintelligible)} passage(s) the transcriber was unsure "
+            "about[/] [dim]— go and listen before relying on them[/]"
+        )
+    console.print("\n[dim]Untrusted. Quoted into packs, never treated as instructions.[/]")
+    raise typer.Exit(EXIT_OK)
+
+
 # The module-as-script entry point stays at the very bottom, and it matters that it does.
 # Run as `python -m software_factory.cli`, this file executes top to bottom: a guard placed
 # mid-file calls `app()` and exits *before* any command group defined below it is

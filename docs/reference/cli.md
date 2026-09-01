@@ -54,6 +54,7 @@ cannot be scripted, and PR-2 makes the local path the reference one.
 | `sf govern verify` | Verify the segment chain, and each sealed range against the entries still present. |
 | `sf ledger tail` | Show the most recent entries. |
 | `sf ledger verify` | Verify sequence, chaining, and per-entry hashes. Names the first divergence. |
+| `sf media read` | Read a recording's transcript as research input. |
 | `sf memory blast` | What invalidating this memory would affect. |
 | `sf memory policy` | Run the policy pass: contradiction, expiry, consolidation. |
 | `sf memory stats` | Lane counts, quarantine backlog, and size. The health check for FR-15.3. |
