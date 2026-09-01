@@ -57,6 +57,16 @@ class EntryType(enum.StrEnum):
     invent a global sequence number to get that property; here it is the same counter that
     was already there."""
 
+    PLAN_EXECUTED = "plan.executed"
+    """A multi-agent plan and how its steps joined (PRD FR-30).
+
+    One entry per plan, holding the shape and the outcome of every step, rather than a
+    marker on each child run. A fan-out of twenty otherwise appears in the ledger as twenty
+    unrelated runs and the cost of the whole operation is unattributable -- which is exactly
+    the number somebody asks for after the bill. The child runs still carry `plan` and
+    `parentStep` in their own payloads, so the join works from either direction: given a
+    plan, find its runs; given a run, find what it was part of."""
+
     SCHEDULE_FIRED = "schedule.fired"
     """A scheduled trigger fired, and which scheduled instant it stood in for.
 

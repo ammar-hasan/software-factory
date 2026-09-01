@@ -53,6 +53,10 @@ cannot be scripted, and PR-2 makes the local path the reference one.
 | `sf memory policy` | Run the policy pass: contradiction, expiry, consolidation. |
 | `sf memory stats` | Lane counts, quarantine backlog, and size. The health check for FR-15.3. |
 | `sf memory why` | Print a memory's complete provenance tree. |
+| `sf orchestrate critic` | One agent produces, a different agent judges. |
+| `sf orchestrate fan-out` | Several independent branches, read together. |
+| `sf orchestrate supervisor` | One step plans, several execute, and the results are read together. |
+| `sf orchestrate swarm` | The same task attempted several times, and the best result kept. |
 | `sf schedule due` | What would fire right now, without firing it. |
 | `sf schedule list` | Every schedule this factory declares, and when each next fires. |
 | `sf schedule run` | Fire everything due, through the same intake path as any other event. |

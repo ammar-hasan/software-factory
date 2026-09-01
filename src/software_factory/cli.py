@@ -3824,6 +3824,245 @@ def worker_release(
     raise typer.Exit(EXIT_UNUSABLE)
 
 
+# `orchestrate`, not `plan`: `sf plan` already means "show the resolved configuration", and
+# registering a group under that name shadowed it silently -- typer resolved the group and
+# the existing command simply stopped answering. Two tests caught it; nothing in the CLI
+# itself objected, which is why `test_no_command_name_is_claimed_twice` now exists.
+orchestrate_app = typer.Typer(
+    help="Named multi-agent patterns: fan-out, swarm, critic, supervisor, dag.",
+    no_args_is_help=True,
+)
+app.add_typer(orchestrate_app, name="orchestrate")
+
+
+_JOINS = "all, any, quorum or best"
+
+
+def _join(name: str, quorum: int):  # type: ignore[no-untyped-def]
+    from software_factory.orchestrator.patterns import Join
+
+    try:
+        join = Join(name)
+    except ValueError as exc:
+        console.print(f"[red]{name!r} is not a join rule[/] — use {_JOINS}")
+        raise typer.Exit(EXIT_UNUSABLE) from exc
+    if join is Join.QUORUM and quorum < 1:
+        console.print("[red]--join quorum needs --quorum N[/]")
+        console.print(
+            "[dim]There is no default on purpose: `all`, `any` and a quorum are different "
+            "questions, and a fan-in that guesses answers one nobody asked.[/]"
+        )
+        raise typer.Exit(EXIT_UNUSABLE)
+    return join
+
+
+def _show(plan) -> None:  # type: ignore[no-untyped-def]
+    console.print(f"[bold]{plan.name}[/] [dim]({plan.pattern}, join {plan.join.value})[/]")
+    for index, wave in enumerate(plan.order(), start=1):
+        names = ", ".join(step.name for step in wave)
+        parallel = " [dim](in parallel)[/]" if len(wave) > 1 else ""
+        console.print(f"  wave {index}: {names}{parallel}")
+
+
+def _run_or_show(  # type: ignore[no-untyped-def]
+    plan, *, root: Path, repo: Path, state: Path, dry_run: bool, as_json: bool
+) -> None:
+    """Build the plan, then either describe it or carry it out.
+
+    `--dry-run` is the default for a reason that is not caution: a plan is the one thing in
+    this factory that multiplies cost by a number the operator typed, and seeing the shape
+    before paying for it is cheaper than every other way of finding out it was wrong.
+    """
+    if dry_run:
+        if as_json:
+            _emit({"ok": True, "dryRun": True, "plan": plan.as_dict()})
+        else:
+            _show(plan)
+            console.print(
+                f"\n[dim]{len(plan.steps)} step(s), up to {plan.width} at once. "
+                "Add --execute to run it.[/]"
+            )
+        raise typer.Exit(EXIT_OK)
+
+    from software_factory.definition import load_strict
+    from software_factory.orchestrator.coordinator import local_coordinator
+
+    provider = _resolve_provider()
+    if provider is None:
+        # Refused rather than run against a stub. A plan is the one command whose cost is
+        # multiplied by a number the operator typed, and a fan-out of twenty against no
+        # model produces twenty runs that prove nothing and still take the time.
+        message = "no model provider is configured, so this plan would produce nothing"
+        remediation = (
+            "Set SF_PROVIDER_ENDPOINT to a model endpoint, or drop --execute to see the "
+            "shape without running it."
+        )
+        if as_json:
+            _emit({"ok": False, "error": {"message": message, "remediation": remediation}})
+        else:
+            err_console.print(f"[bold red]cannot run[/] {message}")
+            err_console.print(f"[dim]{remediation}[/]")
+        raise typer.Exit(EXIT_UNUSABLE)
+
+    definition = load_strict(root)
+    coordinator = local_coordinator(definition, repo=repo, state_dir=state, provider=provider)
+    result = coordinator.run_plan(plan)
+
+    if as_json:
+        _emit({"ok": result.satisfied, **result.as_dict()})
+        raise typer.Exit(EXIT_OK if result.satisfied else EXIT_UNUSABLE)
+
+    _show(plan)
+    console.print()
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("step", "state", "score", "detail"):
+        table.add_column(column, overflow="fold")
+    colours = {"succeeded": "green", "failed": "red", "skipped": "dim"}
+    for outcome in result.outcomes:
+        table.add_row(
+            outcome.step,
+            f"[{colours.get(outcome.state.value, 'white')}]{outcome.state.value}[/]",
+            "—" if outcome.score is None else f"{outcome.score:.2f}",
+            outcome.detail,
+        )
+    console.print(table)
+    verdict = "[green]satisfied[/]" if result.satisfied else "[red]not satisfied[/]"
+    console.print(f"\n{verdict} — {result.reason}")
+    raise typer.Exit(EXIT_OK if result.satisfied else EXIT_UNUSABLE)
+
+
+RootOpt = Annotated[Path, typer.Option("--root", help="The factory directory.")]
+StateOpt = Annotated[Path, typer.Option("--state", help="Where run state and the ledger live.")]
+ExecuteOpt = Annotated[
+    bool, typer.Option("--execute", help="Actually run it. Without this, only the shape is shown.")
+]
+
+
+@orchestrate_app.command("fan-out")
+def plan_fan_out(
+    request: Annotated[list[str], typer.Argument(help="One request per branch.")],
+    join: Annotated[str, typer.Option("--join", help=f"How to read the results: {_JOINS}.")],
+    name: Annotated[str, typer.Option("--name", help="What to call this plan.")] = "fan-out",
+    quorum: Annotated[int, typer.Option("--quorum", help="How many must succeed.")] = 0,
+    agent: Annotated[str, typer.Option("--agent", help="Which agent runs each branch.")] = "",
+    requires: Annotated[
+        list[str] | None, typer.Option("--requires", help="A worker label each branch needs.")
+    ] = None,
+    root: RootOpt = Path(),
+    repo: Annotated[Path, typer.Option("--repo", help="The repository to work in.")] = Path(),
+    state: StateOpt = Path(".factory"),
+    execute: ExecuteOpt = False,
+    as_json: JsonOpt = False,
+) -> None:
+    """Several independent branches, read together."""
+    from software_factory.errors import FactoryError
+    from software_factory.orchestrator.patterns import fan_out
+
+    try:
+        plan = fan_out(
+            name,
+            request,
+            join=_join(join, quorum),
+            quorum=quorum,
+            agent=agent,
+            requires=tuple(requires or ()),
+        )
+    except FactoryError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(EXIT_UNUSABLE) from exc
+    _run_or_show(plan, root=root, repo=repo, state=state, dry_run=not execute, as_json=as_json)
+
+
+@orchestrate_app.command("swarm")
+def plan_swarm(
+    request: Annotated[str, typer.Argument(help="The task every attempt gets.")],
+    attempts: Annotated[int, typer.Option("--attempts", help="How many tries.")] = 3,
+    name: Annotated[str, typer.Option("--name", help="What to call this plan.")] = "swarm",
+    agent: Annotated[
+        list[str] | None, typer.Option("--agent", help="One agent per attempt. Repeatable.")
+    ] = None,
+    root: RootOpt = Path(),
+    repo: Annotated[Path, typer.Option("--repo", help="The repository to work in.")] = Path(),
+    state: StateOpt = Path(".factory"),
+    execute: ExecuteOpt = False,
+    as_json: JsonOpt = False,
+) -> None:
+    """The same task attempted several times, and the best result kept.
+
+    Scored, never raced. First-past-the-post selects for speed, and the fastest answer is
+    the one that did the least work — so a raced swarm reliably picks the shallowest attempt
+    and pays for the rest.
+    """
+    from software_factory.errors import FactoryError
+    from software_factory.orchestrator.patterns import swarm
+
+    try:
+        plan = swarm(name, request, attempts=attempts, agents=agent or ())
+    except FactoryError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(EXIT_UNUSABLE) from exc
+    _run_or_show(plan, root=root, repo=repo, state=state, dry_run=not execute, as_json=as_json)
+
+
+@orchestrate_app.command("critic")
+def plan_critic(
+    produce: Annotated[str, typer.Argument(help="What to build.")],
+    review: Annotated[str, typer.Argument(help="What to check about it.")],
+    name: Annotated[str, typer.Option("--name", help="What to call this plan.")] = "critic",
+    producer: Annotated[str, typer.Option("--producer", help="Who builds it.")] = "",
+    reviewer: Annotated[str, typer.Option("--reviewer", help="Who checks it.")] = "",
+    root: RootOpt = Path(),
+    repo: Annotated[Path, typer.Option("--repo", help="The repository to work in.")] = Path(),
+    state: StateOpt = Path(".factory"),
+    execute: ExecuteOpt = False,
+    as_json: JsonOpt = False,
+) -> None:
+    """One agent produces, a different agent judges.
+
+    The two may not be the same agent: self-review is a rubber stamp with a latency cost.
+    """
+    from software_factory.errors import FactoryError
+    from software_factory.orchestrator.patterns import critic
+
+    try:
+        plan = critic(name, produce=produce, review=review, producer=producer, reviewer=reviewer)
+    except FactoryError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(EXIT_UNUSABLE) from exc
+    _run_or_show(plan, root=root, repo=repo, state=state, dry_run=not execute, as_json=as_json)
+
+
+@orchestrate_app.command("supervisor")
+def plan_supervisor(
+    plan_request: Annotated[str, typer.Argument(help="What the supervisor should work out.")],
+    worker: Annotated[list[str], typer.Argument(help="One request per worker.")],
+    join: Annotated[str, typer.Option("--join", help=f"How to read the results: {_JOINS}.")],
+    name: Annotated[str, typer.Option("--name", help="What to call this plan.")] = "supervisor",
+    quorum: Annotated[int, typer.Option("--quorum", help="How many must succeed.")] = 0,
+    root: RootOpt = Path(),
+    repo: Annotated[Path, typer.Option("--repo", help="The repository to work in.")] = Path(),
+    state: StateOpt = Path(".factory"),
+    execute: ExecuteOpt = False,
+    as_json: JsonOpt = False,
+) -> None:
+    """One step plans, several execute, and the results are read together."""
+    from software_factory.errors import FactoryError
+    from software_factory.orchestrator.patterns import supervisor
+
+    try:
+        plan = supervisor(
+            name,
+            plan_request=plan_request,
+            worker_requests=worker,
+            join=_join(join, quorum),
+            quorum=quorum,
+        )
+    except FactoryError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(EXIT_UNUSABLE) from exc
+    _run_or_show(plan, root=root, repo=repo, state=state, dry_run=not execute, as_json=as_json)
+
+
 # The module-as-script entry point stays at the very bottom, and it matters that it does.
 # Run as `python -m software_factory.cli`, this file executes top to bottom: a guard placed
 # mid-file calls `app()` and exits *before* any command group defined below it is

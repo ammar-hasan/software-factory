@@ -1211,3 +1211,25 @@ def test_every_command_group_is_reachable_as_a_module() -> None:
 
     missing = [name for name in groups if name not in result.stdout]
     assert missing == [], f"invisible to `python -m`: {missing}"
+
+
+def test_no_command_name_is_claimed_twice() -> None:
+    """A group and a command may not share a name, and nothing in typer objects if they do.
+
+    `sf plan` already meant "show the resolved configuration". Adding an orchestration group
+    under the same name shadowed it: typer resolved the group, the command stopped
+    answering, and the only complaint came from two unrelated tests that happened to call
+    it. A CLI that silently loses a documented command to a name collision will lose the
+    next one the same way.
+    """
+    from software_factory.cli import app
+
+    groups = [group.name for group in app.registered_groups if group.name]
+    commands = [command.name for command in app.registered_commands if command.name]
+
+    collisions = sorted(set(groups) & set(commands))
+    assert collisions == [], f"these names are both a group and a command: {collisions}"
+
+    for names, kind in ((groups, "group"), (commands, "command")):
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        assert duplicates == [], f"duplicate {kind} name(s): {duplicates}"

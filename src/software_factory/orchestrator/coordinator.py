@@ -20,7 +20,13 @@ from software_factory.definition.resolve import resolve_for_agent
 from software_factory.digests import digest_parts
 from software_factory.economics.spend import Ledgerless, SpendCap, charges_from
 from software_factory.evals.evidence import EvidenceBundle, EvidenceClass, EvidenceItem
-from software_factory.evals.gates import GateContext, GateReport, ViolationClass, run_gates
+from software_factory.evals.gates import (
+    GateContext,
+    GateOutcome,
+    GateReport,
+    ViolationClass,
+    run_gates,
+)
 from software_factory.evals.recording import (
     Capture,
     NotRecorded,
@@ -64,6 +70,14 @@ from software_factory.ledger import EntryType, Ledger
 from software_factory.memory.records import utc_now
 from software_factory.memory.store import MemoryStore
 from software_factory.orchestrator.mailbox import Conversation, Mailbox
+from software_factory.orchestrator.patterns import (
+    Execution,
+    Outcome,
+    Plan,
+    PlanResult,
+    Step,
+    StepState,
+)
 from software_factory.orchestrator.workers import Availability, WorkerPool
 from software_factory.orchestrator.workitem import (
     Blocker,
@@ -793,6 +807,67 @@ class Coordinator:
         though it were its own."""
 
     # ------------------------------------------------------------------------ public
+
+    def run_plan(self, plan: Plan, *, source: SourceContext | None = None) -> PlanResult:
+        """Run a multi-agent plan, one step per work item.
+
+        Sequential, by wave. The engine deliberately does not spawn its own concurrency: a
+        plan dispatching threads and a coordinator leasing workers would each be counting the
+        fleet's capacity without telling the other, and the pool's whole value is that one
+        thing counts it. Running a wave concurrently is a caller's decision, made by handing
+        `Execution` a runner that does so.
+
+        A step becomes a work item because that is what the rest of the factory understands:
+        it gets a workspace, gates, a spend record and a place in the ledger. A plan that
+        invented a lighter unit would have a second kind of run that none of those apply to.
+        """
+        context = source or SourceContext(provider="cli", kind="plan", ref=plan.name)
+        items: dict[str, WorkItem] = {}
+
+        def run_step(step: Step) -> Outcome:
+            item = WorkItem(
+                id=new_id(),
+                factory=self.definition.factory.name,
+                title=step.name,
+                request=step.request,
+                source=context,
+                work_class=WorkClass.CHORE,
+                requires=step.requires,
+            )
+            items[step.name] = item
+            outcome = self.run(item)
+            state = (
+                StepState.SUCCEEDED
+                if item.stage is Stage.HANDOFF and item.blocker is None
+                else StepState.FAILED
+            )
+            return Outcome(
+                step=step.name,
+                state=state,
+                detail=item.blocker_action or f"reached {item.stage.value}",
+                # Scored from the run's own gate evidence rather than by asking a model to
+                # rate itself. A self-reported score turns a swarm into a confidence
+                # contest, and the least careful attempt is usually the most confident.
+                score=_plan_score(outcome),
+                payload=outcome,
+            )
+
+        result = Execution(runner=run_step).run(plan)
+
+        # One entry for the plan, holding the shape and every step's fate. The child runs
+        # already carry their own ids; this is what joins them, so "what did that fan-out
+        # cost" is answerable from the ledger rather than by pattern-matching titles.
+        self.ledger.append(
+            EntryType.PLAN_EXECUTED,
+            actor="coordinator",
+            subject=plan.name,
+            payload={
+                "plan": plan.as_dict(),
+                "result": result.as_dict(),
+                "workItems": {name: item.id for name, item in items.items()},
+            },
+        )
+        return result
 
     def run(self, item: WorkItem, *, stages: list[Stage] | None = None) -> WorkOutcome:
         """Carry a work item through the requested stages, stopping at the first block."""
@@ -1878,3 +1953,29 @@ def _as_texts(value: object) -> tuple[list[str], str]:
             f"{skipped} entry/entries were not text and were not carried" if skipped else ""
         )
     return [], f"the field arrived as {type(value).__name__}, not a list of strings"
+
+
+def _plan_score(outcome: WorkOutcome) -> float | None:
+    """How well a step did, from its gates rather than from its own opinion.
+
+    Self-reported scores turn a swarm into a confidence contest, and the least careful
+    attempt is usually the most confident one. Gates were evaluated by something other than
+    the agent being ranked, which is the whole reason they can rank it.
+
+    Only `PASS` and `FAIL` count. A gate that skipped did not apply to this work, and one
+    that was `UNENFORCEABLE` could not be checked at all -- counting either as a failure
+    ranks an attempt below others for a question nobody asked it.
+
+    `None` rather than 0.0 when nothing is countable. A swarm that scores an unscorable
+    attempt zero ranks it last, which is a judgement nobody made; a swarm with no scores at
+    all reports that it cannot choose, which is true.
+    """
+    counted = [
+        result
+        for stage in outcome.stages
+        for result in stage.gates.results
+        if result.outcome in (GateOutcome.PASS, GateOutcome.FAIL)
+    ]
+    if not counted:
+        return None
+    return sum(1 for result in counted if result.outcome is GateOutcome.PASS) / len(counted)
