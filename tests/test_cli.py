@@ -83,7 +83,7 @@ def test_init_force_overwrites(scaffold: Path) -> None:
 def test_validate_on_a_missing_definition_exits_unusable(tmp_path: Path) -> None:
     result = runner.invoke(app, ["validate", str(tmp_path), "--json"])
 
-    assert result.exit_code == 2
+    assert result.exit_code == EXIT_UNUSABLE
     body = payload(result.output)
     assert body["ok"] is False
     assert body["error"]["remediation"]
@@ -177,7 +177,7 @@ def test_schema_lists_kinds_then_exports_one() -> None:
 def test_schema_rejects_an_unknown_kind() -> None:
     result = runner.invoke(app, ["schema", "nonsense"])
 
-    assert result.exit_code == 2
+    assert result.exit_code == EXIT_UNUSABLE
 
 
 def test_ledger_verify_accepts_a_good_chain(tmp_path: Path) -> None:
@@ -616,7 +616,7 @@ def test_work_without_a_provider_refuses_rather_than_pretending(
 
     result = runner.invoke(app, ["work", "do something", "--factory", str(scaffold), "--json"])
 
-    assert result.exit_code == 2
+    assert result.exit_code == EXIT_UNUSABLE
     body = payload(result.output)
     assert body["ok"] is False
     assert "--dry-run" in body["error"]["remediation"]
@@ -627,7 +627,7 @@ def test_work_on_a_missing_factory_is_actionable(tmp_path: Path) -> None:
         app, ["work", "do something", "--factory", str(tmp_path), "--dry-run", "--json"]
     )
 
-    assert result.exit_code == 2
+    assert result.exit_code == EXIT_UNUSABLE
     assert payload(result.output)["error"]["remediation"]
 
 
@@ -1334,6 +1334,25 @@ def test_no_command_name_is_claimed_twice() -> None:
     for names, kind in ((groups, "group"), (commands, "command")):
         duplicates = sorted({n for n in names if names.count(n) > 1})
         assert duplicates == [], f"duplicate {kind} name(s): {duplicates}"
+
+
+def test_a_mistyped_flag_and_an_empty_factory_do_not_look_alike(tmp_path: Path) -> None:
+    """`EXIT_UNUSABLE` was 2, which is Typer's code for a command line it could not parse.
+
+    So `sf validate --nonsense` and `sf validate <a directory with no factory>` exited
+    identically, and a script could not tell "you typed it wrong" from "the command was
+    right and there is nothing here". This project refuses to conflate "cannot" with "did
+    not" in every metric it reports; the exit codes were the one place it did.
+    """
+    empty = tmp_path / "nowhere"
+    empty.mkdir()
+
+    mistyped = runner.invoke(app, ["validate", str(empty), "--no-such-flag"])
+    unusable = runner.invoke(app, ["validate", str(empty)])
+
+    assert mistyped.exit_code == 2, "Typer's usage code must stay Typer's"
+    assert unusable.exit_code == EXIT_UNUSABLE
+    assert mistyped.exit_code != unusable.exit_code
 
 
 def test_no_command_answers_a_missing_factory_with_a_traceback(tmp_path: Path) -> None:

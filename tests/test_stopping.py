@@ -16,7 +16,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from software_factory.cli import app
+from software_factory.cli import EXIT_UNUSABLE, app
 from software_factory.orchestrator.stopping import ALL, StopBook
 
 runner = CliRunner()
@@ -82,7 +82,7 @@ def test_sf_stop_requires_who_and_why(tmp_path: Path) -> None:
         app, ["stop", "now", "wi-1", "--by", "  ", "--reason", "x", "--state", str(tmp_path)]
     )
 
-    assert result.exit_code == 2
+    assert result.exit_code == EXIT_UNUSABLE
     assert StopBook.in_state(tmp_path).all() == []
 
 

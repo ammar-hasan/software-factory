@@ -76,9 +76,18 @@ app = typer.Typer(
 console = Console()
 err_console = Console(stderr=True)
 
+#: What a caller can tell apart from the outside.
+#:
+#: `2` is left to Typer, which uses it for a command line the CLI could not parse. It used
+#: to mean *both* that and "this cannot be done here", so a script could not distinguish a
+#: mistyped flag from `sf mine` correctly reporting that the ledger is empty. This project
+#: refuses to conflate "cannot" with "did not" everywhere else; the exit codes were the one
+#: place it did.
 EXIT_OK = 0
 EXIT_FAILED = 1
-EXIT_UNUSABLE = 2
+"""The question was answered and the answer is bad news: a gate blocked, a check failed."""
+EXIT_UNUSABLE = 3
+"""The question cannot be answered here: no factory, no ledger, no configured provider."""
 
 RootArg = Annotated[
     Path,
