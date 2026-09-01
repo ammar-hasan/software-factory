@@ -219,3 +219,25 @@ def test_a_factory_block_is_not_an_infrastructure_failure(tmp_path: Path) -> Non
     )
 
     assert result.infrastructure is False
+
+
+def test_the_report_does_not_publish_the_provider_endpoint() -> None:
+    """This report is committed and served from the project's own site.
+
+    An operator reading it wants "the endpoint returned 500", not somebody's deployment
+    address — and the site's own test refuses any external URL on a built page, which is
+    how this surfaced. The full message stays in the ledger and in `sf work`'s output,
+    where the person reading it is the person who configured the endpoint.
+    """
+    from product_trial import _without_endpoint
+
+    assert (
+        _without_endpoint(
+            "https://api.example.invalid/v4/chat/completions returned 500: Operation failed"
+        )
+        == "the endpoint returned 500: Operation failed"
+    )
+    # The half that matters: an error with no URL in it must survive untouched.
+    intact = "RemoteDisconnected: Remote end closed connection without response"
+    assert _without_endpoint(intact) == intact
+    assert _without_endpoint("") == ""

@@ -769,6 +769,7 @@ def diagram_embed(alt: str, poster: str, page: str, attrs: str = "") -> str:
         "</span></div>"
     )
 
+
 def anchor(match: re.Match[str]) -> str:
     """One Markdown link, as an anchor -- or as plain text when there is nothing to link to.
 
