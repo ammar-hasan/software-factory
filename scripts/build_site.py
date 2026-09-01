@@ -317,6 +317,11 @@ details[open] > *:not(summary) { animation: reveal .4s var(--ease); }
   letter-spacing: -0.028em; line-height: 1.22; margin: 0 0 14px; max-width: 24em;
 }
 .hero-pitch .refusal { color: var(--accent-2); }
+.hero-sub {
+  font-size: clamp(15.5px, 1.6vw, 17.5px); line-height: 1.55; color: var(--dim);
+  margin: 0 0 4px; max-width: 42em;
+}
+.hero-sub strong { color: var(--ink); font-weight: 600; }
 .hero-ctas { display: flex; gap: 12px; flex-wrap: wrap; margin: 22px 0 6px; }
 .cta {
   display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px;
@@ -918,9 +923,12 @@ STAGES = ("TRIAGE", "DESIGN", "BUILD", "REVIEW", "HANDOFF")
 #: reduced motion on; `pipeline.js` only sets it in motion.
 HERO = f"""<section class="hero">
 <p class="hero-eyebrow">local-first software factory</p>
-<p class="hero-pitch">Hand it a bug report. Get back a branch with the fix, a test that
-proves it, and a record of every decision &mdash; or <span class="refusal">a
-refusal</span> that tells you exactly what is missing.</p>
+<h1 id="software-factory" class="hero-pitch">The software factory that
+<span class="refusal">refuses to lie to you</span>.</h1>
+<p class="hero-sub">Hand it a bug report. Get back a branch with the fix, a test that
+proves it, and a record of every decision &mdash; <strong>receipts, not
+promises</strong> &mdash; or a refusal that names exactly what's missing. Every other
+agent hands you a plausible diff and calls it done.</p>
 <div class="hero-ctas">
 <a class="cta primary" href="#watch-one-run">Watch a run</a>
 <a class="cta" href="#the-refusal-explained">Read the story</a>
@@ -1043,7 +1051,7 @@ def shell(page: Page, body: str, headings: list[Heading], pages: tuple[Page, ...
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {THEME_SCRIPT}
 <title>{html.escape(page.title)}</title>
-<meta name="description" content="A local-first software factory: specialist agents carrying requests into reviewable changes.">
+<meta name="description" content="The local-first software factory that refuses to lie to you: specialist agents carry your backlog to reviewable changes, or refuse and name exactly what's missing.">
 <style>{STYLE}</style>
 </head>
 <body>

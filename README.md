@@ -1,10 +1,24 @@
 # Software Factory
 
-**Hand it a bug report. Get back a branch with the fix, a test that proves the fix, and a
-record of every decision — or a refusal that tells you exactly what is missing.**
+**The software factory that refuses to lie to you.**
 
-The refusal is the point. Anything can produce a diff. This is built to know when its own
-work is not good enough to hand you, and to say so.
+Hand it a bug report. Get back a branch with the fix, a test that proves it, and a
+record of every decision — receipts, not promises — or a refusal that names exactly
+what's missing. Every other agent hands you a plausible diff and calls it done; this one
+is built to know when its own work isn't good enough, and say so.
+
+The refusal is the point. Anything can produce a diff. This is built to check its own
+work before you do, and to refuse out loud — every time, by name, with the exact
+evidence that was missing.
+
+> **The bet, stated plainly:** a modest model inside a harness disciplined enough to
+> check its own work beats a frontier model inside one that doesn't. That's not a
+> slogan — it's a pre-registered, falsifiable experiment ([§11.2 of the
+> PRD](docs/PRD.md)), and `sf experiment status` prints exactly where it stands today.
+> We built the whole harness — awareness, tools, calibration, blast-radius, gates — to
+> win that bet, and we'd rather report `insufficient_data` honestly than claim a result
+> we haven't earned. See "The bet" below for the mechanism and where the experiment
+> stands today.
 
 ## What is this, in plain words?
 
