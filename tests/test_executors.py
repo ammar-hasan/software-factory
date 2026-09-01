@@ -8,6 +8,7 @@ exist -- which is finding C9 in a new place.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -279,3 +280,37 @@ def test_every_executor_satisfies_one_protocol(tmp_path: Path) -> None:
 
     for executor in (local, container, remote):
         assert isinstance(executor, Executor)
+
+
+# ------------------------------------------------------------------ what a level promises
+
+
+def test_process_level_does_not_confine_the_filesystem(tmp_path: Path) -> None:
+    """Demonstrated, not restated. `blast-radius-clean` rests on this distinction.
+
+    `PROCESS` sets a working directory, an environment and resource limits, and the process
+    may still write anywhere the user can. That is not weaker confinement than `NAMESPACE`,
+    it is a different guarantee, and treating the two alike is how every trial run in this
+    repository reported "no attempt to reach outside the declared grants" while an agent's
+    `pip install -e .` sat in the system `dist-packages`.
+    """
+    from software_factory.runtime.executor import LocalExecutor
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    executor = LocalExecutor(policy(workspace), level=SandboxLevel.PROCESS)
+
+    result = executor.run([sys.executable, "-c", f"open({str(outside)!r}, 'w').write('escaped')"])
+
+    assert result.exit_code == 0, result.stderr
+    assert outside.read_text(encoding="utf-8") == "escaped"
+    assert not SandboxLevel.PROCESS.confines_filesystem, (
+        "the write above left the workspace, so this level must not claim to confine it"
+    )
+
+
+def test_only_namespace_level_claims_to_confine_the_filesystem() -> None:
+    confining = {level for level in SandboxLevel if level.confines_filesystem}
+
+    assert confining == {SandboxLevel.NAMESPACE}

@@ -44,6 +44,18 @@ class SandboxLevel(enum.StrEnum):
     NAMESPACE = "namespace"
     """Filesystem and network confinement via an OS sandbox helper."""
 
+    @property
+    def confines_filesystem(self) -> bool:
+        """Whether a write outside the workspace would have been stopped or seen.
+
+        Only `NAMESPACE` does. `PROCESS` sets a working directory and resource limits and
+        the process may write anywhere the user can, so the two differ in what they permit
+        and not merely in how strongly -- and `blast-radius-clean` is a claim about exactly
+        that difference. Answered here rather than at the gate, so a level added later
+        declares it once instead of being absent from a check nobody thinks to update.
+        """
+        return self is SandboxLevel.NAMESPACE
+
 
 @dataclass(frozen=True, slots=True)
 class CommandResult:

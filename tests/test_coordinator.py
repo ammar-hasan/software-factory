@@ -295,6 +295,35 @@ def test_every_stage_is_recorded_in_the_ledger(definition, repo: Path, tmp_path:
     assert EntryType.GATE_EVALUATED in types
 
 
+def test_the_ledger_records_what_confinement_the_run_actually_had(
+    definition, repo: Path, tmp_path: Path
+) -> None:
+    """The gate knowing is worth nothing if the coordinator does not tell it.
+
+    Which is the shape this codebase keeps finding, so it is checked end to end rather than
+    on the gate alone: with no sandbox helper on the machine, `blast-radius-clean` must
+    reach the ledger as `unenforceable`. It reported `pass` on every stage of every trial
+    run in this repository while an agent's `pip install -e .` sat in the system
+    `dist-packages`, shadowing later runs.
+    """
+    from software_factory.runtime.executor import detect_sandbox_level
+
+    provider = StubProvider([says(triage_output()), says(build_output()), says(review_output())])
+    coordinator(definition, repo, tmp_path, provider).run(item())
+
+    entries = [
+        entry
+        for entry in Ledger(tmp_path / "state" / "ledger.jsonl").read()
+        if entry.type is EntryType.GATE_EVALUATED and entry.payload["gate"] == "blast-radius-clean"
+    ]
+    assert entries, "the gate did not run"
+
+    expected = "pass" if detect_sandbox_level().confines_filesystem else "unenforceable"
+    assert {e.payload["outcome"] for e in entries} == {expected}
+    # Either way it must not stop work the operator chose to allow.
+    assert not any(e.payload["blocks"] for e in entries)
+
+
 def test_the_ledger_chain_verifies_after_a_run(definition, repo: Path, tmp_path: Path) -> None:
     provider = StubProvider([says(triage_output()), says(build_output()), says(review_output())])
 

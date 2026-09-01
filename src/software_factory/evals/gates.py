@@ -138,6 +138,29 @@ class GateContext:
     critic_engine: tuple[str, str] | None = None
     allow_shared_blind_spot: bool = False
     has_test_command: bool = True
+    filesystem_confined: bool = True
+    """Whether a write outside the workspace would have been stopped or seen.
+
+    False makes `blast-radius-clean` unenforceable rather than passed. Nothing was watching,
+    and a check that cannot look must say so -- the rule this codebase applies to every
+    metric, applied to the one gate whose subject is containment.
+
+    A boolean about the property, not the sandbox's name. The first version of this asked
+    whether the level was `"none"`, and `detect_sandbox_level` never returns `none` -- it
+    returns `process` when the sandbox helper is missing, and `process` is documented as
+    having no filesystem confinement. So the check was for a value that could not occur:
+    the same defect it was written to fix, in the fix, found by mutating it.
+
+    Not hypothetical. Every trial in this repository ran with `--allow-unsandboxed` on a
+    machine with no sandbox helper, and `blast-radius-clean` reported `pass` -- "no attempt
+    to reach outside the declared grants" -- on every stage of every run. An agent had run
+    `pip install -e .`, which wrote an editable-install `.pth` into the system
+    `dist-packages` and a console script onto `PATH`, where they stayed and shadowed later
+    runs. A later agent found the contamination itself and filed it as a work item, which
+    is the only reason anybody knew. The gate is not wrong to let the run proceed -- the
+    operator passed a flag accepting exactly this -- but recording it as a control that held
+    is the flattering wrong answer this project refuses everywhere else.
+    """
     has_build_command: bool = True
     """Whether this repository has a build step to run at all.
 
@@ -171,6 +194,17 @@ def calibration_present(ctx: GateContext) -> GateResult:
 
 def blast_radius_clean(ctx: GateContext) -> GateResult:
     """Only escalating violations block; blocked ones are reported."""
+    if not ctx.filesystem_confined:
+        # Reported before the counts, because with nothing confining the run the counts are
+        # zero for the same reason an unplugged smoke detector is silent.
+        return GateResult(
+            "blast-radius-clean",
+            GateOutcome.UNENFORCEABLE,
+            detail=(
+                "no sandboxing was in effect, so writes outside the workspace were not "
+                "observed; this gate checked nothing"
+            ),
+        )
     escalating = ctx.violations.get(ViolationClass.ESCALATING, 0)
     blocked = ctx.violations.get(ViolationClass.BLOCKED, 0)
     if escalating:

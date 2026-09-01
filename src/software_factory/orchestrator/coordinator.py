@@ -90,7 +90,11 @@ from software_factory.orchestrator.workitem import (
     new_id,
 )
 from software_factory.providers.base import Provider
-from software_factory.runtime.executor import LocalExecutor, SandboxPolicy
+from software_factory.runtime.executor import (
+    LocalExecutor,
+    SandboxPolicy,
+    detect_sandbox_level,
+)
 from software_factory.runtime.tools import build_registry
 from software_factory.runtime.workspace import Workspace, WorkspaceFactory
 from software_factory.skills.registry import SkillRegistry
@@ -1634,6 +1638,7 @@ class Coordinator:
             bundle=bundle,
             has_test_command=validation.has_test_command,
             has_build_command=validation.has_test_command,
+            filesystem_confined=detect_sandbox_level().confines_filesystem,
             tests_at_tip=validation.at_tip,
             tests_at_parent=validation.at_parent,
             new_test_ids=validation.new_test_ids,
