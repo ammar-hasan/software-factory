@@ -80,6 +80,9 @@ SEED = {
         'build-backend = "hatchling.build"\n'
     ),
     "README.md": "# jsonlint\n\nA small JSON validator.\n",
+    # Without this, the first between-step commit captured pytest's bytecode caches and
+    # nothing else -- and looked, in `git log`, exactly like the factory's work landing.
+    ".gitignore": "__pycache__/\n*.py[cod]\n.pytest_cache/\n",
 }
 
 
@@ -269,6 +272,14 @@ class Result:
     seconds: float = 0.0
     changed: list[str] = field(default_factory=list)
     tests_pass: bool | None = None
+    landed: bool | None = None
+    """Whether the workspace's change was carried back into the product.
+
+    `None` when the step produced nothing to carry. The factory works in a clone and never
+    touches the source, which is correct isolation -- and it means a trial that wants each
+    step to build on the last has to do the carrying itself. The first version of this did
+    not, so every step re-solved the same seed, `git log` showed only pytest's bytecode
+    caches, and the step-by-step evolution the trial claimed to measure never happened."""
     error: str = ""
 
     @property
@@ -342,10 +353,29 @@ def run_step(step: Step, *, repo: Path, factory: Path, state: Path, provider: An
                 entry.payload.get("turns", 0) or 0
             )
 
-    # The product's own tests, run against the tree the factory left behind. A factory that
-    # reaches handoff on a repository whose tests fail has reached handoff on nothing, and
-    # its own gates are the last place to learn that from.
-    if outcome.changed_paths or result.reached_handoff:
+    # Carry the change out of the workspace and into the product, so the next step starts
+    # from this one's result. Without it each step re-solves the same seed, and a sequence
+    # designed to test evolution tests six independent first attempts.
+    if (outcome.diff or "").strip():
+        applied = subprocess.run(
+            ["git", "apply", "--whitespace=nowarn", "-"],
+            cwd=repo,
+            input=outcome.diff,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        result.landed = applied.returncode == 0
+        if not result.landed:
+            # A finding, not a crash. A diff that will not apply to the tree it was made
+            # from is worth reporting precisely; abandoning the whole trial is not.
+            result.error = f"the change did not apply: {applied.stderr.strip()[:400]}"
+
+    # The product's own tests, against the tree the factory left behind -- *after* the
+    # change has landed in it. Run before, they test the seed and pass trivially, which is
+    # what the first version did: it reported "tests pass" for a repository that had never
+    # received the work.
+    if result.landed:
         completed = subprocess.run(
             [sys.executable, "-m", "pytest", "-q"],
             cwd=repo,
@@ -421,6 +451,8 @@ def render(results: list[Result], *, provider: str, model: str) -> str:
             body += f"Blocked: `{r.blocker}` — {r.action}\n\n"
         if r.changed:
             body += "Changed: " + ", ".join(f"`{p}`" for p in r.changed) + "\n\n"
+        if r.landed is False:
+            body += "**The change did not apply to the product.**\n\n"
         if r.tests_pass is not None:
             body += f"The product's own tests: **{'pass' if r.tests_pass else 'FAIL'}**\n\n"
         blocking = [g for g in r.gates if g.get("blocks")]
@@ -492,9 +524,25 @@ def main() -> int:
         # Committed between steps so the next one has a real parent commit: the
         # regression-proven gate compares against HEAD, and a tree that never commits gives
         # every step the same parent and makes every test look pre-existing.
-        if result.changed:
+        # Guarded on `landed`, not on `changed`. `changed_paths` describes the *workspace*,
+        # so committing on it staged whatever happened to be lying in the source tree --
+        # which the first time round was pytest's bytecode and nothing else.
+        if result.landed:
             git(["add", "-A"], repo)
-            git(["commit", "-qm", f"{step.name}: {step.title}"], repo)
+            committed = subprocess.run(
+                ["git", "commit", "-qm", f"{step.name}: {step.title}"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if committed.returncode != 0:
+                # Never fatal. A step whose change is already in the tree did nothing, which
+                # is a result worth reporting rather than a reason to abandon the rest.
+                print(
+                    f"        (nothing to commit: {committed.stdout.strip()[:120]})",
+                    file=sys.stderr,
+                )
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
