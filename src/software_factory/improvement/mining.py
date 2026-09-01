@@ -333,11 +333,26 @@ class Mine:
         ]
 
     def _from_tools(self, rows: list[Any], tainted: set[str]) -> list[Observation]:
-        """A tool sequence that recurs is a procedure with no name yet.
+        """A tool sequence that recurs *within* runs is a procedure with no name yet.
 
         Adjacent pairs rather than longer chains. A pair recurs often enough to be evidence;
-        a five-step chain recurs once and would make every run its own unique 'pattern',
-        which is a miner that only ever proposes noise.
+        a five-step chain recurs once and would make every run its own unique "pattern".
+
+        Two rules separate a procedure from ordinary interleaving, and both were learned by
+        running this against a real trial's ledger. Without them it proposed fourteen
+        "skills", of which ten were the same five pairs counted in both directions:
+
+        **A pair whose reverse also recurs is not a procedure.** `test.run -> proc.run` and
+        `proc.run -> test.run` together say the agent alternates between two tools, which is
+        what building looks like. Naming either as a procedure describes the medium, not a
+        method, and naming both is visibly absurd.
+
+        **A procedure repeats inside a run, not merely across runs.** Two runs that each did
+        `repo.read -> proc.run` once are two runs that read a file and then ran something --
+        the most ordinary thing an agent does. Counting distinct runs as "distinct sources"
+        also quietly reintroduced the repetition-as-corroboration this module refuses
+        everywhere else: for the other extractors a source is a file or a person, and here it
+        had collapsed to the run itself.
         """
         per_run: dict[str, list[str]] = {}
         for entry in rows:
@@ -348,27 +363,33 @@ class Mine:
                 continue
             per_run.setdefault(run, []).append(str(entry.payload.get("tool", "")))
 
+        #: Times a pair must appear inside one run before that run attests to it.
+        repeats = 2
         pairs: dict[str, tuple[set[str], set[str]]] = {}
         for run, tools in per_run.items():
             seen_here: Counter[str] = Counter()
             for first, second in pairwise(tools):
                 if not first or not second or first == second:
                     continue
-                key = f"{first} -> {second}"
-                seen_here[key] += 1
-            for key in seen_here:
+                seen_here[f"{first} -> {second}"] += 1
+            for key, count in seen_here.items():
+                if count < repeats:
+                    continue
                 sources, runs = pairs.setdefault(key, (set(), set()))
                 sources.add(f"run:{run}")
                 runs.add(run)
+
+        reciprocal = {key for key in pairs if " -> ".join(reversed(key.split(" -> "))) in pairs}
         return [
             Observation(
                 what=key,
                 kind="tool-sequence",
                 sources=frozenset(sources),
                 runs=frozenset(runs),
-                detail=f"recurred across {len(runs)} run(s)",
+                detail=f"repeated within {len(runs)} run(s)",
             )
             for key, (sources, runs) in pairs.items()
+            if key not in reciprocal
         ]
 
     # ------------------------------------------------------------------ proposals

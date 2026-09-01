@@ -326,14 +326,56 @@ def test_an_answer_with_no_question_is_ignored(ledger: Ledger) -> None:
 # --------------------------------------------------------------------------------------
 
 
-def test_a_recurring_tool_pair_becomes_a_skill_idea(ledger: Ledger) -> None:
+def test_a_pair_repeated_within_runs_becomes_a_skill_idea(ledger: Ledger) -> None:
+    """Repeated *inside* a run, not merely present in several.
+
+    Two runs that each did `repo.read -> proc.run` once are two runs that read a file and
+    then ran something, which is the most ordinary thing an agent does.
+    """
     ids = runs(ledger, 6)
     for run in ids[:3]:
-        tools(ledger, run, ["repo.search", "repo.read", "file.write"])
+        tools(ledger, run, ["repo.search", "repo.read", "x", "repo.search", "repo.read"])
 
     ideas = Mine().run(ledger.read()).skills
 
     assert any(idea.sequence == ("repo.search", "repo.read") for idea in ideas)
+
+
+def test_a_pair_seen_once_per_run_is_not_a_procedure(ledger: Ledger) -> None:
+    """Counting distinct runs as "distinct sources" quietly reintroduced the
+    repetition-as-corroboration this module refuses everywhere else: for every other
+    extractor a source is a file or a person, and here it had collapsed to the run."""
+    ids = runs(ledger, 6)
+    for run in ids[:4]:
+        tools(ledger, run, ["repo.read", "proc.run"])
+
+    assert Mine().run(ledger.read()).skills == ()
+
+
+def test_a_pair_whose_reverse_also_recurs_is_not_a_procedure(ledger: Ledger) -> None:
+    """The finding that forced this rule, from a real trial's ledger.
+
+    `test.run -> proc.run` and `proc.run -> test.run` together say the agent alternates
+    between two tools, which is what building looks like. Naming either as a procedure
+    describes the medium rather than a method; naming both, which is what it did, is
+    visibly absurd — ten of its fourteen proposals were five pairs counted twice.
+    """
+    ids = runs(ledger, 6)
+    for run in ids[:3]:
+        tools(ledger, run, ["proc.run", "test.run"] * 3)
+
+    assert Mine().run(ledger.read()).skills == ()
+
+
+def test_a_one_directional_pair_survives_the_reciprocal_rule(ledger: Ledger) -> None:
+    """The rule must not swallow a real procedure that happens to be common."""
+    ids = runs(ledger, 6)
+    for run in ids[:3]:
+        tools(ledger, run, ["file.write", "test.run", "x", "file.write", "test.run"])
+
+    ideas = Mine().run(ledger.read()).skills
+
+    assert [idea.sequence for idea in ideas] == [("file.write", "test.run")]
 
 
 def test_a_skill_idea_is_not_a_lifecycle_proposal(ledger: Ledger) -> None:
@@ -347,7 +389,7 @@ def test_a_skill_idea_is_not_a_lifecycle_proposal(ledger: Ledger) -> None:
 
     ids = runs(ledger, 6)
     for run in ids[:3]:
-        tools(ledger, run, ["repo.search", "repo.read"])
+        tools(ledger, run, ["repo.search", "repo.read", "x", "repo.search", "repo.read"])
 
     ideas = Mine().run(ledger.read()).skills
 
