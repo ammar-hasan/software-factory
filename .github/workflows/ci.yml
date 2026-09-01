@@ -140,6 +140,23 @@ jobs:
           sf providers /tmp/reference --json > /dev/null
           sf principals /tmp/reference --json > /dev/null
           sf govern classes --json > /dev/null
+          sf agent send builder "ci smoke" --state /tmp/reference/.factory --json > /dev/null
+          sf agent inbox builder --state /tmp/reference/.factory --json > /dev/null
+          sf agent lifecycle --state /tmp/reference/.factory --json > /dev/null
+          sf worker list --root /tmp/reference --state /tmp/reference/.factory --json > /dev/null
+          sf worker leases --root /tmp/reference --state /tmp/reference/.factory --json > /dev/null
+          sf orchestrate fan-out "a" "b" --join all --json > /dev/null
+          sf orchestrate swarm "solve it" --attempts 2 --json > /dev/null
+          sf orchestrate critic "write it" "check it" --json > /dev/null
+          sf mine --state /tmp/reference/.factory --json > /dev/null
+          sf spec template --repo . --json > /dev/null
+          sf experiment register "ci smoke" --at /tmp/reference/experiment.json --json > /dev/null
+          sf experiment status --at /tmp/reference/experiment.json --json \
+            | python -c "import json,sys; d=json.load(sys.stdin); assert d['verdict'] == 'insufficient_data', 'an unrun experiment reported a verdict'"
+          sf experiment routing --at /tmp/reference/experiment.json --json > /dev/null
+          printf 'WEBVTT\n\n1\n00:00:01.000 --> 00:00:04.000\nAna: the export drops the last row\n' > /tmp/call.vtt
+          sf media read /tmp/call.vtt --json \
+            | python -c "import json,sys; d=json.load(sys.stdin); assert d['trust'] == 'untrusted', 'a transcript was not marked untrusted'"
       - name: A workspace of two factories validates and reports the overlap
         # FR-1.4 is a P0 rule that no single-factory command can check, so it is checked
         # here or nowhere.
@@ -153,6 +170,8 @@ jobs:
           sf workspace metrics /tmp/workspace --json > /dev/null
           sf workspace validate /tmp/workspace --json \
             | python -c "import json,sys; d=json.load(sys.stdin); assert d['overlaps'], 'the repository overlap went unreported'"
+          sf workspace audit --root /tmp/workspace --json \
+            | python -c "import json,sys; d=json.load(sys.stdin); assert any('claimed by more than one' in f['summary'] for f in d['findings']), 'the audit missed the overlap'"
       - name: A saved chat delivery replays through intake with no network
         # FR-18.10's local parity, checked rather than claimed.
         run: |
@@ -284,7 +303,12 @@ jobs:
           cache-dependency-path: pyproject.toml
       - run: python -m pip install -e ".[dev]" pip-audit
       - name: Dependency vulnerabilities
-        run: pip-audit --strict --progress-spinner=off
+        # `--skip-editable` excludes this project itself. It is installed editable and is
+        # not on PyPI, so `--strict` treated "could not be audited" as a finding and the
+        # security job failed on every commit -- reporting the one package whose source we
+        # can see as the unauditable risk, while saying nothing about the ones we cannot.
+        # `--strict` stays: an ordinary dependency that cannot be resolved is a real gap.
+        run: pip-audit --strict --skip-editable --progress-spinner=off
       - name: No credential-shaped strings outside the detectors that look for them
         run: python scripts/check_no_secrets.py
 

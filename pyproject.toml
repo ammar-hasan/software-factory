@@ -81,6 +81,17 @@ plugins = ["pydantic.mypy"]
 module = ["yaml.*"]
 ignore_missing_imports = true
 
+# Playwright is an *optional* runtime dependency: computer use is a granted capability, and
+# a factory that never drives a browser must not be made to install one. `ui.py` imports it
+# inside a function that returns `(False, reason)` when it is absent, which is the supported
+# path -- but mypy sees the import and fails on a machine without it. So the typecheck
+# passed on any developer machine with a browser installed and failed in CI, which is the
+# worst possible arrangement: the check that exists to catch machine-specific problems was
+# itself machine-specific.
+[[tool.mypy.overrides]]
+module = ["playwright.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 addopts = "-ra --strict-markers --strict-config"
