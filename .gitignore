@@ -53,3 +53,6 @@ htmlcov/
 .factory/runs/
 .factory/cache/
 *.log
+
+# Site build output (python scripts/build_site.py --out _site)
+_site/

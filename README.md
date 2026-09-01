@@ -6,16 +6,28 @@ record of every decision — or a refusal that tells you exactly what is missing
 The refusal is the point. Anything can produce a diff. This is built to know when its own
 work is not good enough to hand you, and to say so.
 
-[![How a work item moves from intake to handoff, and where gates block it](docs/diagrams/stage-machine.workflow.png)](docs/diagrams/stage-machine.workflow.html)
+## What is this, in plain words?
 
-<sub>**A work item, intake to handoff.** Gates sit between stages; a blocked item stops and
-carries the exact action that would clear it. Defect-class work skips DESIGN.
-[Open the interactive version ↗](docs/diagrams/stage-machine.workflow.html)</sub>
+You describe a piece of work in plain language — *"the CSV importer mangles BOM
+headers"*. A team of specialist AI workers picks it up: one decides what the request
+really is, one plans the change, one writes the code, and one does nothing but try to
+prove the others wrong. It runs on **your** hardware — a laptop is fine — under rules
+you can read, change, and diff like any other file.
 
-## What that looks like
+Then the part nothing else does. Before any work reaches you, it must pass a series of
+automatic checks called [gates](docs/reference/gates.md). If the evidence is not there —
+say, nobody *demonstrated* the bug was real before fixing it — the factory refuses, and
+tells you exactly what would change its mind. You never again review a plausible-looking
+change blind.
 
-A real work item, run against a small hosted model on a real repository. This is `sf work`'s
-own output, not a mock-up:
+You do not need to be a developer to follow what happens next. Everything below is a
+story you can read or a button you can press; the machinery only appears if you go
+looking for it.
+
+## Watch one run
+
+A real work item, run against a small hosted model on a real repository. This is
+`sf work`'s own output, not a mock-up:
 
 ```console
 $ sf work "Add a --version flag that prints the package version and exits 0" \
@@ -30,86 +42,17 @@ $ sf work "Add a --version flag that prints the package version and exits 0" \
 HANDOFF — 4 file(s) changed
 ```
 
-**Twenty-four gate evaluations** ran across those five stages, across eleven distinct gates
-— `calibration-present`, `blast-radius-clean`, `secret-clean`, `spec-agreement`,
-`delta-present`, `build-green`, `tests-pass`, `independent-review`,
-`no-unreviewed-external`, `evidence-complete`. Twenty-three passed. `regression-proven`
-reported `skip`, correctly: this is a feature, not a defect fix, so there is no bug to
-demonstrate.
+**Twenty-four gate evaluations** ran across those five stages. Twenty-three passed.
+`regression-proven` reported `skip`, correctly: this is a feature, not a defect fix, so
+there is no bug to demonstrate. What landed includes **a test file the factory wrote
+itself** — including cases nobody asked for, like asserting the version is read at
+runtime rather than hard-coded.
 
-What landed: `jsonlint/__main__.py`, a `[project.scripts]` entry point, a spec delta
-recording the behaviour change, and **a test file the factory wrote itself** — including one case asserting the version is read from the
-attribute at runtime rather than hard-coded, and one for precedence against a positional
-argument. Nobody asked for either. `python -m jsonlint --version` prints `0.1.0` and exits 0.
+[![A work item, intake to handoff: gates sit between stages, and a blocked item stops with the exact action that would clear it](docs/diagrams/stage-machine.workflow.png)](docs/diagrams/stage-machine.workflow.html)
 
-Now the other half. Ask it to fix a defect without demonstrating the bug:
-
-```console
-  stop BUILD    builder
-       · the parent-commit failure is about behaviour at tests/test_importer.py::test_bom:
-         observed import_error failure; expected an assertion failure
-
-blocked (gate_failed_terminal): The test failed before its body ran, so it proves the code
-did not exist, not that the behaviour was wrong. Assert on behaviour that the parent commit
-gets wrong.
-```
-
-It has the fix. It will not hand it over.
-
-And read what it refused on. The test *did* fail before the change and *did* pass after —
-the one-line check most people would write. It failed with an `ImportError`, which proves
-the module was missing, not that the bug was real. **The gate reads the failure's class,
-not its existence.** That distinction is the product.
-
-[![The keystone gate: the suite runs at two commits, and only an assertion about behaviour counts as proof](docs/diagrams/regression-proven.sequence.png)](docs/diagrams/regression-proven.sequence.html)
-
-<sub>**Why it refuses.** The suite runs twice — once where the work stands, once at the
-parent in its own detached worktree, carrying the new tests over the old code. Only an
-assertion *about behaviour* counts. `assert hasattr(mod, "new_fn")` fails at the parent with
-a real `AssertionError` and proves only that the name did not exist: the same bypass an
-import error gives, one keystroke away, and refused for the same reason.
-[Open the interactive version ↗](docs/diagrams/regression-proven.sequence.html)</sub>
-
-## Is this for you?
-
-**Probably yes, if** you have more incoming work than people to do it, you want the work
-done on your own hardware or your own cloud account, and you would rather have a machine
-refuse than hand you a plausible diff you have to check by hand.
-
-**Probably not, if** you want one agent you chat with interactively. This is a fleet that
-runs work items to completion and reports; it is closer to CI than to a pair programmer.
-Use a coding agent for that, and point this at the backlog behind it.
-
-## How is this different from just running a coding agent?
-
-A coding agent is a model with tools. This is the machinery you would have to build around
-one before you could leave it alone with your backlog:
-
-| | A coding agent | This |
-| --- | --- | --- |
-| **Knows when it is wrong** | you review the diff | gates block the handoff, and name what would clear them |
-| **Proof a fix works** | it says so | a test that failed at the parent commit, for the right reason |
-| **What it was told** | whatever fit in context | a budgeted, cited pack, assembled deterministically |
-| **What it may touch** | whatever you allow | a declared blast radius, checked by machine |
-| **What it cost** | your usage page | per run, per stage, per agent, folded from an append-only ledger |
-| **When data is missing** | a plausible number | `unavailable`, with the reason. Never zero |
-| **Where it runs** | somebody's cloud | the same files on your laptop, your box, or your cloud |
-
-[![What an agent is given before it acts: five sources, deterministic builders, a token budget, and a digest](docs/diagrams/awareness-pack.dataflow.png)](docs/diagrams/awareness-pack.dataflow.html)
-
-<sub>**What the agent is given.** Five sources, assembled by builders that need no model, cut
-to a token budget by role, every item cited or dropped. Mission, contract and toolbelt keep a
-protected floor; overflow drops whole items from the tail, never half of one. The pack is
-digested, so identical inputs over the same snapshot produce an identical pack.
-[Open the interactive version ↗](docs/diagrams/awareness-pack.dataflow.html)</sub>
-
-**Local-first is not a degraded mode.** The same definition files, the same harness and the
-same guarantees run on a laptop with a local model as in a data centre. CI proves the whole
-suite passes with the network denied. No control plane you don't own.
-
-Licensed under [Apache-2.0](LICENSE).
-
----
+<sub>**A work item, intake to handoff.** Gates sit between stages; a blocked item stops
+and carries the exact action that would clear it. Defect-class work skips DESIGN.
+[Open the interactive version ↗](docs/diagrams/stage-machine.workflow.html)</sub>
 
 ## Sixty seconds
 
@@ -119,8 +62,9 @@ sf init myfactory --name payments --owner acme --repo payments-service
 sf work "The CSV importer mangles BOM headers" --factory myfactory --repo ~/code/payments --dry-run
 ```
 
-That prints the stages the work item would take and why, without spending anything. To run
-it for real, point the factory at a model — any OpenAI-compatible endpoint, local or hosted:
+That prints the stages the work item would take and why, without spending anything. To
+run it for real, point the factory at a model — any OpenAI-compatible endpoint, local or
+hosted:
 
 ```bash
 # a local runner: nothing leaves the machine, no key
@@ -139,12 +83,75 @@ runtime — before a run finds out the expensive way.
 
 Everything below runs against the tree `sf init` just wrote. Nothing needs an account.
 
-## A tour, in commands
+## Is this for you?
 
-**See the work.** `sf work` carries one request through triage, design, build, review and
-handoff. `sf agent lifecycle` shows every run's state and — the column that matters — which
-agents are waiting on a question nobody answered. A run can be `running` and healthy, or
-`running` and stalled, and only a view showing both can tell them apart.
+**Probably yes, if** you have more incoming work than people to do it, you want it done
+on your own hardware or your own cloud account, and you would rather have a machine
+refuse than hand you a plausible diff you have to check by hand.
+
+**Probably not, if** you want one agent you chat with interactively. This is a fleet
+that runs work items to completion and reports; it is closer to CI than to a pair
+programmer. Use a coding agent for that, and point this at the backlog behind it.
+
+## The refusal, explained
+
+Ask it to fix a defect without demonstrating the bug:
+
+```console
+  stop BUILD    builder
+       · the parent-commit failure is about behaviour at tests/test_importer.py::test_bom:
+         observed import_error failure; expected an assertion failure
+
+blocked (gate_failed_terminal): The test failed before its body ran, so it proves the code
+did not exist, not that the behaviour was wrong. Assert on behaviour that the parent commit
+gets wrong.
+```
+
+It has the fix. It will not hand it over.
+
+And read what it refused on. The test *did* fail before the change and *did* pass after
+— the one-line check most people would write. It failed with an `ImportError`, which
+proves the module was missing, not that the bug was real. **The gate reads the failure's
+class, not its existence.** That distinction is the product.
+
+[![The keystone gate: the suite runs at two commits, and only an assertion about behaviour counts as proof](docs/diagrams/regression-proven.sequence.png)](docs/diagrams/regression-proven.sequence.html)
+
+<sub>**Why it refuses.** The suite runs twice — once where the work stands, once at the
+parent in its own detached worktree, carrying the new tests over the old code. Only an
+assertion *about behaviour* counts. `assert hasattr(mod, "new_fn")` fails at the parent
+with a real `AssertionError` and proves only that the name did not exist: the same
+bypass an import error gives, one keystroke away, and refused for the same reason.
+[Open the interactive version ↗](docs/diagrams/regression-proven.sequence.html)</sub>
+
+<details>
+<summary><strong>How is this different from just running a coding agent?</strong></summary>
+
+A coding agent is a model with tools. This is the machinery you would have to build
+around one before you could leave it alone with your backlog:
+
+| | A coding agent | This |
+| --- | --- | --- |
+| **Knows when it is wrong** | you review the diff | gates block the handoff, and name what would clear them |
+| **Proof a fix works** | it says so | a test that failed at the parent commit, for the right reason |
+| **What it was told** | whatever fit in context | a budgeted, cited pack, assembled deterministically |
+| **What it may touch** | whatever you allow | a declared blast radius, checked by machine |
+| **What it cost** | your usage page | per run, per stage, per agent, folded from an append-only ledger |
+| **When data is missing** | a plausible number | `unavailable`, with the reason. Never zero |
+| **Where it runs** | somebody's cloud | the same files on your laptop, your box, or your cloud |
+
+**Local-first is not a degraded mode.** The same definition files, the same harness and
+the same guarantees run on a laptop with a local model as in a data centre. CI proves
+the whole suite passes with the network denied. No control plane you don't own.
+
+</details>
+
+<details>
+<summary><strong>A tour, in commands</strong></summary>
+
+**See the work.** `sf work` carries one request through triage, design, build, review
+and handoff. `sf agent lifecycle` shows every run's state and — the column that matters
+— which agents are waiting on a question nobody answered. A run can be `running` and
+healthy, or `running` and stalled, and only a view showing both can tell them apart.
 
 ```bash
 sf work "Reject duplicate keys" --factory myfactory --repo ~/code/jsonlint
@@ -154,8 +161,8 @@ sf agent send reviewer "prefer the stdlib codecs module" --state myfactory/.fact
 
 **Run several agents at once.** Five named patterns over one engine — fan-out/fan-in, a
 dependency graph, a swarm, a critic, a supervisor with workers. Every one is a dry run
-unless you add `--execute`, because a plan is the one command whose cost is multiplied by a
-number you typed.
+unless you add `--execute`, because a plan is the one command whose cost is multiplied
+by a number you typed.
 
 ```bash
 sf orchestrate fan-out "audit auth" "audit parsing" "audit export" --join quorum --quorum 2
@@ -167,10 +174,10 @@ sf orchestrate critic "write the migration" "check it is reversible" \
 A swarm is scored, never raced: first-past-the-post selects for speed, and the fastest
 answer is the one that did the least work. A critic may not be the producer.
 
-**Send work to the machine that can run it.** Work declares labels it needs; workers declare
-labels they have. A requirement nothing satisfies is refused *by name* — never downgraded to
-whatever is free, because work that asked for a GPU and ran on a CPU box produces results
-that are wrong rather than missing.
+**Send work to the machine that can run it.** Work declares labels it needs; workers
+declare labels they have. A requirement nothing satisfies is refused *by name* — never
+downgraded to whatever is free, because work that asked for a GPU and ran on a CPU box
+produces results that are wrong rather than missing.
 
 ```bash
 sf worker list --root myfactory
@@ -181,8 +188,8 @@ sf worker leases --root myfactory                  # who holds what, and what ex
 **Read the past back.** `sf mine` reads completed runs for things worth keeping: a gate
 finding that keeps recurring, a question one agent keeps asking and the answer it keeps
 getting, a tool sequence nothing has named. It proposes and writes nothing — admission
-control lives in the memory store, and a miner that wrote would be a second door with none
-of it behind it.
+control lives in the memory store, and a miner that wrote would be a second door with
+none of it behind it.
 
 ```bash
 sf mine --state myfactory/.factory
@@ -190,9 +197,9 @@ sf spec template --repo ~/code/jsonlint     # the unit shape that fits *this* re
 sf media read call.vtt                      # a recording as research: untrusted, quoted
 ```
 
-**Watch the whole thing.** `sf dash` serves a dashboard from the ledger; `sf api` serves the
-same numbers over authenticated HTTP; `sf workspace audit` answers the question an operator
-running several factories actually has.
+**Watch the whole thing.** `sf dash` serves a dashboard from the ledger; `sf api` serves
+the same numbers over authenticated HTTP; `sf workspace audit` answers the question an
+operator running several factories actually has.
 
 ```bash
 sf dash --state myfactory/.factory
@@ -200,9 +207,9 @@ sf workspace audit --root ~/factories       # broken? drifting? who is the outli
 sf experiment status                        # what the central bet has actually been shown
 ```
 
-`sf experiment status` reports `insufficient_data — no trials recorded`, which is the true
-state of this project's central claim today. A test asserts it cannot report `supported`
-without trials behind it.
+`sf experiment status` reports `insufficient_data — no trials recorded`, which is the
+true state of this project's central claim today. A test asserts it cannot report
+`supported` without trials behind it.
 
 ### What's in a definition
 
@@ -216,23 +223,23 @@ skills/                    versioned procedures agents can load
 policy/                    stages, gates, budgets, memory policy
 ```
 
-`sf init` writes a definition that validates and lints with **zero warnings**, offline, with
-no account. CI checks that on every run, because a scaffold that emits warnings teaches
-every new user that warnings are normal.
+`sf init` writes a definition that validates and lints with **zero warnings**, offline,
+with no account. CI checks that on every run, because a scaffold that emits warnings
+teaches every new user that warnings are normal.
 
 Everything the factory does is described by these files, so changing its behaviour is a
-change you can review, diff, and revert — including changes the factory proposes to itself.
+change you can review, diff, and revert — including changes the factory proposes to
+itself.
 
-## The bet
+</details>
 
-Most agent platforms treat the model as the product and the scaffolding as plumbing. This
-inverts that:
+<details>
+<summary><strong>The bet: a modest model in an excellent harness beats a frontier model in a poor one</strong></summary>
 
-> **A modest model inside an excellent harness beats a frontier model inside a poor one.**
-
-That is a hypothesis, not a slogan. [§11.2 of the PRD](docs/PRD.md) is the pre-registered
-experiment written to falsify it, and `sf experiment status` reports what it has actually
-shown so far:
+Most agent platforms treat the model as the product and the scaffolding as plumbing.
+This inverts that — and it is a hypothesis, not a slogan. [§11.2 of the
+PRD](docs/PRD.md) is the pre-registered experiment written to falsify it, and
+`sf experiment status` reports what it has actually shown so far:
 
 ```console
 $ sf experiment status
@@ -252,19 +259,29 @@ plausibility.
 | **Courage** | A machine-checked blast-radius contract, stated affirmatively. An agent that doesn't know undo is free picks the timid approach every time. |
 | **Quality** | Gates that block, and evidence that resolves claims rather than accompanying them. |
 
-## How it fits together
+[![What an agent is given before it acts: five sources, deterministic builders, a token budget, and a digest](docs/diagrams/awareness-pack.dataflow.png)](docs/diagrams/awareness-pack.dataflow.html)
+
+<sub>**What the agent is given.** Five sources, assembled by builders that need no
+model, cut to a token budget by role, every item cited or dropped. Mission, contract and
+toolbelt keep a protected floor; overflow drops whole items from the tail, never half of
+one. The pack is digested, so identical inputs over the same snapshot produce an
+identical pack. [Open the interactive version ↗](docs/diagrams/awareness-pack.dataflow.html)</sub>
+
+</details>
+
+<details>
+<summary><strong>How it fits together: the five subsystems</strong></summary>
 
 [![The definition layer, the coordinator, the harness, the executors, and the ledger everything observable is folded from](docs/diagrams/architecture.architecture.png)](docs/diagrams/architecture.architecture.html)
 
-<sub>**The system.** Definition files describe it; the coordinator carries work items through
-the stage machine; the harness assembles a pack and runs the turn loop against a typed tool
-registry; executors run commands under a sandbox. Everything observable — metrics, the
-dashboard, the HTTP API — is folded from one append-only, hash-chained ledger rather than
-kept beside it. [Open the interactive version ↗](docs/diagrams/architecture.architecture.html)</sub>
+<sub>**The system.** Definition files describe it; the coordinator carries work items
+through the stage machine; the harness assembles a pack and runs the turn loop against a
+typed tool registry; executors run commands under a sandbox. Everything observable —
+metrics, the dashboard, the HTTP API — is folded from one append-only, hash-chained
+ledger rather than kept beside it.
+[Open the interactive version ↗](docs/diagrams/architecture.architecture.html)</sub>
 
-## The five subsystems
-
-Each has a design document and a test matrix it satisfies.
+Each subsystem has a design document and a test matrix it satisfies.
 
 | Subsystem | Design | The idea in one line |
 | --- | --- | --- |
@@ -274,32 +291,10 @@ Each has a design document and a test matrix it satisfies.
 | **Evals + gates** | [`evals.md`](docs/harness/evals.md) | Gates block one run, scorers sample many, benchmarks compare configurations. Conflating them is how assurance becomes theatre. |
 | **Loom harness** | [`HARNESS.md`](docs/harness/HARNESS.md) | Packs, tools, contracts, and an escalation ladder that requires a recorded trigger. |
 
-## What it looks like
+</details>
 
-`sf providers` answers the question a definition cannot: *what will this factory actually
-call, and can it right now?* Offline unless `--probe` is passed — a diagnostic that needs
-the network to report a network problem is not one.
-
-![sf providers](docs/images/cli-providers.svg)
-
-`sf audit --egress` enumerates every outbound destination reachable from the definition,
-including the ones it **cannot** determine. A report that silently omits what it cannot see
-is worse than none, because it reads as a complete list.
-
-![sf audit --egress](docs/images/cli-audit.svg)
-
-`sf dash` serves a local dashboard from the ledger. The interesting column is the one full
-of prose: a metric that needs an integration this factory does not have is *unavailable with
-a reason*, never zero — and `cost_per_change` says the recorded zeros come from a ladder that
-declares no prices, rather than reporting a factory that runs for free.
-
-![The dashboard's overview](docs/images/dashboard-overview.png)
-
-Every image here is regenerated by `python scripts/capture_screenshots.py` from a real run,
-for the same reason `docs/reference/` is generated: a screenshot captured by hand goes stale
-silently, and a stale screenshot of a CLI shows output the tool no longer produces.
-
-## Status
+<details>
+<summary><strong>Status: what exists, honestly</strong></summary>
 
 Under construction, and specific about where. What exists and is tested:
 
@@ -331,21 +326,24 @@ Under construction, and specific about where. What exists and is tested:
 | Templates | Spec unit shapes derived from the repository, with sections the repository cannot support marked rather than dropped |
 | Cross-factory | One audit over a workspace: what is broken, what is drifting, and who is the outlier |
 
-**Honestly not there yet.** The behavioural half of the executor parity suite skips without
-a container daemon and a reachable worker, and says so rather than passing. The §11.2
-experiment has its full protocol and **no trials**: `sf experiment status` reports
-`insufficient_data`, which is the honest state of the project's central claim and the thing
-most worth fixing next. No provider is exercised against a live endpoint *in CI* — the suite
-drives real providers over a real socket against a server speaking the hosts' wire formats,
-which is the strongest claim a suite can make on its own, and `scripts/live_trial.py` and
-`scripts/product_trial.py` are the two commands that go further. See the
-[milestone plan](docs/PRD.md).
+**Honestly not there yet.** The behavioural half of the executor parity suite skips
+without a container daemon and a reachable worker, and says so rather than passing. The
+§11.2 experiment has its full protocol and **no trials**: `sf experiment status` reports
+`insufficient_data`, which is the honest state of the project's central claim and the
+thing most worth fixing next. No provider is exercised against a live endpoint *in CI* —
+the suite drives real providers over a real socket against a server speaking the hosts'
+wire formats, which is the strongest claim a suite can make on its own, and
+`scripts/live_trial.py` and `scripts/product_trial.py` are the two commands that go
+further. See the [milestone plan](docs/PRD.md).
 
-## Does it work?
+</details>
+
+<details>
+<summary><strong>Does it work? The trials</strong></summary>
 
 Three end-to-end trials run the factory over real repositories — real git history, the
-repository's own pytest suite, real diffs, and gates evaluating the actual result. The report
-is generated: [`docs/trials.md`](docs/trials.md), regenerated by
+repository's own pytest suite, real diffs, and gates evaluating the actual result. The
+report is generated: [`docs/trials.md`](docs/trials.md), regenerated by
 `python scripts/run_trials.py`, and CI fails if the committed one has drifted.
 
 | Trial | What it asks |
@@ -356,19 +354,20 @@ is generated: [`docs/trials.md`](docs/trials.md), regenerated by
 
 The answers are yes, yes, and yes — and writing the trials is what produced them. Before
 these ran, the coordinator supplied `has_test_command=False` and `build_ok=True` as
-constants, so the keystone gate had never once compared a real test run at the tip against a
-real one at the parent. It blocked a fix with no test for the weaker reason that no evidence
-existed at all.
+constants, so the keystone gate had never once compared a real test run at the tip
+against a real one at the parent. It blocked a fix with no test for the weaker reason
+that no evidence existed at all.
 
-**The model is scripted in all three**, deliberately: a suite that needs a live model is a
-suite nobody runs. The trials establish that *given* an output, the factory does the right
-thing with it.
+**The model is scripted in all three**, deliberately: a suite that needs a live model is
+a suite nobody runs. The trials establish that *given* an output, the factory does the
+right thing with it.
 
 ### And then it met a model that was not scripted
 
-`scripts/live_trial.py` runs one real work item through a real endpoint. Five runs against a
-small hosted model found **four defects in the keystone gate alone** — none of which 1,400
-tests had caught, every one of them in the same direction: *the gate refused correct work.*
+`scripts/live_trial.py` runs one real work item through a real endpoint. Five runs
+against a small hosted model found **four defects in the keystone gate alone** — none of
+which 1,400 tests had caught, every one of them in the same direction: *the gate refused
+correct work.*
 
 | What the model did | What the factory said | What was actually wrong |
 | --- | --- | --- |
@@ -377,20 +376,20 @@ tests had caught, every one of them in the same direction: *the gate refused cor
 | Wrote a regression test and an invariant | "This test proves nothing" | The gate required *every* new test to fail at the parent, punishing the practice it exists to encourage |
 | Emitted one literal tab inside JSON | Run over | A malformed tool call discarded a 29-turn build that had already passed every gate |
 
-Between the second and third fixes, a run passed `regression-proven` outright. And on one
-run the gate refused a test for exactly the right reason — *"it proves the code did not
-exist, not that the behaviour was wrong"* — which is FR-13.3a working in the wild.
+Between the second and third fixes, a run passed `regression-proven` outright. And on
+one run the gate refused a test for exactly the right reason — *"it proves the code did
+not exist, not that the behaviour was wrong"* — which is FR-13.3a working in the wild.
 
-The finding worth carrying is not any of the four. It is that **a harness is not verified by
-its own authors' tests**: every test in the suite was written by somebody who already knew
-what the gate meant, so none of them could disagree with it.
+The finding worth carrying is not any of the four. It is that **a harness is not
+verified by its own authors' tests**: every test in the suite was written by somebody
+who already knew what the gate meant, so none of them could disagree with it.
 
 ### And then it built something
 
 One work item is the smallest honest claim, and not the interesting one. A factory is a
 thing you use for months, and what decides whether it is usable is the second, fifth and
-twentieth change. `scripts/product_trial.py` builds a real JSON validator through a sequence
-of work items chosen to probe where a factory actually fails:
+twentieth change. `scripts/product_trial.py` builds a real JSON validator through a
+sequence of work items chosen to probe where a factory actually fails:
 
 | Step | What it probes | What the factory getting it wrong looks like |
 | --- | --- | --- |
@@ -401,35 +400,58 @@ of work items chosen to probe where a factory actually fails:
 | A planted trailing-comma bug | recovery in code the factory already touched | fixing it by reverting the file, which passes the new test and deletes every previous change |
 | Split parsing from reporting | a change that must alter structure and nothing else | changing behaviour under cover of a refactor, which no test names |
 
-Every step's expectation **and its falsifier** are written down before the run and printed
-beside the result, because deciding afterwards what a run was testing is how every trial
-comes out a success. The report is [`docs/product-trial.md`](docs/product-trial.md).
+Every step's expectation **and its falsifier** are written down before the run and
+printed beside the result, because deciding afterwards what a run was testing is how
+every trial comes out a success. The report is
+[`docs/product-trial.md`](docs/product-trial.md).
 
+</details>
+
+## What it looks like
+
+`sf providers` answers the question a definition cannot: *what will this factory
+actually call, and can it right now?* Offline unless `--probe` is passed — a diagnostic
+that needs the network to report a network problem is not one.
+
+![sf providers](docs/images/cli-providers.svg)
+
+`sf audit --egress` enumerates every outbound destination reachable from the definition,
+including the ones it **cannot** determine. A report that silently omits what it cannot
+see is worse than none, because it reads as a complete list.
+
+![sf audit --egress](docs/images/cli-audit.svg)
+
+`sf dash` serves a local dashboard from the ledger. The interesting column is the one
+full of prose: a metric that needs an integration this factory does not have is
+*unavailable with a reason*, never zero — and `cost_per_change` says the recorded zeros
+come from a ladder that declares no prices, rather than reporting a factory that runs
+for free.
+
+![The dashboard's overview](docs/images/dashboard-overview.png)
+
+Every image here is regenerated by `python scripts/capture_screenshots.py` from a real
+run, for the same reason `docs/reference/` is generated: a screenshot captured by hand
+goes stale silently, and a stale screenshot of a CLI shows output the tool no longer
+produces.
 
 ## Reviews
 
-The design was reviewed adversarially before it was implemented and the code twice after,
-and the reports are kept unedited in [`docs/reviews/`](docs/reviews) — including the
-findings we **declined** to act on, because a review record that preserves only the accepted
-findings is not a review record.
+The design was reviewed adversarially before it was implemented and the code twice
+after, and the reports are kept unedited in [`docs/reviews/`](docs/reviews) — including
+the findings we **declined** to act on, because a review record that preserves only the
+accepted findings is not a review record.
 
-One pattern accounts for most of what the code reviews found, and it is worth stating
-plainly: **a control that exists and is never called**. Nine of the first round's eleven
-critical findings had that shape; the second round found whole subsystems with no caller —
-identity, retention, spend caps and the improvement loop were complete, tested, and reachable
-from nothing, so a factory enforced no human checkpoints and no budget while `sf principals`
-described who could approve what.
-
-The second lesson is sharper and is why every fix here carries a test confirmed failing
-first: **six of the first round's defects were held in place by a test that asserted them.**
-The second round found twenty-nine more, including a test named
-`test_secrets_are_passed_by_environment_not_on_the_command_line` whose assertion required
-that they *were* on the command line.
+Two patterns account for most of what the reviews found, and both are worth stating
+plainly: **a control that exists and is never called** — nine of the first round's
+eleven critical findings had that shape — and **a defect held in place by a test that
+asserted it** — six of them, including a test named
+`test_secrets_are_passed_by_environment_not_on_the_command_line` whose assertion
+required that they *were* on the command line.
 
 Three design findings changed the design materially:
 
-- `regression-proven` was satisfiable by an import error at the parent commit — the one-line
-  bypass that a small model produces by default.
+- `regression-proven` was satisfiable by an import error at the parent commit — the
+  one-line bypass that a small model produces by default.
 - Memory corroboration was defined over *runs*, so two agents reading the same planted
   issue comment laundered untrusted text into canon.
 - The acceptance experiment had strawman controls and exempted exactly the criteria most
@@ -450,9 +472,9 @@ ruff format . && ruff check . && mypy && pytest
 python scripts/run_offline_tests.py   # the whole suite, with the network denied
 ```
 
-All four must be clean. See [CONTRIBUTING.md](CONTRIBUTING.md) for the standing positions
-you'd otherwise discover in review, and [SECURITY.md](SECURITY.md) for the threat model —
-including what it does **not** defend against.
+All four must be clean. See [CONTRIBUTING.md](CONTRIBUTING.md) for the standing
+positions you'd otherwise discover in review, and [SECURITY.md](SECURITY.md) for the
+threat model — including what it does **not** defend against.
 
 ## License
 

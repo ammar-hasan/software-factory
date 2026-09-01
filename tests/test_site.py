@@ -34,6 +34,17 @@ def test_a_wrapped_paragraph_is_one_paragraph() -> None:
     assert "continues on the following" in rendered
 
 
+def test_emphasis_may_span_a_wrap_boundary() -> None:
+    """Inlining each line as it arrives silently drops every span the wrap splits in
+    two — and these documents wrap at ninety columns, so half of them split."""
+    rendered = markdown(
+        'You describe work — *"the CSV importer\nmangles BOM headers"*. Yes.\n\nWhat landed includes **a test file the\nfactory wrote itself** — really.'
+    )
+
+    assert "<em>" in rendered and "</em>" in rendered
+    assert "<strong>a test file the factory wrote itself</strong>" in rendered
+
+
 def test_a_blank_line_starts_a_new_paragraph() -> None:
     """The other half: joining everything would run the whole document together."""
     assert markdown("First.\n\nSecond.").count("<p>") == 2
@@ -54,7 +65,7 @@ def test_html_comments_do_not_reach_the_page() -> None:
     rendered = markdown("<!-- do not edit by hand -->\n\n# Title\n")
 
     assert "do not edit" not in rendered
-    assert "<h1>Title</h1>" in rendered
+    assert '<h1 id="title">Title</h1>' in rendered
 
 
 def test_a_table_renders_as_a_table() -> None:
@@ -94,6 +105,51 @@ def test_an_image_path_points_at_the_copied_directory() -> None:
     assert 'src="images/a.png"' in inline("![a](docs/images/a.png)")
 
 
+def test_details_and_summary_pass_through_the_renderer() -> None:
+    """The README's progressive disclosure is raw HTML that renders natively on GitHub;
+    the site must let exactly those tags through, or the sections render as text."""
+    rendered = markdown(
+        "<details>\n<summary><strong>More</strong></summary>\n\nBody.\n\n</details>"
+    )
+
+    assert "<details>" in rendered
+    assert "</details>" in rendered
+    assert "<summary><strong>More</strong></summary>" in rendered
+
+
+def test_the_raw_html_allowlist_is_strict() -> None:
+    """The passthrough is an allowlist, not a policy of looking the other way: a script
+    or a div in prose is text on the page, not markup."""
+    rendered = markdown("<script>alert(1)</script>")
+
+    assert "<script>" not in rendered
+    assert "&lt;script&gt;" in rendered
+    assert "<div>" not in markdown("<div>not on the list</div>")
+
+
+def test_every_heading_gets_a_unique_anchor() -> None:
+    """The table of contents and every in-page link hang off heading ids; two sections
+    with the same title must not collide."""
+    rendered = markdown("## The refusal, explained\n\n## The refusal, explained\n")
+
+    assert '<h2 id="the-refusal-explained">' in rendered
+    assert '<h2 id="the-refusal-explained-2">' in rendered
+
+
+def test_a_diagram_link_becomes_a_lazy_embed() -> None:
+    """An image whose link targets a shipped interactive diagram renders as a poster with
+    the iframe one click away -- not four interactive documents loading up front."""
+    rendered = inline(
+        "[![the machine](docs/diagrams/stage-machine.workflow.png)]"
+        "(docs/diagrams/stage-machine.workflow.html)"
+    )
+
+    assert 'data-diagram="diagrams/stage-machine.workflow.html"' in rendered
+    assert 'src="diagrams/stage-machine.workflow.png"' in rendered
+    assert "diagram-load" in rendered
+    assert "<iframe" not in rendered
+
+
 def test_every_page_has_a_source_or_is_a_generated_report(tmp_path: Path) -> None:
     """A page whose source moved 404s for every reader while the build reports success.
 
@@ -124,6 +180,23 @@ def test_the_site_builds(tmp_path: Path) -> None:
     index = (out / "index.html").read_text(encoding="utf-8")
     assert "<title>Software Factory</title>" in index
     assert 'href="cli.html"' in index
+
+
+@pytest.mark.integration
+def test_the_landing_does_not_repeat_the_hero(tmp_path: Path) -> None:
+    """The hero carries the README's title and pitch; rendering the body's own copy under
+    the film reads the same paragraph twice on the project's front page."""
+    out = tmp_path / "_site"
+    subprocess.run(
+        [sys.executable, "scripts/build_site.py", "--out", str(out)],
+        cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True,
+        check=True,
+    )
+    index = (out / "index.html").read_text(encoding="utf-8")
+
+    assert index.count("Hand it a bug report") == 1
+    assert "The refusal is the point." in index, "the body keeps its lead-in"
 
 
 def test_the_film_appears_on_the_overview_and_nowhere_else(tmp_path: Path) -> None:
@@ -253,3 +326,91 @@ def test_no_diagram_claims_a_gate_that_does_not_exist() -> None:
     named = set(re.findall(r"\b(?:coverage-of-criteria|criterion-observed-failing)\b", text))
 
     assert named == set(), f"diagrams name gates that are not in BASELINE_GATES: {sorted(named)}"
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(scope="module")
+def built_site(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """One build for the whole-page invariants below."""
+    out = tmp_path_factory.mktemp("site") / "_site"
+    subprocess.run(
+        [sys.executable, "scripts/build_site.py", "--out", str(out)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=True,
+    )
+    return out
+
+
+def test_every_in_page_link_resolves_to_an_anchor_on_the_page(built_site: Path) -> None:
+    """A table of contents that links to ids nobody rendered is a list of dead ends."""
+    import re
+
+    for page in built_site.glob("*.html"):
+        text = page.read_text(encoding="utf-8")
+        ids = set(re.findall(r'id="([^"]+)"', text))
+        headings = re.findall(r"<h[1-4][ >]", text)
+        anchored = re.findall(r'<h[1-4] id="[^"]+"', text)
+
+        assert len(headings) == len(anchored), f"{page.name}: a heading has no id"
+        for fragment in re.findall(r'href="#([^"]+)"', text):
+            assert fragment in ids, f"{page.name}: #{fragment} has no target on the page"
+
+
+def test_diagram_embeds_point_at_diagrams_actually_shipped(built_site: Path) -> None:
+    """A lazy embed whose target was never copied is a button that loads a 404."""
+    import re
+
+    diagrams = built_site / "diagrams"
+    if not diagrams.is_dir():
+        pytest.skip("no diagrams in this checkout")
+
+    index = (built_site / "index.html").read_text(encoding="utf-8")
+    targets = re.findall(r'data-diagram="(diagrams/[^"]+\.html)"', index)
+
+    assert targets, "the landing page has no interactive diagram embeds"
+    for target in targets:
+        assert (built_site / target).is_file(), f"embed target was not shipped: {target}"
+
+
+def test_no_built_page_or_asset_fetches_anything_external(built_site: Path) -> None:
+    """Local-first is the claim; a page that phones a CDN is the claim disproven.
+
+    The one allowed external URL is the repository's own link in the navigation. The
+    copied diagram artefacts under `diagrams/` are generated by a separate tool with its
+    own checks and are out of scope here.
+    """
+    import re
+
+    allowed = (
+        "https://github.com/ammar-hasan/software-factory",  # the repository link in the nav
+        "https://your-host/",  # a placeholder endpoint inside a README code block, not fetched
+    )
+    files = list(built_site.glob("*.html")) + list((built_site / "site").glob("*"))
+
+    offenders: dict[str, list[str]] = {}
+    for page in files:
+        for url in re.findall(r"https://[^\s\"'<>)\]]+", page.read_text(encoding="utf-8")):
+            if not any(url.startswith(ok) for ok in allowed):
+                offenders.setdefault(page.name, []).append(url)
+
+    assert not offenders, f"external URLs found: {offenders}"
+
+
+def test_the_landing_page_carries_the_interactive_pieces(built_site: Path) -> None:
+    """The hero pipeline and the terminal replay are the landing page's argument; both
+    must be present, motion-guarded, and pausable off-screen."""
+    index = (built_site / "index.html").read_text(encoding="utf-8")
+
+    assert "data-pipeline" in index, "the hero stage machine is missing"
+    assert "data-terminal" in index, "the terminal replay is missing"
+    assert "details" in index, "the README's progressive disclosure did not render"
+
+    pipeline = (built_site / "site" / "pipeline.js").read_text(encoding="utf-8")
+    assert "prefers-reduced-motion" in pipeline
+    assert "IntersectionObserver" in pipeline, "the animation must pause off-screen"
+
+    terminal = (built_site / "site" / "terminal.js").read_text(encoding="utf-8")
+    assert "prefers-reduced-motion" in terminal
