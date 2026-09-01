@@ -3040,6 +3040,224 @@ def stop_clear(
     raise typer.Exit(EXIT_OK)
 
 
+skill_app = typer.Typer(
+    help="Skills: what this factory declares, and running one directly.", no_args_is_help=True
+)
+app.add_typer(skill_app, name="skill")
+
+
+@skill_app.command("list")
+def skill_list(root: RootArg = Path(), as_json: JsonOpt = False) -> None:
+    """Every skill, its status, and the arguments it accepts when invoked."""
+    try:
+        definition = load_strict(root)
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    rows = []
+    for owner, skill in _all_skills(definition):
+        spec = skill.definition
+        rows.append(
+            {
+                "name": skill.name,
+                "owner": owner,
+                "status": spec.status.value,
+                "description": spec.description,
+                "invocable": bool(spec.arguments),
+                "arguments": {
+                    name: {
+                        "description": arg.description,
+                        "required": arg.required,
+                        "default": arg.default,
+                    }
+                    for name, arg in sorted(spec.arguments.items())
+                },
+            }
+        )
+
+    if as_json:
+        _emit({"ok": True, "skills": rows})
+        raise typer.Exit(EXIT_OK)
+
+    if not rows:
+        console.print("[dim]this factory declares no skills[/]")
+        raise typer.Exit(EXIT_OK)
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("skill", "owner", "status", "arguments"):
+        table.add_column(column, overflow="fold")
+    for row in rows:
+        args = ", ".join(f"{n}{'' if a['required'] else '?'}" for n, a in row["arguments"].items())
+        table.add_row(
+            str(row["name"]),
+            str(row["owner"]),
+            str(row["status"]),
+            args or "[dim]not invocable[/]",
+        )
+    console.print(table)
+    console.print(
+        "[dim]? marks an optional argument. A skill with none is selected by the "
+        "registry for a run rather than invoked.[/]"
+    )
+    raise typer.Exit(EXIT_OK)
+
+
+@skill_app.command("render")
+def skill_render(
+    name: Annotated[str, typer.Argument(help="Which skill.")],
+    root: RootArg = Path(),
+    arg: Annotated[list[str] | None, typer.Option("--arg", help="name=value, repeatable.")] = None,
+    as_json: JsonOpt = False,
+) -> None:
+    """Show what a skill's body becomes with these arguments, without running anything.
+
+    The cheap half of invocation, and the one worth having on its own: a skill whose
+    rendered prompt nobody can see before paying for a run is a prompt debugged by
+    inference.
+    """
+    from software_factory.skills.registry import render
+
+    try:
+        definition = load_strict(root)
+        skill = _find_skill(definition, name)
+        body = render(skill.body, dict(skill.definition.arguments), _arg_map(arg))
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    if as_json:
+        _emit({"ok": True, "skill": name, "body": body})
+    else:
+        console.print(body)
+    raise typer.Exit(EXIT_OK)
+
+
+@skill_app.command("run")
+def skill_run(
+    name: Annotated[str, typer.Argument(help="Which skill to run.")],
+    root: RootArg = Path(),
+    repo: Annotated[Path, typer.Option("--repo", help="The repository to work in.")] = Path(),
+    arg: Annotated[list[str] | None, typer.Option("--arg", help="name=value, repeatable.")] = None,
+    state: Annotated[
+        Path, typer.Option("--state", help="Where run state and the ledger live.")
+    ] = Path(".factory"),
+    allow_unsandboxed: Annotated[
+        bool, typer.Option(help="Run without OS sandboxing. Only when none is available.")
+    ] = False,
+    as_json: JsonOpt = False,
+) -> None:
+    """Run a skill directly, as its own work item.
+
+    Skills were only ever *selected* by the registry for a run in progress. Being able to
+    invoke one -- "run the triage skill over this backlog" -- is a different capability, and
+    the lifecycle machinery already carries everything it needs: a skill declares its scope,
+    its owners and its evals.
+
+    It goes through the ordinary stage machine rather than a shortcut. A skill run that
+    skipped the gates would be a way to get unreviewed work through the factory by naming
+    it differently, which is the shape of hole this project spends most of its effort not
+    having.
+    """
+    from software_factory.orchestrator import SourceContext, WorkClass, WorkItem, new_id
+    from software_factory.orchestrator.coordinator import local_coordinator
+    from software_factory.skills.registry import render
+
+    try:
+        definition = load_strict(root)
+        skill = _find_skill(definition, name)
+        body = render(skill.body, dict(skill.definition.arguments), _arg_map(arg))
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    item = WorkItem(
+        id=new_id(),
+        factory=definition.factory.name,
+        title=f"skill: {skill.name}",
+        request=body,
+        source=SourceContext(provider="cli", kind="skill", ref=skill.name),
+        work_class=WorkClass.CHORE,
+    )
+
+    provider = _resolve_provider()
+    if provider is None:
+        _fail(
+            FactoryError(
+                "no model provider is configured, so this run would produce nothing verifiable",
+                remediation=(
+                    "Set SF_PROVIDER_ENDPOINT to a model endpoint, or use `sf skill render` "
+                    "to see what this skill would ask for without running it."
+                ),
+            ),
+            as_json,
+        )
+        return
+
+    coordinator = local_coordinator(
+        definition,
+        repo=repo,
+        state_dir=state,
+        provider=provider,
+        allow_unsandboxed=allow_unsandboxed,
+    )
+    coordinator.run(item)
+
+    result = {
+        "ok": item.blocker is None,
+        "workItem": item.id,
+        "skill": skill.name,
+        "stage": item.stage.value,
+        "blocker": item.blocker.value if item.blocker else None,
+        "action": item.blocker_action,
+    }
+    if as_json:
+        _emit(result)
+    else:
+        console.print(f"[bold]{skill.name}[/] → {item.stage.value}  [dim]{item.id}[/]")
+        if item.blocker:
+            console.print(f"[yellow]blocked[/] {item.blocker.value} — {item.blocker_action}")
+    raise typer.Exit(EXIT_OK if item.blocker is None else EXIT_FAILED)
+
+
+def _all_skills(definition: Any) -> list[tuple[str, Any]]:
+    """Every skill in the tree, with who owns it. Agent skills included.
+
+    A listing that showed only factory-level skills would hide the ones an agent carries,
+    which are the ones most likely to be invocable.
+    """
+    found: list[tuple[str, Any]] = []
+    for agent_name, agent in sorted(definition.agents.items()):
+        for skill in agent.skills:
+            found.append((agent_name, skill))
+    for skill in definition.skills.values():
+        found.append(("factory", skill))
+    return sorted(found, key=lambda pair: (pair[1].name, pair[0]))
+
+
+def _find_skill(definition: Any, name: str) -> Any:
+    matches = [skill for _owner, skill in _all_skills(definition) if skill.name == name]
+    if not matches:
+        known = ", ".join(sorted({s.name for _o, s in _all_skills(definition)})) or "none"
+        raise FactoryError(
+            f"no skill named {name!r} in this factory",
+            remediation=f"Declared skills: {known}.",
+        )
+    return matches[0]
+
+
+def _arg_map(pairs: list[str] | None) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for pair in pairs or []:
+        key, sep, value = pair.partition("=")
+        if not key or not sep:
+            raise FactoryError(
+                f"--arg expects name=value, got {pair!r}",
+                remediation="Write --arg path=src/importers/csv.py",
+            )
+        values[key.strip()] = value
+    return values
+
+
 def main() -> None:
     """Console-script entry point."""
     app()

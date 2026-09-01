@@ -550,6 +550,31 @@ class SkillAppliesTo(Strict):
     languages: tuple[str, ...] = ()
 
 
+class SkillArgument(Strict):
+    """One named input a skill accepts when it is invoked directly.
+
+    Skills were only ever *selected* by the registry for a run. A skill that can also be
+    invoked -- "run the triage skill over this backlog" -- needs a way to be told what to
+    act on, and a free-text prompt is not that: it cannot be validated, cannot be defaulted,
+    and cannot be checked before a model is paid to discover the argument was missing.
+    """
+
+    description: str = Field(min_length=1, max_length=300)
+    required: bool = True
+    default: str | None = None
+
+    @model_validator(mode="after")
+    def _a_required_argument_has_no_default(self) -> Self:
+        """A default makes an argument optional. Declaring both says two things at once,
+        and the reader has to guess which one the code believes."""
+        if self.required and self.default is not None:
+            raise ValueError(
+                "an argument with a default is not required; set `required: false` or "
+                "remove the default"
+            )
+        return self
+
+
 class SkillDefinition(Strict):
     """``skills/<name>/SKILL.md`` or ``agents/<a>/skills/<name>/SKILL.md`` (FR-7.1)."""
 
@@ -564,6 +589,11 @@ class SkillDefinition(Strict):
     supersedes: tuple[Name, ...] = ()
     superseded_by: Name | None = Field(default=None, alias="supersededBy")
     sample_fraction: float = Field(default=0.25, alias="sampleFraction", ge=0.0, le=1.0)
+    arguments: dict[str, SkillArgument] = Field(default_factory=dict)
+    """Named inputs, when this skill can be invoked directly as well as selected.
+
+    Empty for most skills: a skill that only ever informs a run needs no arguments, and
+    requiring them would make the common case ceremonial."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 

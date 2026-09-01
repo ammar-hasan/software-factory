@@ -15,8 +15,10 @@ from __future__ import annotations
 import enum
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from software_factory.definition.models import AgentRole, SkillStatus, Stage
+from software_factory.errors import ErrorCode, FactoryError
 from software_factory.memory.similarity import jaccard, jaccard_of, tokens
 from software_factory.surfaces import surfaces_overlap
 
@@ -581,3 +583,59 @@ def _scope_overlap(left: SkillRecord, right: SkillRecord) -> float:
     if not a or not b:
         return 0.0
     return len(a & b) / len(a | b)
+
+
+#: What an argument placeholder looks like in a skill body.
+ARGUMENT_PATTERN = re.compile(r"\{\{\s*(?P<name>[a-z0-9_]+)\s*\}\}")
+
+
+class SkillArgumentError(FactoryError):
+    """A skill was invoked with arguments it does not accept, or without ones it needs."""
+
+    code = ErrorCode.INVALID_REQUEST
+
+
+def render(body: str, declared: dict[str, Any], supplied: dict[str, str]) -> str:
+    """Substitute `{{name}}` placeholders in a skill body.
+
+    Refuses rather than guesses, in both directions. An unknown argument is a typo or a
+    misunderstanding, and silently ignoring it means the caller believes they configured
+    something they did not. A missing required argument leaves `{{path}}` in the prompt,
+    which a model reads as an instruction to look for a file literally called that -- so
+    the check happens before anything is spent, not after a run produces something odd.
+
+    Placeholders with no declared argument are left alone. A skill body is prose, and prose
+    contains braces; only what the skill declares is treated as a slot.
+    """
+    unknown = sorted(set(supplied) - set(declared))
+    if unknown:
+        raise SkillArgumentError(
+            f"this skill does not accept {', '.join(unknown)}",
+            remediation=("It accepts: " + (", ".join(sorted(declared)) or "no arguments") + "."),
+        )
+
+    values: dict[str, str] = {}
+    missing: list[str] = []
+    for name, spec in declared.items():
+        if name in supplied:
+            values[name] = supplied[name]
+        elif getattr(spec, "default", None) is not None:
+            values[name] = str(spec.default)
+        elif getattr(spec, "required", True):
+            missing.append(name)
+    if missing:
+        raise SkillArgumentError(
+            f"this skill needs {', '.join(sorted(missing))}",
+            remediation=(
+                "Pass each with --arg name=value. "
+                + "; ".join(
+                    f"{n}: {getattr(declared[n], 'description', '')}" for n in sorted(missing)
+                )
+            ),
+        )
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group("name")
+        return values.get(name, match.group(0))
+
+    return ARGUMENT_PATTERN.sub(replace, body)

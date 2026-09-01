@@ -51,6 +51,9 @@ cannot be scripted, and PR-2 makes the local path the reference one.
 | `sf schedule due` | What would fire right now, without firing it. |
 | `sf schedule list` | Every schedule this factory declares, and when each next fires. |
 | `sf schedule run` | Fire everything due, through the same intake path as any other event. |
+| `sf skill list` | Every skill, its status, and the arguments it accepts when invoked. |
+| `sf skill render` | Show what a skill's body becomes with these arguments, without running anything. |
+| `sf skill run` | Run a skill directly, as its own work item. |
 | `sf spec induct` | Propose draft spec units from an existing codebase. |
 | `sf stop clear` | Withdraw a stop so the work can be resumed. |
 | `sf stop list` | Every outstanding stop. |
