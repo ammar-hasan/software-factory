@@ -53,3 +53,7 @@ htmlcov/
 .factory/runs/
 .factory/cache/
 *.log
+
+# Written by the security job to audit the pinned dependency set. Never committed:
+# it describes one runner, not the project.
+audit-requirements.txt
