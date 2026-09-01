@@ -22,6 +22,7 @@ from typing import Annotated, Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from software_factory import SCHEMA_VERSIONS, __version__
@@ -4444,6 +4445,90 @@ def spec_template(
                 f"[yellow]{section.name} cannot be required here[/] [dim]— {section.evidence}[/]"
             )
     raise typer.Exit(EXIT_OK)
+
+
+@workspace_app.command("audit")
+def workspace_audit(
+    root: Annotated[Path, typer.Option("--root", help="The workspace directory.")] = Path(),
+    outliers_only: Annotated[
+        bool, typer.Option("--outliers", help="Only factories far from the workspace median.")
+    ] = False,
+    as_json: JsonOpt = False,
+) -> None:
+    """Is any factory in trouble, and are they drifting apart?
+
+    Exits non-zero when something is broken -- a definition that does not load, or a ledger
+    whose hash chain does not verify. Divergence never fails the command: factories
+    legitimately differ, and a report that treats a choice as an error trains people to stop
+    reading it, which is when it stops being able to tell them about the broken one.
+    """
+    from software_factory.observability.audit import Severity, audit_path
+    from software_factory.observability.audit import outliers as find_outliers
+
+    result = audit_path(root)
+    extra = find_outliers(result)
+
+    if as_json:
+        _emit(
+            {
+                "ok": result.ok,
+                **result.as_dict(),
+                "outliers": [f.as_dict() for f in extra],
+            }
+        )
+        raise typer.Exit(EXIT_OK if result.ok else EXIT_UNUSABLE)
+
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("factory", "repositories", "runs", "ledger"):
+        table.add_column(column, overflow="fold")
+    for health in result.factories:
+        if not health.loaded:
+            ledger_state = "[red]definition failed to load[/]"
+        elif health.ledger_verifies is None:
+            ledger_state = "[dim]no runs yet[/]"
+        elif health.ledger_verifies:
+            ledger_state = "[green]verifies[/]"
+        else:
+            ledger_state = "[bold red]CHAIN BROKEN[/]"
+        table.add_row(
+            health.name,
+            ", ".join(health.repositories) or "[dim]—[/]",
+            "[dim]—[/]" if health.runs is None else str(health.runs),
+            ledger_state,
+        )
+    console.print(table)
+    console.print()
+
+    shown = extra if outliers_only else [*result.findings, *extra]
+    colours = {
+        Severity.BROKEN: "bold red",
+        Severity.WARNING: "yellow",
+        Severity.DIVERGENCE: "cyan",
+    }
+    for severity in (Severity.BROKEN, Severity.WARNING, Severity.DIVERGENCE):
+        found = [f for f in shown if f.severity is severity]
+        if not found:
+            continue
+        console.print(f"[{colours[severity]}]{severity.value}[/]")
+        for finding in found:
+            # `escape`, because a factory called `search` rendered as `[search]` is markup
+            # to rich, and it swallowed the name -- every finding printed with an empty
+            # pair of brackets and no indication of which factory it was about, which is
+            # the one thing a cross-factory report exists to say.
+            names = escape(", ".join(finding.factories))
+            console.print(f"  [bold]{names}[/] {escape(finding.summary)}")
+            if finding.remediation:
+                console.print(f"    [dim]{escape(finding.remediation)}[/]")
+        console.print()
+
+    if result.quiet:
+        console.print(
+            f"[dim]too little history to compare: {', '.join(result.quiet)} — "
+            "their rates are not in the comparison rather than being averaged in[/]"
+        )
+    if not shown:
+        console.print("[green]nothing to report[/]")
+    raise typer.Exit(EXIT_OK if result.ok else EXIT_UNUSABLE)
 
 
 # The module-as-script entry point stays at the very bottom, and it matters that it does.

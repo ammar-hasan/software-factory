@@ -78,6 +78,7 @@ cannot be scripted, and PR-2 makes the local path the reference one.
 | `sf worker list` | Every worker, what it can do, and how much of it is in use. |
 | `sf worker release` | Hand a worker back by hand, for a run that died without releasing it. |
 | `sf worker route` | Ask where work with these labels *would* run, without claiming anything. |
+| `sf workspace audit` | Is any factory in trouble, and are they drifting apart? |
 | `sf workspace init` | Write a workspace file listing factory roots (FR-1.5). |
 | `sf workspace list` | Every factory in the workspace, side by side. |
 | `sf workspace metrics` | Fold every factory's ledger over one window, side by side. |

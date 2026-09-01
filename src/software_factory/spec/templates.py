@@ -405,9 +405,7 @@ def _files(root: Path) -> list[Path]:
         for path in root.rglob("*")
         if path.is_file()
         and path.suffix
-        and not any(
-            part in SKIP or part.startswith(".") for part in path.relative_to(root).parts
-        )
+        and not any(part in SKIP or part.startswith(".") for part in path.relative_to(root).parts)
     ]
 
 
