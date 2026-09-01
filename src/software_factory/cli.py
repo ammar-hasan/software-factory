@@ -144,6 +144,21 @@ def _container_runtime() -> dict[str, Any]:
     }
 
 
+def _ledger_at(path: Path) -> Path:
+    """The ledger, whether given the file or the state directory that holds it.
+
+    Sixteen commands take `Path to the ledger JSONL file` positionally while another eight
+    take `--state` and append `ledger.jsonl` themselves. So an operator who learns
+    `--state myfactory/.factory` from `sf agent lifecycle` and types the directory for
+    `sf spend` got `IsADirectoryError` straight through the terminal -- an uncaught
+    traceback, because it is not a `FactoryError` and nothing else was looking.
+
+    Accepting both is the smaller fix and the better interface: the two spellings mean the
+    same thing to the person typing them, and only one of them used to work.
+    """
+    return path / "ledger.jsonl" if path.is_dir() else path
+
+
 def _fail(exc: FactoryError, as_json: bool) -> None:
     """Report a deliberate failure and exit. Never a traceback: the user did nothing wrong."""
     if as_json:
@@ -505,11 +520,13 @@ app.add_typer(ledger_app, name="ledger")
 
 @ledger_app.command("verify")
 def ledger_verify(
-    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    path: Annotated[
+        Path, typer.Argument(help="The ledger file, or the state directory holding it.")
+    ],
     as_json: JsonOpt = False,
 ) -> None:
     """Verify sequence, chaining, and per-entry hashes. Names the first divergence."""
-    ledger = Ledger(path)
+    ledger = Ledger(_ledger_at(path))
     try:
         ledger.verify()
     except FactoryError as exc:
@@ -530,12 +547,14 @@ def ledger_verify(
 
 @ledger_app.command("tail")
 def ledger_tail(
-    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    path: Annotated[
+        Path, typer.Argument(help="The ledger file, or the state directory holding it.")
+    ],
     count: Annotated[int, typer.Option("-n", help="How many entries to show.")] = 20,
     as_json: JsonOpt = False,
 ) -> None:
     """Show the most recent entries."""
-    ledger = Ledger(path)
+    ledger = Ledger(_ledger_at(path))
     try:
         # A bounded window, not the whole ledger: `list(...)[-count:]` held every entry in
         # memory to show twenty of them, on a log designed to grow forever.
@@ -1147,7 +1166,9 @@ def serve(root: RootArg = Path(), as_json: JsonOpt = False) -> None:
 
 @app.command()
 def improve(
-    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    path: Annotated[
+        Path, typer.Argument(help="The ledger file, or the state directory holding it.")
+    ],
     min_size: Annotated[
         int, typer.Option("--min-size", help="Failures needed before a cluster is worth a run.")
     ] = 3,
@@ -1163,7 +1184,7 @@ def improve(
     from software_factory.improvement import Failure, cluster_failures
     from software_factory.improvement.loop import LoopState, check_effectiveness, may_propose
 
-    ledger = Ledger(path)
+    ledger = Ledger(_ledger_at(path))
     try:
         entries = list(ledger.read())
     except FactoryError as exc:
@@ -1267,7 +1288,9 @@ def improve(
 
 @app.command()
 def metrics(
-    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    path: Annotated[
+        Path, typer.Argument(help="The ledger file, or the state directory holding it.")
+    ],
     days: Annotated[int, typer.Option("--days", help="Window to report over.")] = 7,
     integration: Annotated[
         list[str] | None,
@@ -1286,7 +1309,7 @@ def metrics(
 
     from software_factory.observability import Availability, Window, compute
 
-    ledger = Ledger(path)
+    ledger = Ledger(_ledger_at(path))
     try:
         entries = list(ledger.read())
     except FactoryError as exc:
@@ -1338,7 +1361,9 @@ def metrics(
 
 @app.command()
 def dash(
-    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    path: Annotated[
+        Path, typer.Argument(help="The ledger file, or the state directory holding it.")
+    ],
     host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port")] = 8787,
     integration: Annotated[
@@ -1426,7 +1451,9 @@ def govern_classes(as_json: JsonOpt = False) -> None:
 
 @govern_app.command("seal")
 def govern_seal(
-    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    path: Annotated[
+        Path, typer.Argument(help="The ledger file, or the state directory holding it.")
+    ],
     size: Annotated[int, typer.Option("--size", help="Entries per segment.")] = 10_000,
     as_json: JsonOpt = False,
 ) -> None:
@@ -1441,7 +1468,7 @@ def govern_seal(
     from software_factory.governance import Manifest, seal
 
     manifest_path = path.with_suffix(path.suffix + ".segments")
-    ledger = Ledger(path)
+    ledger = Ledger(_ledger_at(path))
     manifest = Manifest.load(manifest_path)
     try:
         sealed = seal(ledger, manifest, size=size)
@@ -1478,7 +1505,9 @@ def govern_seal(
 
 @govern_app.command("sweep")
 def govern_sweep(
-    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    path: Annotated[
+        Path, typer.Argument(help="The ledger file, or the state directory holding it.")
+    ],
     apply: Annotated[
         bool,
         typer.Option("--apply", help="Actually tombstone. Without it, nothing is destroyed."),
@@ -1494,7 +1523,7 @@ def govern_sweep(
     from software_factory.governance import Artifact, DataClass, Retention
 
     try:
-        entries = list(Ledger(path).read())
+        entries = list(Ledger(_ledger_at(path)).read())
     except FactoryError as exc:
         _fail(exc, as_json)
         return
@@ -1533,7 +1562,9 @@ def govern_sweep(
 
 @govern_app.command("erase")
 def govern_erase(
-    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    path: Annotated[
+        Path, typer.Argument(help="The ledger file, or the state directory holding it.")
+    ],
     subject: Annotated[str, typer.Argument(help="Whose data to erase.")],
     requested_by: Annotated[str, typer.Option("--by", help="Who asked, for the receipt.")],
     apply: Annotated[bool, typer.Option("--apply", help="Actually destroy.")] = False,
@@ -1548,7 +1579,7 @@ def govern_erase(
     from software_factory.governance import Artifact, DataClass, Retention
 
     try:
-        entries = list(Ledger(path).read())
+        entries = list(Ledger(_ledger_at(path)).read())
     except FactoryError as exc:
         _fail(exc, as_json)
         return
@@ -1589,7 +1620,9 @@ def govern_erase(
 
 @govern_app.command("verify")
 def govern_verify(
-    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    path: Annotated[
+        Path, typer.Argument(help="The ledger file, or the state directory holding it.")
+    ],
     as_json: JsonOpt = False,
 ) -> None:
     """Verify the segment chain, and each sealed range against the entries still present.
@@ -1607,7 +1640,7 @@ def govern_verify(
     manifest = Manifest.load(manifest_path)
     try:
         if path.exists():
-            report = manifest.verify_against(Ledger(path))
+            report = manifest.verify_against(Ledger(_ledger_at(path)))
         else:
             manifest.verify()
             report = None
@@ -1641,7 +1674,9 @@ def govern_verify(
 
 @app.command()
 def spend(
-    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    path: Annotated[
+        Path, typer.Argument(help="The ledger file, or the state directory holding it.")
+    ],
     limit: Annotated[float, typer.Option("--limit", help="Cap in cost units.")] = 100.0,
     period_hours: Annotated[int, typer.Option("--hours", help="Window to report over.")] = 24,
     as_json: JsonOpt = False,
@@ -1656,7 +1691,7 @@ def spend(
 
     from software_factory.economics import Ledgerless, SpendCap, charges_from
 
-    ledger = Ledger(path)
+    ledger = Ledger(_ledger_at(path))
     try:
         entries = list(ledger.read())
     except FactoryError as exc:
@@ -1802,7 +1837,9 @@ app.add_typer(checkpoints_app, name="checkpoints")
 
 @checkpoints_app.command("list")
 def checkpoints_list(
-    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    path: Annotated[
+        Path, typer.Argument(help="The ledger file, or the state directory holding it.")
+    ],
     root: Annotated[Path, typer.Option("--factory", help="Factory root, for principals.")] = Path(),
     as_json: JsonOpt = False,
 ) -> None:
@@ -1818,7 +1855,9 @@ def checkpoints_list(
 
     try:
         definition = load_strict(root)
-        book = CheckpointBook.from_ledger(Ledger(path).read(), directory_from(definition))
+        book = CheckpointBook.from_ledger(
+            Ledger(_ledger_at(path)).read(), directory_from(definition)
+        )
     except FactoryError as exc:
         _fail(exc, as_json)
         return
@@ -1867,7 +1906,9 @@ def checkpoints_list(
 
 @checkpoints_app.command("resolve")
 def checkpoints_resolve(
-    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    path: Annotated[
+        Path, typer.Argument(help="The ledger file, or the state directory holding it.")
+    ],
     checkpoint_id: Annotated[str, typer.Argument(help="Which checkpoint to answer.")],
     principal: Annotated[str, typer.Option("--as", help="Who is deciding.")],
     answer: Annotated[str, typer.Option("--answer", help="The decision, and why.")],
@@ -1885,7 +1926,7 @@ def checkpoints_resolve(
 
     try:
         definition = load_strict(root)
-        ledger = Ledger(path)
+        ledger = Ledger(_ledger_at(path))
         book = CheckpointBook.from_ledger(ledger.read(), directory_from(definition))
     except FactoryError as exc:
         _fail(exc, as_json)
@@ -1922,7 +1963,9 @@ def checkpoints_resolve(
 
 @app.command()
 def delegation(
-    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    path: Annotated[
+        Path, typer.Argument(help="The ledger file, or the state directory holding it.")
+    ],
     as_json: JsonOpt = False,
 ) -> None:
     """Which agents served each request, in what relation, and what each cost (FR-34.4).
@@ -1937,7 +1980,7 @@ def delegation(
     from software_factory.orchestrator.delegation import tree_from
 
     try:
-        roots = tree_from(Ledger(path).read())
+        roots = tree_from(Ledger(_ledger_at(path)).read())
     except FactoryError as exc:
         _fail(exc, as_json)
         return
@@ -1971,7 +2014,9 @@ def delegation(
 
 @app.command()
 def explain(
-    path: Annotated[Path, typer.Argument(help="Path to the ledger JSONL file.")],
+    path: Annotated[
+        Path, typer.Argument(help="The ledger file, or the state directory holding it.")
+    ],
     work_item_id: Annotated[str, typer.Argument(help="Which work item to ask about.")],
     question: Annotated[str, typer.Argument(help="What you want to know.")],
     as_json: JsonOpt = False,
@@ -1990,7 +2035,7 @@ def explain(
     from software_factory.orchestrator.explain import Explainer
 
     try:
-        entries = list(Ledger(path).read())
+        entries = list(Ledger(_ledger_at(path)).read())
     except FactoryError as exc:
         _fail(exc, as_json)
         return
@@ -3557,7 +3602,7 @@ def _mailbox(state: Path, *, create: bool = False):  # type: ignore[no-untyped-d
         raise typer.Exit(EXIT_UNUSABLE)
     if create:
         path.parent.mkdir(parents=True, exist_ok=True)
-    return Mailbox(ledger=Ledger(path), state_dir=state)
+    return Mailbox(ledger=Ledger(_ledger_at(path)), state_dir=state)
 
 
 @agent_app.command("send")
@@ -3702,7 +3747,7 @@ def agent_lifecycle(
     if not path.exists():
         console.print(f"[red]no ledger at {path}[/]")
         raise typer.Exit(EXIT_UNUSABLE)
-    ledger = Ledger(path)
+    ledger = Ledger(_ledger_at(path))
     lives = lifecycle(ledger.read())
     if running_only:
         lives = [life for life in lives if life.state == "running"]
@@ -4430,7 +4475,7 @@ def mine_command(
         console.print(f"[red]no ledger at {path}[/]")
         raise typer.Exit(EXIT_UNUSABLE)
 
-    findings = Mine(scope_ref=scope_ref).run(Ledger(path).read())
+    findings = Mine(scope_ref=scope_ref).run(Ledger(_ledger_at(path)).read())
 
     if as_json:
         _emit({"ok": findings.confidence is Confidence.AVAILABLE, **findings.as_dict()})
