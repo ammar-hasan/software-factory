@@ -357,6 +357,76 @@ class TurnLoop:
                     result, RunStatus.PROVIDER_FAILED, completion.error or "provider error"
                 )
 
+            if completion.stop_reason is StopReason.FILTERED:
+                # The provider stopped its own generation. Whatever comes back is a
+                # fragment of a refused answer, and re-asking for "the corrected output"
+                # invites the model to repair text it was not allowed to finish writing.
+                # Naming it is the whole remedy: an operator who sees this changes the
+                # prompt or the endpoint, and neither is something the model can do.
+                return self._end(
+                    result,
+                    RunStatus.PROVIDER_FAILED,
+                    "the provider's content filter stopped generation"
+                    + (f": {completion.error}" if completion.error else ""),
+                )
+
+            if completion.stop_reason is StopReason.LENGTH:
+                # The answer was cut off at the output limit before it was finished.
+                # Nothing about that is a schema mistake, but the truncated half used to
+                # fall through to `_finish`, which reported it as invalid JSON -- so a
+                # model whose only fault was writing too much was told to fix a comma, and
+                # it sent an answer of the same length and was cut off in the same place.
+                # A live DESIGN stage was terminally blocked by exactly this, and the only
+                # clue anyone got was `Unterminated string`.
+                #
+                # `StopReason.LENGTH` is decoded by every adapter and was read by nothing,
+                # in an enum whose own docstring promises the turn loop acts on every
+                # value. That is the seventh control in this codebase that existed and was
+                # not wired in, and the first to cost a work item.
+                if self._advise(
+                    result,
+                    messages,
+                    "Your answer was cut off at the output limit before it finished, so "
+                    "none of it could be read. Send it again, shorter: keep every field "
+                    "the schema requires, and move long prose into a file with the tools "
+                    "you have, referencing the path instead of inlining the text. This is "
+                    "a limit on length alone -- nothing is wrong with what you said.",
+                ):
+                    continue
+                return self._end(
+                    result,
+                    RunStatus.GATE_FAILED,
+                    f"output was cut off at the provider's length limit on every one of "
+                    f"{result.repair_attempts + 1} attempts; the longest reached "
+                    f"{len(completion.text)} characters",
+                )
+
+            if not completion.wants_tools and not completion.text.strip():
+                # Nothing said and nothing called. This is what a dropped tool call looks
+                # like from inside the loop -- an adapter that could not decode the call
+                # leaves `tool_calls` empty, and a model that emits calls and no prose
+                # leaves `text` empty, so the turn arrives indistinguishable from silence.
+                # It went to `_finish`, which answered every one of them with the output
+                # schema and `Expecting value at position 0`: advice about a final answer,
+                # sent to a model that was trying to use a tool. In the trial that found
+                # this, four consecutive turns got that reply, and the run spent its whole
+                # repair budget before it ever produced an answer to repair.
+                if self._advise(
+                    result,
+                    messages,
+                    "Your last turn was empty: no output and no tool call arrived. If you "
+                    "meant to call a tool, send the call again -- it did not reach the "
+                    "harness, and malformed arguments are the usual cause. If you are "
+                    "done, reply with the output the schema requires.",
+                ):
+                    continue
+                return self._end(
+                    result,
+                    RunStatus.GATE_FAILED,
+                    f"the model returned {result.repair_attempts + 1} empty turns in a "
+                    "row: no output and no tool call",
+                )
+
             if completion.wants_tools:
                 # The calls travel with the message that made them. Appending only the
                 # text leaves the following tool results unpaired, which every real
@@ -479,6 +549,21 @@ class TurnLoop:
 
     # ------------------------------------------------------------------------ finish
 
+    def _advise(self, result: RunResult, messages: list[Message], advice: str) -> bool:
+        """Spend one repair attempt telling the model what went wrong with its turn.
+
+        Shares `repair_attempts` with schema repair on purpose: the budget bounds how many
+        turns a run may spend not making progress, and a turn spent on a truncated answer
+        is as unproductive as one spent on a malformed field. Returns False once the
+        budget is gone, so the caller ends the run with a reason of its own rather than
+        letting the failure be re-described by whatever check runs next.
+        """
+        if result.repair_attempts >= self.repair_budget:
+            return False
+        result.repair_attempts += 1
+        messages.append(Message(role=Role.USER, content=f"<harness>{advice}</harness>"))
+        return True
+
     def _finish(
         self, completion: Completion, messages: list[Message], result: RunResult
     ) -> RunResult | None:
@@ -499,11 +584,18 @@ class TurnLoop:
         if result.repair_attempts <= self.repair_budget:
             # The validation error goes back verbatim: paraphrasing it loses the detail
             # that would have fixed it (HARNESS.md E-13).
+            # `escape_delimiters` on the error, not just on the schema: the error quotes
+            # the model's own output back to it -- the offending value from jsonschema, the
+            # window around a JSON break -- and output that contained `</harness>` would
+            # otherwise close the region it is being reported inside. The one text in this
+            # prompt that the model authored is the one text that must not be trusted to
+            # stay inside its delimiters.
             messages.append(
                 Message(
                     role=Role.USER,
                     content=(
-                        f"<harness>Your output did not validate: {error}\n"
+                        f"<harness>Your output did not validate: "
+                        f"{escape_delimiters(error or '')}\n"
                         f"Required schema: {json.dumps(self.output_schema)}\n"
                         "Reply with the corrected output only.</harness>"
                     ),
@@ -567,7 +659,7 @@ def _parse_output(text: str, schema: dict[str, Any]) -> tuple[dict[str, Any] | N
     try:
         parsed = json.loads(candidate)
     except json.JSONDecodeError as exc:
-        return None, f"not valid JSON ({exc.msg} at position {exc.pos})"
+        return None, f"not valid JSON -- {_where_it_broke(candidate, exc)}"
 
     if not isinstance(parsed, dict):
         return None, f"expected a JSON object, got {type(parsed).__name__}"
@@ -588,6 +680,29 @@ def _parse_output(text: str, schema: dict[str, Any]) -> tuple[dict[str, Any] | N
         return None, f"the output schema is invalid and cannot validate anything: {exc.message}"
 
     return parsed, None
+
+
+def _where_it_broke(candidate: str, exc: json.JSONDecodeError) -> str:
+    """Name a JSON fault by showing it, rather than by counting characters to it.
+
+    `at position 1587` is feedback a model can read and cannot act on: it cannot count to
+    the 1587th character of its own output, so the repair turn it is given goes to
+    guessing. A live DESIGN stage spent its whole repair budget that way and blocked. The
+    fix is to quote the neighbourhood: a line and column the model can find, and the text
+    on either side of the break so the fault is visible rather than located.
+
+    Deliberately narrow. A wide window would echo most of a long answer back into the
+    prompt, doubling the tokens of the turn meant to shorten it.
+    """
+    window, mark = 48, min(max(exc.pos, 0), len(candidate))
+    before = candidate[max(0, mark - window) : mark]
+    after = candidate[mark : mark + window]
+    lead = "..." if mark - window > 0 else ""
+    tail = "..." if mark + window < len(candidate) else ""
+    return (
+        f"{exc.msg}, at line {exc.lineno} column {exc.colno}. "
+        f"The text there is: {lead}{before}<<HERE>>{after}{tail}"
+    )
 
 
 def _extract_calibration(output: dict[str, Any]) -> Calibration:

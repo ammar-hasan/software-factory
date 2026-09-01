@@ -314,12 +314,25 @@ jobs:
           cache-dependency-path: pyproject.toml
       - run: python -m pip install -e ".[dev]" pip-audit
       - name: Dependency vulnerabilities
-        # `--skip-editable` excludes this project itself. It is installed editable and is
-        # not on PyPI, so `--strict` treated "could not be audited" as a finding and the
-        # security job failed on every commit -- reporting the one package whose source we
-        # can see as the unauditable risk, while saying nothing about the ones we cannot.
-        # `--strict` stays: an ordinary dependency that cannot be resolved is a real gap.
-        run: pip-audit --strict --skip-editable --progress-spinner=off
+        # Audit the pinned third-party set, not the environment. This project is installed
+        # from the working tree and is not on PyPI, and under `--strict` pip-audit calls
+        # that an error however it is asked not to: `--skip-editable` still reports
+        # "distribution marked as editable", and installing non-editable only changes the
+        # sentence to "not found on PyPI". Both were tried against the real tool; the first
+        # shipped on the strength of reading the flag's name and failed every commit after.
+        #
+        # `--strict` stays, and still bites: a dependency that cannot be resolved fails the
+        # job. What changes is that the one package whose source is in this repository stops
+        # being reported as the unauditable risk while the 58 whose source is not say nothing.
+        #
+        # The guard is not ceremony. An empty or project-containing list would make this
+        # step pass while auditing nothing, which is the failure mode a security gate has.
+        run: |
+          python -m pip freeze --exclude-editable > audit-requirements.txt
+          test -s audit-requirements.txt
+          ! grep -qi '^software.factory' audit-requirements.txt
+          echo "auditing $(wc -l < audit-requirements.txt) pinned dependencies"
+          pip-audit --strict --no-deps -r audit-requirements.txt --progress-spinner=off
       - name: No credential-shaped strings outside the detectors that look for them
         run: python scripts/check_no_secrets.py
 
