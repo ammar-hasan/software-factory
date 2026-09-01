@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from software_factory.cli import app
+from software_factory.cli import EXIT_UNUSABLE, app
 from software_factory.definition.workspace import (
     WORKSPACE_FILE,
     load_workspace,
@@ -254,5 +254,5 @@ def test_sf_workspace_init_refuses_to_overwrite(tmp_path: Path) -> None:
         app, ["workspace", "init", str(root), "--name", "other", "--factory", "payments"]
     )
 
-    assert result.exit_code == 2
+    assert result.exit_code == EXIT_UNUSABLE
     assert load_workspace(root).document.name == "acme"

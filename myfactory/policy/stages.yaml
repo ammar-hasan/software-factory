@@ -1,0 +1,25 @@
+# The stage graph is configuration, not architecture (FR-4.2a).
+# A factory may declare its own, subject to two invariants: every work item has exactly
+# one current stage, and at least one non-skippable verification stage precedes handoff.
+stages:
+  - INTAKE
+  - TRIAGE
+  - DESIGN
+  - BUILD
+  - REVIEW
+  - VERIFY
+  - HANDOFF
+  - COMPLETE
+
+# Stages the conductor may not skip on its own authority. Skipping one of these needs a
+# human decision, because the conductor reads attacker-controllable text (FR-3.3a).
+nonSkippable:
+  - REVIEW
+
+# Where humans decide. These are workflow policy and your team can change them.
+# What an agent can *reach* is not here -- that comes from grants, and no instruction
+# can widen it.
+checkpoints:
+  specApproval: required
+  questionAnswering: required
+  merge: human-only

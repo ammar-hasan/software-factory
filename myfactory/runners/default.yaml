@@ -1,0 +1,13 @@
+description: Default local runner
+platform:
+  os: linux
+  arch: x86_64
+  image: ubuntu:24.04@sha256:0000000000000000000000000000000000000000000000000000000000000000
+instanceShape:
+  vcpus: 2
+  memoryGb: 4
+  diskGb: 20
+setupCommands: []
+# Deny egress by default. Add hosts here deliberately, and `sf audit` will report them.
+network: none
+timeoutSeconds: 1800

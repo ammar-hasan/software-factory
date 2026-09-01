@@ -1,0 +1,34 @@
+# Gates block a stage from advancing. Prefer deterministic checks: a gate that needs a
+# model to decide is a weaker gate.
+gates:
+  - id: calibration-present
+    stages: [TRIAGE, DESIGN, BUILD, REVIEW, VERIFY]
+    severity: block
+    remediation: Emit the structured self-assessment required by the output schema.
+
+  - id: tests-pass
+    stages: [BUILD, REVIEW]
+    severity: block
+    remediation: Run the repository's validation and attach the structured results.
+
+  - id: regression-proven
+    stages: [BUILD]
+    appliesWhen: workClass == "defect"
+    severity: block
+    # The failure at the parent commit must be an assertion about behaviour. An import
+    # or collection error does not satisfy this gate (FR-13.3a).
+    requireParentFailureClass: assertion
+    remediation: Add a test that fails at the parent commit for the right reason.
+
+  - id: evidence-complete
+    stages: [REVIEW, VERIFY]
+    severity: block
+    remediation: Attach an artifact for every claim, or remove the claim.
+
+  - id: blast-radius-clean
+    stages: [TRIAGE, DESIGN, BUILD, REVIEW, VERIFY]
+    severity: block
+    # Only escalating violations block; ordinary toolchain writes outside the workspace
+    # are reported, not fatal (FR-12.10).
+    blockOn: [escalating]
+    remediation: Keep changes inside the declared writable paths.

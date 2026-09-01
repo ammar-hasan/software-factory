@@ -6,6 +6,13 @@ Every command answers a question a person actually asks. `--json` on any of them
 machine-readable output, because a CLI that can only be read by a human is one that
 cannot be scripted, and PR-2 makes the local path the reference one.
 
+**Exit codes.** `0` the question was answered; `1` the answer is bad news — a gate
+blocked, a check failed; `3` the question cannot be answered here — no factory, no
+ledger, no configured provider. `2` is left to the argument parser and means the
+command line itself could not be read. `1` and `3` are kept apart for the same reason
+every metric here separates *unavailable* from *zero*: a script that cannot tell a
+mistyped flag from an empty ledger will treat one as the other.
+
 | Command | What it answers |
 | --- | --- |
 | `sf init` | Write a complete, valid factory definition. Works offline, needs no account. |

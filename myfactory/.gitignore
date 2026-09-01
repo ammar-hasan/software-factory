@@ -1,0 +1,4 @@
+# Local factory runtime state. The definition is the source of truth; this is not.
+state/
+runs/
+cache/

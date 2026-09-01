@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from software_factory.cli import app
+from software_factory.cli import EXIT_UNUSABLE, app
 from software_factory.definition.models import SkillArgument
 from software_factory.skills.registry import SkillArgumentError, render
 
@@ -146,14 +146,14 @@ def test_sf_skill_render_shows_the_prompt_without_running_anything(factory: Path
 def test_sf_skill_render_refuses_a_missing_argument(factory: Path) -> None:
     result = runner.invoke(app, ["skill", "render", "inspect-file", str(factory)])
 
-    assert result.exit_code == 2
+    assert result.exit_code == EXIT_UNUSABLE
     assert "path" in result.output
 
 
 def test_sf_skill_render_names_the_skills_it_knows(factory: Path) -> None:
     result = runner.invoke(app, ["skill", "render", "nonesuch", str(factory)])
 
-    assert result.exit_code == 2
+    assert result.exit_code == EXIT_UNUSABLE
     assert "inspect-file" in result.output
 
 
@@ -165,5 +165,5 @@ def test_sf_skill_run_refuses_without_a_provider_rather_than_pretending(factory:
         env={"SF_PROVIDER_ENDPOINT": ""},
     )
 
-    assert result.exit_code == 2
+    assert result.exit_code == EXIT_UNUSABLE
     assert "skill render" in json.loads(result.stdout)["error"]["remediation"]
