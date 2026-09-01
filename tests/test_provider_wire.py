@@ -632,7 +632,11 @@ def test_a_truncated_answer_is_not_reported_as_a_missing_calibration_block(wire,
                         "finish_reason": "length",
                         "message": {
                             "role": "assistant",
-                            "content": '{"findings": "strip_bom returns its input unch',
+                            # Long enough to be an answer that ran out of room rather than a
+                            # model that said almost nothing: the loop tells those apart and
+                            # only one of them is the model's to fix.
+                            "content": '{"findings": "strip_bom returns its input unchanged '
+                            + "and the header keeps its byte order mark. " * 12,
                         },
                     }
                 ]
@@ -676,6 +680,7 @@ def test_a_truncated_answer_is_not_reported_as_a_missing_calibration_block(wire,
     assert item.blocker is Blocker.GATE_FAILED_TERMINAL
     action = item.blocker_action or ""
     assert "cut off" in action, action
+    assert "output budget" not in action, "a long answer is not a budget that was too small"
     assert "calibration" not in action.lower(), (
         "a truncated answer was reported as a calibration problem"
     )

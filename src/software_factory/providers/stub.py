@@ -35,6 +35,12 @@ class StubProvider(Provider):
         self._index = 0
         self.calls: list[list[Message]] = []
         self.models: list[str] = []
+        self.max_tokens: list[int] = []
+        """The output budget each call asked for.
+
+        Recorded because it was not asked for at all: the loop never passed one, so every
+        run used whatever each adapter defaulted to and a tier's declared budget reached
+        nothing. A stub that does not record an argument cannot notice it went missing."""
 
     def complete(
         self,
@@ -42,11 +48,12 @@ class StubProvider(Provider):
         *,
         model: str,
         tools: list[dict[str, Any]] | None = None,  # noqa: ARG002 - interface conformance
-        max_tokens: int = 4096,  # noqa: ARG002 - interface conformance
+        max_tokens: int = 4096,
         temperature: float = 0.0,  # noqa: ARG002 - interface conformance
     ) -> Completion:
         self.calls.append(list(messages))
         self.models.append(model)
+        self.max_tokens.append(max_tokens)
         if self._index >= len(self._script):
             raise ProviderError(
                 f"stub script exhausted after {self._index} completion(s); the loop asked "

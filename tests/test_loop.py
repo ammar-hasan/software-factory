@@ -90,6 +90,10 @@ def ladder() -> Ladder:
                     "model": "small",
                     "contextWindow": 32000,
                     "workingSetCeiling": 20000,
+                    # Deliberately not the adapters' 4096 default: a test whose expected
+                    # value equals the default cannot tell a wired control from an unwired
+                    # one, which is the whole thing being checked.
+                    "maxOutputTokens": 3000,
                     "local": True,
                 },
                 {
@@ -98,6 +102,7 @@ def ladder() -> Ladder:
                     "model": "mid",
                     "contextWindow": 128000,
                     "workingSetCeiling": 90000,
+                    "maxOutputTokens": 8000,
                 },
             ],
             "defaultTier": "local-small",
@@ -662,7 +667,9 @@ def test_a_mistake_inside_the_loop_still_raises() -> None:
 
 def test_a_truncated_answer_is_reported_as_a_length_limit_not_as_broken_json() -> None:
     """`StopReason.LENGTH` is decoded by every adapter and was acted on by nothing."""
-    half = '{"summary": "the change I made was'  # cut mid-string, as a real cap does
+    # A real answer that ran out of room, not a model that said almost nothing: the two
+    # have different causes and the loop tells them apart below.
+    half = '{"summary": "the change I made was ' + "long. " * 90
     provider = StubProvider([truncated(half), says(valid_output())])
     result = loop(provider, schema=OUTPUT_SCHEMA).run()
 
@@ -676,7 +683,8 @@ def test_a_truncated_answer_is_reported_as_a_length_limit_not_as_broken_json() -
 
 
 def test_repeated_truncation_ends_the_run_saying_it_was_truncated() -> None:
-    provider = StubProvider([truncated('{"summary": "x') for _ in range(4)])
+    long_half = '{"summary": "' + "still going. " * 60
+    provider = StubProvider([truncated(long_half) for _ in range(4)])
     result = loop(provider, schema=OUTPUT_SCHEMA, repair_budget=3).run()
 
     assert result.status is RunStatus.GATE_FAILED
@@ -684,6 +692,37 @@ def test_repeated_truncation_ends_the_run_saying_it_was_truncated() -> None:
     assert "cut off at the provider's length limit" in result.reason
     # The count is the operator's evidence that shortening was asked for and did not help.
     assert "4 attempts" in result.reason
+
+
+def test_a_near_empty_answer_that_reports_length_blames_the_budget_not_the_model() -> None:
+    """The defect this project keeps finding, this time in the fix I shipped this morning.
+
+    A live REVIEW stage was told "your answer was cut off, send it again shorter" three
+    times while its longest answer was 159 characters. It was not being long: the output
+    budget covers reasoning and content together, the model spent it thinking, and the
+    provider reported `length` with almost nothing to show. Three repair attempts went on
+    advice about the wrong thing, and the run ended.
+    """
+    provider = StubProvider([truncated("Checking the parser.")])
+    result = loop(provider, schema=OUTPUT_SCHEMA).run()
+
+    assert result.status is RunStatus.GATE_FAILED
+    assert result.reason is not None
+    assert "output budget" in result.reason
+    assert "maxOutputTokens" in result.reason, "the reason must name what an operator changes"
+    # Not spent on repair: no amount of "be shorter" fixes a budget that is too small.
+    assert result.repair_attempts == 0
+
+
+def test_the_tier_decides_the_output_budget() -> None:
+    """Every adapter defaulted to 4096 and nothing could change it, so a tier could declare
+    a 200k context window and still be capped at an output the definition could not see."""
+    provider = StubProvider([says(valid_output())])
+    turn = loop(provider, schema=OUTPUT_SCHEMA)
+
+    turn.run()
+
+    assert provider.max_tokens == [turn.routing.tier.max_output_tokens]
 
 
 def test_an_empty_turn_is_named_as_an_empty_turn() -> None:

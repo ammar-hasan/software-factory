@@ -58,6 +58,13 @@ class RunStatus(enum.StrEnum):
     CANCELLED = "cancelled"
 
 
+#: Below this, a completion that reports `length` did not run out of room for its *answer*.
+#:
+#: The budget covers reasoning and content together, so a model that thinks its way through
+#: the whole allowance emits a sentence and the provider still says `length`. Telling it to
+#: be shorter is advice about the wrong thing, and it will produce the same result again.
+_TERSE = 400
+
 #: Delimiters for the prompt's trust regions. Not user-controllable: occurrences in
 #: content are escaped so a payload cannot forge a boundary (HARNESS.md L-3).
 REGIONS = (
@@ -309,6 +316,11 @@ class TurnLoop:
                     messages,
                     model=self.routing.tier.model,
                     tools=self._tool_schemas(),
+                    # Declared by the tier, not by whatever each adapter happened to default
+                    # to. Every one of them used 4096 and nothing could change it, so a tier
+                    # could declare a 200k window and still be capped at an output budget the
+                    # definition could not see.
+                    max_tokens=self.routing.tier.max_output_tokens,
                 )
             except ProviderError as exc:
                 # A malformed tool call is the model's mistake, not the provider's, and it
@@ -399,6 +411,19 @@ class TurnLoop:
                 # in an enum whose own docstring promises the turn loop acts on every
                 # value. That is the seventh control in this codebase that existed and was
                 # not wired in, and the first to cost a work item.
+                # What to say depends on what came back, and the first version of this did
+                # not look. A live REVIEW stage was told to be shorter three times while its
+                # longest answer was 159 characters: the budget had gone on reasoning, which
+                # shares it with content, so "be shorter" was advice about the wrong thing
+                # and the three attempts were spent before the run ended.
+                if len(completion.text) < _TERSE:
+                    return self._end(
+                        result,
+                        RunStatus.GATE_FAILED,
+                        f"the tier's output budget of {self.routing.tier.max_output_tokens} "
+                        f"tokens ran out before {len(completion.text)} characters of answer "
+                        "were produced -- raise `maxOutputTokens` for this tier",
+                    )
                 if self._advise(
                     result,
                     messages,

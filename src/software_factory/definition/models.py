@@ -263,12 +263,51 @@ class Tier(Strict):
     model: str
     context_window: int = Field(alias="contextWindow", gt=0)
     working_set_ceiling: int = Field(alias="workingSetCeiling", gt=0)
+    max_output_tokens: int = Field(default=0, alias="maxOutputTokens", gt=0)
+    """How much this tier may produce in one turn.
+
+    Declared per tier because it is a property of the model, and because the default is
+    wrong for a reasoning model: the budget covers reasoning *and* content, so a model that
+    thinks for four thousand tokens emits a sentence and the provider reports `length`. A
+    live REVIEW stage died that way -- three truncation notices, longest answer 159
+    characters -- while the harness told it to be shorter. It was not being long.
+
+    Every adapter defaulted to 4096 and nothing could change it: a tier could declare a
+    200k context window and still be capped at a fixed output the definition could not see.
+    """
     cost_per_mtok_in: float = Field(default=0.0, alias="costPerMTokIn", ge=0)
     cost_per_mtok_out: float = Field(default=0.0, alias="costPerMTokOut", ge=0)
     capabilities: tuple[str, ...] = ()
     local: bool = False
 
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_output(cls, data: Any) -> Any:
+        """A quarter of the window, when the tier does not say.
+
+        A constant default is wrong twice over: 4096 overflows a small tier's window
+        outright, and it is unrelated to the window on a large one. The share is arbitrary
+        and the relationship is not -- the answer has to fit beside the prompt, and a
+        default that cannot is a definition that fails to load for a reason nobody typed.
+        """
+        if not isinstance(data, dict):
+            return data
+        declared = data.get("maxOutputTokens", data.get("max_output_tokens"))
+        window = data.get("contextWindow", data.get("context_window"))
+        if not declared and isinstance(window, int) and window > 0:
+            data = {**data, "maxOutputTokens": max(1, min(4096, window // 4))}
+        return data
+
+    @model_validator(mode="after")
+    def _output_fits(self) -> Self:
+        if self.max_output_tokens >= self.context_window:
+            raise ValueError(
+                "`maxOutputTokens` must be smaller than `contextWindow`; the prompt has to "
+                "fit beside the answer"
+            )
+        return self
 
     @model_validator(mode="after")
     def _ceiling_fits(self) -> Self:
