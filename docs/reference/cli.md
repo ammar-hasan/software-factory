@@ -70,6 +70,7 @@ cannot be scripted, and PR-2 makes the local path the reference one.
 | `sf skill render` | Show what a skill's body becomes with these arguments, without running anything. |
 | `sf skill run` | Run a skill directly, as its own work item. |
 | `sf spec induct` | Propose draft spec units from an existing codebase. |
+| `sf spec template` | Derive the spec-unit shape that fits this repository. |
 | `sf stop clear` | Withdraw a stop so the work can be resumed. |
 | `sf stop list` | Every outstanding stop. |
 | `sf stop now` | Stop a running work item, or the whole fleet. |

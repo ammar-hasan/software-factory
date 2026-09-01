@@ -4412,6 +4412,40 @@ def media_read(
     raise typer.Exit(EXIT_OK)
 
 
+@spec_app.command("template")
+def spec_template(
+    repo: Annotated[Path, typer.Option("--repo", help="The repository to read.")] = Path(),
+    as_json: JsonOpt = False,
+) -> None:
+    """Derive the spec-unit shape that fits this repository.
+
+    One shape for every repository means the shape fits none of them: a template asking for
+    a status code in a data pipeline, or for a test anchor in a repository with no tests, is
+    a form somebody has to work around before they can say anything true.
+
+    A repository whose shape cannot be determined gets the generic template and is told so.
+    Guessing produces a template that reads as authoritative and is wrong.
+    """
+    from software_factory.spec.templates import Support, derive
+
+    template = derive(repo)
+    if as_json:
+        _emit({"ok": not template.generic, **template.as_dict()})
+        raise typer.Exit(EXIT_OK)
+
+    console.print(template.render())
+    if template.generic:
+        console.print(f"[yellow]generic[/] — {template.notes[0]}")
+    else:
+        console.print(f"[dim]{template.notes[0]}[/]")
+    for section in template.sections:
+        if section.support is Support.UNENFORCEABLE:
+            console.print(
+                f"[yellow]{section.name} cannot be required here[/] [dim]— {section.evidence}[/]"
+            )
+    raise typer.Exit(EXIT_OK)
+
+
 # The module-as-script entry point stays at the very bottom, and it matters that it does.
 # Run as `python -m software_factory.cli`, this file executes top to bottom: a guard placed
 # mid-file calls `app()` and exits *before* any command group defined below it is
