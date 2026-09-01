@@ -158,14 +158,14 @@ export default {
           <div class="eyebrow reveal">Intake</div>
           <p class="stmt reveal">Requests arrive faster than they can be worked.</p>
           <div class="queue">
-            ${chip("The CSV importer mangles BOM headers", 0, "0.05")}
-            ${chip("Reject duplicate keys", 0, "0.4")}
-            ${chip("audit auth", 0, "0.75")}
-            ${chip("make the parser handle BOMs", 1, "0.15")}
-            ${chip("Line and column in errors", 1, "0.5")}
-            ${chip("Make the errors better", 1, "0.85")}
-            ${chip("audit export", 1, "1.2")}
-            ${chip("a planted trailing-comma bug", 1, "1.55", true)}
+            ${chip("The CSV importer mangles BOM headers", 0, "0.02")}
+            ${chip("Reject duplicate keys", 0, "0.5")}
+            ${chip("audit auth", 0, "1.64")}
+            ${chip("make the parser handle BOMs", 0, "2.72")}
+            ${chip("Line and column in errors", 1, "0.15")}
+            ${chip("Make the errors better", 1, "0.75")}
+            ${chip("audit export", 1, "1.35")}
+            ${chip("a planted trailing-comma bug", 1, "1.95", true)}
           </div>
         </div>
       </div>`,
@@ -249,9 +249,9 @@ export default {
           <p class="stmt sm reveal">The model is not the product. The harness is.</p>
           <ul class="mechs">
             <li class="mech cue" data-cue="1" data-delay="0"><b>Awareness</b><span>a budgeted, cited, deterministically assembled context pack</span></li>
-            <li class="mech cue" data-cue="1" data-delay="1.1"><b>Tools</b><span>a typed registry — anything computable is computed</span></li>
-            <li class="mech cue" data-cue="1" data-delay="2.2"><b>Confidence</b><span>calibration scored against outcomes</span></li>
-            <li class="mech cue" data-cue="1" data-delay="3.2"><b>Courage</b><span>a machine-checked blast-radius contract</span></li>
+            <li class="mech cue" data-cue="1" data-delay="2.36"><b>Tools</b><span>a typed registry — anything computable is computed</span></li>
+            <li class="mech cue" data-cue="1" data-delay="5.26"><b>Confidence</b><span>calibration scored against outcomes</span></li>
+            <li class="mech cue" data-cue="1" data-delay="7.23"><b>Courage</b><span>a machine-checked blast-radius contract</span></li>
           </ul>
         </div>
       </div>`,
@@ -289,7 +289,7 @@ export default {
               `<span class="mut">       the test failed before its body ran, so it proves the code did not</span>`,
               `<span class="mut">       exist, not that the behaviour was wrong</span>`,
             ],
-            { cue: 1, delay: 0.2, size: "sm" },
+            { cue: 1, delay: 0.35, size: "sm" },
           )}
         </div>
       </div>`,
@@ -319,7 +319,7 @@ export default {
                   `<span class="cmd">sf experiment status</span>`,
                   `<span class="hold">insufficient_data</span> — no trials recorded`,
                 ],
-                { cue: 1, delay: 1.1, size: "sm" },
+                { cue: 1, delay: 2.78, size: "sm" },
               )}
               <div class="attrib cue" data-cue="2" data-delay="0.1">The central experiment has its full protocol and <b>no trials</b>. That is the state of the claim today, reported rather than rounded.</div>
             </div>

@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "assets": [
+    {
+      "file": "assets/dashboard-autonomy.png",
+      "kind": "image",
+      "sha256": "5de63097a988c9dac489d0ef2dd9900700d3644f4a962b15888f2b576d6c49d4",
+      "bytes": 46911,
+      "media": {
+        "mime": "image/png"
+      },
+      "origin": {
+        "mode": "original"
+      },
+      "rights": {
+        "status": "declared",
+        "license": "Apache-2.0",
+        "creator": "Software Factory",
+        "attribution": "Software Factory dashboard, captured by scripts/capture_screenshots.py; unretouched crop; Apache-2.0"
+      },
+      "acquiredAt": "2026-09-01T05:29:55.566Z"
+    },
+    {
+      "file": "assets/dashboard-overview.png",
+      "kind": "image",
+      "sha256": "2ba7d7e9b0f95b01fe0a827f81d527131f694df154ed23084baa99d58e1ca73b",
+      "bytes": 473075,
+      "media": {
+        "mime": "image/png"
+      },
+      "origin": {
+        "mode": "original"
+      },
+      "rights": {
+        "status": "declared",
+        "license": "Apache-2.0",
+        "creator": "Software Factory",
+        "attribution": "Software Factory dashboard, captured by scripts/capture_screenshots.py; Apache-2.0"
+      },
+      "acquiredAt": "2026-09-01T05:29:55.413Z"
+    }
+  ]
+}

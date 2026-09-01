@@ -1,0 +1,115 @@
+1
+00:00:00,200 --> 00:00:00,710
+Bugs.
+
+2
+00:00:00,710 --> 00:00:01,864
+Feature requests.
+
+3
+00:00:01,864 --> 00:00:02,943
+Escalations.
+
+4
+00:00:02,943 --> 00:00:03,928
+Alerts.
+
+5
+00:00:03,928 --> 00:00:06,038
+They arrive faster than anyone can work them.
+
+6
+00:00:06,038 --> 00:00:08,525
+What is left over is the backlog.
+
+7
+00:00:08,725 --> 00:00:13,294
+A software factory puts a coordinated fleet of specialist agents on that queue.
+
+8
+00:00:13,294 --> 00:00:19,277
+Intake, triage, design, build, review — one request carried through to a change a person can read.
+
+9
+00:00:19,477 --> 00:00:21,864
+Underneath all of it sits a single claim.
+
+10
+00:00:21,864 --> 00:00:27,219
+A modest model inside an excellent harness beats a frontier model inside a poor one.
+
+11
+00:00:27,219 --> 00:00:28,611
+That is a hypothesis.
+
+12
+00:00:28,611 --> 00:00:31,939
+The experiment written to falsify it is pre-registered.
+
+13
+00:00:32,139 --> 00:00:35,258
+Every subsystem exists because that claim depends on it.
+
+14
+00:00:35,258 --> 00:00:37,670
+A context pack, budgeted and cited.
+
+15
+00:00:37,670 --> 00:00:40,570
+Typed tools, so anything computable is computed.
+
+16
+00:00:40,570 --> 00:00:42,535
+Confidence scored against outcomes.
+
+17
+00:00:42,535 --> 00:00:45,182
+A blast radius the machine checks.
+
+18
+00:00:45,382 --> 00:00:46,272
+Gates block.
+
+19
+00:00:46,272 --> 00:00:52,063
+The keystone is regression proven: fix a defect and you owe a test that failed at the parent commit, for the right reason.
+
+20
+00:00:52,063 --> 00:00:55,631
+A test that fails on a missing import proves the code did not exist.
+
+21
+00:00:55,631 --> 00:00:57,128
+It is refused.
+
+22
+00:00:57,328 --> 00:01:00,682
+A metric with no data reports its absence, not zero.
+
+23
+00:01:00,682 --> 00:01:04,730
+Ask what the central bet has been shown, and today the answer is insufficient data.
+
+24
+00:01:04,730 --> 00:01:06,208
+No trials recorded.
+
+25
+00:01:06,208 --> 00:01:08,041
+A test keeps it that way.
+
+26
+00:01:08,241 --> 00:01:13,513
+Same definition files, same harness, same guarantees — on a laptop, or in the cloud.
+
+27
+00:01:13,513 --> 00:01:15,737
+No control plane you don't own.
+
+28
+00:01:15,937 --> 00:01:17,258
+Software factory.
+
+29
+00:01:17,258 --> 00:01:19,965
+Open source, Apache two point zero.
