@@ -112,6 +112,8 @@ class DashboardData:
                 }
             case "runs":
                 return run_index(entries)
+            case "ask":
+                return _ask(entries, params.get("q", [""])[0], params.get("item", [""])[0])
             case "run":
                 run_id = params.get("run", [""])[0]
                 if not run_id:
@@ -177,6 +179,69 @@ class DashboardData:
         return {"available": True, **store.stats()}
 
 
+#: How many work items one question may be answered across.
+#:
+#: A question asked without naming an item searches every item the ledger knows, and a
+#: page that returns forty answers has answered nothing.
+MAX_ANSWERS = 6
+
+
+def _ask(entries: list[Any], question: str, item: str) -> dict[str, Any]:
+    """Answer a question from the record, across the whole factory.
+
+    The same `Explainer` behind `sf explain`, which never calls a model: it quotes what a
+    run wrote down at the time and says plainly when the record is silent. That property is
+    what makes this safe to put on a page -- an answer box backed by a model would invent a
+    plausible history of runs nobody can check, which is the opposite of what a ledger is
+    for.
+
+    Naming an item is optional. `sf explain` requires one because a command has a person
+    who knows which item they mean; somebody looking at a dashboard usually does not, and
+    "you must already know the answer's address" is how a feature goes unused.
+    """
+    from software_factory.orchestrator.explain import Explainer
+
+    question = question.strip()
+    if not question:
+        return {
+            "view": "ask",
+            "error": "question.missing",
+            "message": "pass ?q=<question>",
+        }
+
+    explainer = Explainer.from_ledger(entries)
+    if not explainer.conversations:
+        return {
+            "view": "ask",
+            "question": question,
+            "answers": [],
+            "note": (
+                "No run has recorded a conversation yet, so there is nothing to answer "
+                "from. This never re-runs anything to find out."
+            ),
+        }
+
+    wanted = [item] if item else sorted(explainer.conversations)
+    answers = []
+    for work_item in wanted:
+        answer = explainer.answer(work_item, question)
+        if not answer.answered:
+            continue
+        answers.append({"workItem": work_item, **answer.as_dict()})
+    answers.sort(key=lambda a: -len(a.get("citations", [])))
+
+    return {
+        "view": "ask",
+        "question": question,
+        "answers": answers[:MAX_ANSWERS],
+        "searched": len(wanted),
+        "note": (
+            "Quoted from what each run recorded at the time, never reconstructed and never "
+            "re-run. Where nothing is returned, the record does not contain the answer."
+        ),
+    }
+
+
 def _unavailable(view: str, reason: str) -> dict[str, Any]:
     """A view that cannot be built says why, in the shape the client already renders.
 
@@ -196,6 +261,9 @@ VIEWS: tuple[str, ...] = (
     "evaluation",
     "registry",
 )
+
+#: Reachable, but not a tab: `ask` answers a question rather than showing a page.
+EXTRA_VIEWS: tuple[str, ...] = ("run", "ask")
 
 
 MAX_WINDOW_DAYS = 3650
@@ -363,337 +431,319 @@ INDEX_HTML = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>software factory</title>
 <style>
-  /* ============================================================ tokens */
+  /* ---------------------------------------------------------------- tokens */
   :root {
     color-scheme: dark light;
-    --bg: #06070b;
-    --ink: #f2f4fb;
-    --dim: #9aa1bb;
-    --faint: #656c86;
-    --hair: rgba(255,255,255,.075);
-    --hair-2: rgba(255,255,255,.14);
-    --glass: rgba(255,255,255,.032);
-    --glass-2: rgba(255,255,255,.055);
-    --well: rgba(0,0,0,.28);
-    --c1: #22d3ee;   /* cyan   */
-    --c2: #818cf8;   /* indigo */
-    --c3: #e879f9;   /* fuchsia*/
-    --good: #34d399;
-    --warn: #fbbf24;
-    --bad: #fb7185;
-    --r: 18px;
-    --r-sm: 11px;
-    --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, monospace;
-    --ease: cubic-bezier(.16,1,.3,1);
-    --spring: linear(0,.286 4.2%,.858 9.6%,1.05 13%,1.11 16.7%,1.06 22%,.99 28.4%,.98 36%,1.01 50%,1 71%,1);
+    /* One accent, used sparingly. A palette with three accents has none. */
+    --accent: #7c8cff;
+    --accent-2: #58e6d0;
+    --bg: #0b0c10;
+    --raise: #101218;
+    --card: #14161e;
+    --line: #1e212b;
+    --line-2: #2a2e3b;
+    --ink: #eceef5;
+    --dim: #9096a8;
+    --faint: #61667a;
+    --good: #4ec9a0;
+    --warn: #e8b458;
+    --bad: #f2748c;
+    --r: 14px;
+    --r-sm: 9px;
+    --pad: 22px;
+    --ease: cubic-bezier(.2, .8, .2, 1);
+    --spring: cubic-bezier(.34, 1.56, .64, 1);
+    /* A stack, not a download. Each entry is a genuinely good face that ships with its
+       platform, ordered so a reader gets the best one their machine has. A dashboard that
+       fetches a font is a dashboard that renders differently offline -- and this one is
+       for looking at a factory running offline. */
+    --sans: "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text",
+            "Segoe UI", Inter, Roboto, "Helvetica Neue", system-ui, sans-serif;
+    --display: "SF Pro Display", -apple-system, BlinkMacSystemFont,
+               "Segoe UI Variable Display", "Segoe UI", Inter, system-ui, sans-serif;
+    --mono: "SF Mono", ui-monospace, "JetBrains Mono", "Cascadia Mono", "Roboto Mono",
+            Menlo, Consolas, monospace;
   }
   @media (prefers-color-scheme: light) {
     :root {
-      --bg: #f4f5fa; --ink: #0b0d15; --dim: #565d78; --faint: #858ca6;
-      --hair: rgba(11,13,21,.09); --hair-2: rgba(11,13,21,.16);
-      --glass: rgba(255,255,255,.72); --glass-2: rgba(255,255,255,.9);
-      --well: rgba(11,13,21,.035);
-      --c1: #0891b2; --c2: #4f46e5; --c3: #c026d3;
-      --good: #059669; --warn: #b45309; --bad: #e11d48;
+      --accent: #5566e8; --accent-2: #1d9f8c;
+      --bg: #fbfbfd; --raise: #ffffff; --card: #ffffff;
+      --line: #e8e9ef; --line-2: #d6d8e2;
+      --ink: #14161d; --dim: #5b6072; --faint: #8b90a0;
+      --good: #0f9d76; --warn: #b57414; --bad: #d64560;
     }
   }
   * { box-sizing: border-box; }
-  html { -webkit-text-size-adjust: 100%; }
   body {
-    margin: 0; min-height: 100vh; background: var(--bg); color: var(--ink);
-    font: 400 14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, sans-serif;
-    font-feature-settings: "cv02","cv03","cv04","ss01";
-    -webkit-font-smoothing: antialiased; letter-spacing: -.008em;
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 400 14px/1.6 var(--sans);
+    font-feature-settings: "cv01","cv03","ss01","calt";
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+    letter-spacing: -.006em;
   }
-  /* mesh + grain. The grain is an inline SVG turbulence, not an image: nothing here
-     loads from anywhere, and a "local-first" dashboard that fetches a texture is making
-     the claim it exists to disprove. */
-  body::before, body::after { content: ""; position: fixed; inset: 0; pointer-events: none; }
-  body::before {
-    z-index: 0;
-    background:
-      radial-gradient(1100px 620px at 8% -12%, color-mix(in oklab, var(--c1) 20%, transparent), transparent 62%),
-      radial-gradient(900px 540px at 96% -4%, color-mix(in oklab, var(--c3) 16%, transparent), transparent 60%),
-      radial-gradient(1000px 700px at 52% 108%, color-mix(in oklab, var(--c2) 15%, transparent), transparent 64%);
-    filter: saturate(1.15);
-  }
-  body::after {
-    z-index: 1; opacity: .5; mix-blend-mode: overlay;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.35'/%3E%3C/svg%3E");
-  }
-  #shell { position: relative; z-index: 2; }
+  ::selection { background: color-mix(in oklab, var(--accent) 35%, transparent); }
 
-  /* ============================================================ top bar */
-  header.top {
-    position: sticky; top: 0; z-index: 40;
-    display: flex; align-items: center; gap: 14px;
-    padding: 12px 22px;
-    background: color-mix(in oklab, var(--bg) 72%, transparent);
-    backdrop-filter: blur(22px) saturate(1.6);
-    border-bottom: 1px solid var(--hair);
-  }
-  .logo { display: flex; align-items: center; gap: 10px; flex: none; }
-  .glyph {
-    width: 28px; height: 28px; border-radius: 9px; position: relative; flex: none;
-    background: conic-gradient(from 200deg, var(--c1), var(--c2), var(--c3), var(--c1));
-    box-shadow: 0 0 24px -6px color-mix(in oklab, var(--c2) 80%, transparent);
-    animation: spin 14s linear infinite;
-  }
-  .glyph::after { content: ""; position: absolute; inset: 6px; border-radius: 4px; background: var(--bg); }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .wordmark { font-weight: 620; font-size: 14.5px; letter-spacing: -.02em; white-space: nowrap; }
-  .wordmark span { color: var(--dim); font-weight: 450; }
+  .shell { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
 
-  nav.tabs { display: flex; gap: 2px; margin-left: 8px; overflow-x: auto; scrollbar-width: none; }
-  nav.tabs::-webkit-scrollbar { display: none; }
-  nav.tabs button {
-    position: relative; font: inherit; font-size: 13px; color: var(--dim);
-    background: none; border: 0; cursor: pointer; padding: 7px 13px; border-radius: 10px;
-    white-space: nowrap; transition: color .18s var(--ease), background .18s var(--ease);
+  /* ---------------------------------------------------------------- sidebar */
+  .side {
+    display: flex; flex-direction: column; gap: 26px;
+    padding: 20px 14px; border-right: 1px solid var(--line);
+    background: var(--raise); position: sticky; top: 0; height: 100vh;
   }
-  nav.tabs button:hover { color: var(--ink); background: var(--glass); }
-  nav.tabs button[aria-current="true"] { color: var(--ink); font-weight: 560; background: var(--glass-2); }
-  nav.tabs button[aria-current="true"]::after {
-    content: ""; position: absolute; left: 13px; right: 13px; bottom: -13px; height: 2px;
-    border-radius: 2px; background: linear-gradient(90deg, var(--c1), var(--c3));
+  .brand { display: flex; align-items: center; gap: 10px; padding: 2px 8px; }
+  .dot-logo {
+    width: 22px; height: 22px; border-radius: 7px; flex: none;
+    background: linear-gradient(145deg, var(--accent), var(--accent-2));
+    box-shadow: 0 2px 10px -2px color-mix(in oklab, var(--accent) 60%, transparent);
   }
+  .brand b { font: 600 14.5px/1 var(--display); letter-spacing: -.02em; }
+  .brand span { color: var(--faint); font-weight: 400; }
 
-  .spacer { flex: 1 1 auto; }
-  .kbtn {
-    display: flex; align-items: center; gap: 8px; font: inherit; font-size: 12.5px;
-    color: var(--dim); cursor: pointer; padding: 7px 10px 7px 12px;
-    background: var(--glass); border: 1px solid var(--hair); border-radius: 10px;
-    transition: border-color .18s, color .18s, background .18s;
+  .side nav { display: flex; flex-direction: column; gap: 1px; }
+  .side nav button {
+    display: flex; align-items: center; gap: 11px; width: 100%; text-align: left;
+    font: 400 13.5px/1 var(--sans); color: var(--dim); background: none; border: 0;
+    cursor: pointer; padding: 9px 11px; border-radius: var(--r-sm);
+    transition: background .2s var(--ease), color .2s var(--ease), transform .12s var(--ease);
   }
-  .kbtn:hover { color: var(--ink); border-color: var(--hair-2); background: var(--glass-2); }
-  kbd {
-    font: 11px/1 var(--mono); color: var(--faint); background: var(--well);
-    border: 1px solid var(--hair); border-radius: 5px; padding: 3px 5px;
+  .side nav button:hover { background: var(--card); color: var(--ink); }
+  .side nav button:active { transform: scale(.975); }
+  .side nav button .ic { width: 16px; height: 16px; flex: none; opacity: .8; }
+  .side nav button[aria-current="true"] {
+    background: color-mix(in oklab, var(--accent) 14%, transparent);
+    color: var(--ink); font-weight: 550;
   }
-  .seg { display: flex; background: var(--glass); border: 1px solid var(--hair); border-radius: 10px; padding: 2px; }
+  .side nav button[aria-current="true"] .ic { opacity: 1; color: var(--accent); }
+
+  .side footer { margin-top: auto; padding: 0 11px; display: flex; flex-direction: column; gap: 9px; }
+  .pulse { display: flex; align-items: center; gap: 8px; font: 11.5px/1 var(--mono); color: var(--faint); }
+  .bead { width: 6px; height: 6px; border-radius: 50%; background: var(--good); flex: none; }
+  .bead.live { animation: breathe 2.8s var(--ease) infinite; }
+  .bead.stale { background: var(--warn); } .bead.down { background: var(--bad); }
+  @keyframes breathe { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .45; transform: scale(.8); } }
+  .keys { font: 11px/1.7 var(--mono); color: var(--faint); }
+  .keys kbd { color: var(--dim); }
+
+  /* ---------------------------------------------------------------- main */
+  main { min-width: 0; padding: 26px var(--pad) 72px; max-width: 1400px; }
+  .titlebar { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+  h1 { margin: 0; font: 600 clamp(22px, 2.6vw, 29px)/1.15 var(--display); letter-spacing: -.033em; }
+  .lede { margin: 6px 0 0; color: var(--dim); font-size: 13.5px; max-width: 66ch; }
+  .tools { display: flex; align-items: center; gap: 7px; flex: none; }
+  .seg { display: flex; background: var(--card); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 2px; }
   .seg button {
     font: 12px/1 var(--mono); color: var(--faint); background: none; border: 0; cursor: pointer;
-    padding: 6px 9px; border-radius: 8px; transition: color .16s, background .16s;
+    padding: 6px 9px; border-radius: 7px; transition: background .18s var(--ease), color .18s;
   }
   .seg button:hover { color: var(--ink); }
-  .seg button[aria-pressed="true"] { background: var(--glass-2); color: var(--ink); }
-  .live { display: flex; align-items: center; gap: 7px; font: 11px/1 var(--mono); color: var(--faint); }
-  .beacon { width: 7px; height: 7px; border-radius: 50%; background: var(--good); flex: none; animation: beat 2.6s var(--ease) infinite; }
-  .beacon.stale { background: var(--warn); animation: none; }
-  .beacon.down { background: var(--bad); animation: none; }
-  @keyframes beat {
-    0%,100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--good) 55%, transparent); }
-    60% { box-shadow: 0 0 0 8px transparent; }
+  .seg button[aria-pressed="true"] { background: var(--raise); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+  .ghost {
+    font: 400 13px/1 var(--sans); color: var(--dim); cursor: pointer; padding: 8px 12px;
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--r-sm);
+    transition: color .18s, border-color .18s, transform .12s var(--ease);
+  }
+  .ghost:hover { color: var(--ink); border-color: var(--line-2); }
+  .ghost:active { transform: scale(.96); }
+  .ghost[aria-pressed="true"] { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+
+  /* ---------------------------------------------------------------- ask */
+  .ask { margin: 22px 0 26px; position: relative; }
+  .ask input {
+    width: 100%; font: 400 15px/1.5 var(--sans); color: var(--ink);
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--r);
+    padding: 15px 17px 15px 44px; outline: none;
+    transition: border-color .22s var(--ease), box-shadow .22s var(--ease), background .22s;
+  }
+  .ask input::placeholder { color: var(--faint); }
+  .ask input:focus {
+    border-color: color-mix(in oklab, var(--accent) 60%, transparent);
+    box-shadow: 0 0 0 4px color-mix(in oklab, var(--accent) 13%, transparent);
+    background: var(--raise);
+  }
+  .ask .ic { position: absolute; left: 15px; top: 50%; transform: translateY(-50%);
+             width: 17px; height: 17px; color: var(--faint); pointer-events: none; }
+  .ask .hint { position: absolute; right: 14px; top: 50%; transform: translateY(-50%);
+               font: 11px/1 var(--mono); color: var(--faint); pointer-events: none; }
+  .answers { margin-top: 12px; display: flex; flex-direction: column; gap: 9px; }
+  .answer {
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--r);
+    padding: 14px 16px; animation: slide .34s var(--ease) both;
+  }
+  .answer .who { font: 11px/1 var(--mono); color: var(--faint); }
+  .answer blockquote {
+    margin: 8px 0 0; padding-left: 12px; border-left: 2px solid var(--accent);
+    color: var(--ink); font-size: 13.5px;
+  }
+  .answer .from { font: 10.5px/1.7 var(--mono); color: var(--faint); margin-top: 4px; }
+  @keyframes slide { from { opacity: 0; transform: translateY(6px); } }
+
+  /* ---------------------------------------------------------------- grid */
+  .grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 11px; }
+  .cell {
+    grid-column: span 3; background: var(--card); border: 1px solid var(--line);
+    border-radius: var(--r); padding: 16px 17px; display: flex; flex-direction: column;
+    animation: rise .42s var(--ease) both; animation-delay: calc(var(--i, 0) * 38ms);
+    transition: border-color .22s var(--ease), transform .22s var(--spring);
+  }
+  .cell:hover { border-color: var(--line-2); }
+  .cell.w4 { grid-column: span 4; } .cell.w6 { grid-column: span 6; }
+  .cell.w8 { grid-column: span 8; } .cell.w12 { grid-column: span 12; }
+  .cell.bare { padding: 0; overflow: hidden; }
+  @keyframes rise { from { opacity: 0; transform: translateY(10px); } }
+  @media (max-width: 1150px) { .cell { grid-column: span 6; } .cell.w8, .cell.w12 { grid-column: span 12; } }
+  @media (max-width: 760px) {
+    .shell { grid-template-columns: 1fr; }
+    .side { position: static; height: auto; flex-direction: row; align-items: center; gap: 14px; overflow-x: auto; }
+    .side nav { flex-direction: row; } .side footer { display: none; }
+    .cell, .cell.w4, .cell.w6, .cell.w8 { grid-column: span 12; }
   }
 
-  /* ============================================================ page */
-  main { padding: 26px 22px 80px; max-width: 1680px; margin: 0 auto; }
-  .head { margin: 0 2px 20px; }
-  .head h1 { margin: 0; font-size: clamp(24px, 3.2vw, 34px); font-weight: 640; letter-spacing: -.035em; }
-  .head p { margin: 5px 0 0; color: var(--dim); font-size: 13.5px; max-width: 74ch; }
+  .cap { font: 500 10.5px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--faint); }
+  .big { font: 600 clamp(26px,3.4vw,38px)/1 var(--display); letter-spacing: -.04em;
+         margin-top: 11px; font-variant-numeric: tabular-nums; }
+  .big.sm { font-size: clamp(20px, 2.2vw, 25px); }
+  .big.id { font: 550 14px/1.4 var(--mono); letter-spacing: -.01em; overflow-wrap: anywhere; }
+  .big u { font-size: 13px; font-weight: 400; color: var(--dim); text-decoration: none; margin-left: 6px; }
+  .trend { align-self: flex-start; margin-top: 10px; font: 11.5px/1 var(--mono);
+           padding: 4px 8px; border-radius: 6px; }
+  .trend.up { color: var(--good); background: color-mix(in oklab, var(--good) 12%, transparent); }
+  .trend.down { color: var(--bad); background: color-mix(in oklab, var(--bad) 12%, transparent); }
+  .trend.flat { color: var(--faint); background: color-mix(in oklab, var(--faint) 10%, transparent); }
+  .cell h3 { margin: 0; font: 550 13.5px/1.3 var(--sans); letter-spacing: -.012em; }
+  .said { margin: 9px 0 0; color: var(--dim); font-size: 12.5px; }
+  .said.q { color: var(--faint); font-style: italic; }
 
-  /* ============================================================ bento */
-  .bento { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 12px; }
-  .tile {
-    position: relative; overflow: hidden; grid-column: span 3;
-    background: var(--glass); border: 1px solid var(--hair); border-radius: var(--r);
-    padding: 16px 18px; backdrop-filter: blur(18px) saturate(1.3);
-    box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 18px 40px -28px rgba(0,0,0,.85);
-    transition: border-color .24s var(--ease), transform .24s var(--ease);
-    animation: lift .5s var(--ease) both; animation-delay: calc(var(--i,0) * 45ms);
-  }
-  .tile:hover { border-color: var(--hair-2); transform: translateY(-2px); }
-  .tile.w4 { grid-column: span 4; } .tile.w6 { grid-column: span 6; }
-  .tile.w8 { grid-column: span 8; } .tile.w12 { grid-column: span 12; }
-  .tile { display: flex; flex-direction: column; }
-  .tile > .chart { margin-top: auto; }
-  /* A column flex container stretches its children, which turned every inline pill into a
-     full-width bar. The pills size to their text; only the full-width things stretch. */
-  .tile > .delta, .tile > .gauge, .tile > .chip { align-self: flex-start; }
-  .tile.flush { padding: 0; }
-  @keyframes lift { from { opacity: 0; transform: translateY(12px) scale(.985); } }
-  @media (max-width: 1180px) { .tile { grid-column: span 6; } .tile.w8, .tile.w12 { grid-column: span 12; } }
-  @media (max-width: 720px)  { .tile, .tile.w4, .tile.w6, .tile.w8 { grid-column: span 12; } }
+  svg.plot { width: 100%; height: 118px; display: block; margin-top: auto; padding-top: 12px; }
+  svg.spark { width: 100%; height: 30px; display: block; margin-top: 14px; }
+  .scale { display: flex; justify-content: space-between; margin-top: 7px;
+           font: 10.5px/1 var(--mono); color: var(--faint); }
 
-  .label { font: 500 10.5px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--faint); }
-  .figure { font: 620 clamp(30px, 4.4vw, 46px)/1 ui-sans-serif, system-ui, sans-serif;
-            letter-spacing: -.045em; margin-top: 10px; font-variant-numeric: tabular-nums; }
-  .figure.sm { font-size: clamp(22px, 2.6vw, 28px); }
-  .figure .u { font-size: 13px; font-weight: 460; color: var(--dim); letter-spacing: -.01em; margin-left: 6px; }
-  .figure.id { font: 600 15px/1.35 var(--mono); letter-spacing: -.01em; overflow-wrap: anywhere; }
-  .delta { display: inline-flex; align-items: center; gap: 5px; margin-top: 10px;
-           font: 11.5px/1 var(--mono); padding: 4px 8px; border-radius: 999px; }
-  .delta.up { color: var(--good); background: color-mix(in oklab, var(--good) 13%, transparent); }
-  .delta.down { color: var(--bad); background: color-mix(in oklab, var(--bad) 13%, transparent); }
-  .delta.flat { color: var(--faint); background: var(--well); }
-  .sub { margin: 9px 0 0; color: var(--dim); font-size: 12.5px; }
-  .tile h3 { margin: 0 0 2px; font-size: 14px; font-weight: 580; letter-spacing: -.015em; }
+  .ring { display: flex; align-items: center; gap: 15px; margin-top: 12px; }
+  .ring .n { font: 600 25px/1 var(--display); letter-spacing: -.035em; font-variant-numeric: tabular-nums; }
+  .ring .u { color: var(--dim); font-size: 12px; margin-top: 3px; }
 
-  /* chart */
-  .chart { width: 100%; height: 132px; display: block; overflow: visible; }
-  .chart .grid { stroke: var(--hair); stroke-width: 1; }
-  .axis { display: flex; justify-content: space-between; margin-top: 8px;
-          font: 10.5px/1 var(--mono); color: var(--faint); }
-  .spark { width: 100%; height: 34px; display: block; margin-top: 10px; }
+  .lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+           gap: 9px; align-items: start; margin-top: 13px; }
+  .lane { background: var(--raise); border: 1px solid var(--line); border-radius: 11px; padding: 10px; }
+  .lane.none { opacity: .45; }
+  .lane .top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .lane h4 { margin: 0; font: 550 10.5px/1 var(--mono); letter-spacing: .09em; text-transform: uppercase; color: var(--dim); }
+  .lane .ct { font: 11px/1 var(--mono); color: var(--faint); }
+  .lane .bar { height: 2px; border-radius: 2px; background: var(--line); margin-bottom: 9px; overflow: hidden; }
+  .lane .bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+  .card2 { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+           padding: 9px 10px; margin-bottom: 6px; transition: transform .18s var(--spring); }
+  .card2:hover { transform: translateY(-1px); }
+  .card2.hot { border-color: color-mix(in oklab, var(--warn) 45%, var(--line)); }
+  .card2 .t { font-size: 12.5px; font-weight: 500; line-height: 1.4; }
+  .card2 .m { font: 10.5px/1.5 var(--mono); color: var(--faint); margin-top: 4px; overflow-wrap: anywhere; }
+  .card2 .y { font-size: 11.5px; color: var(--warn); margin-top: 5px; }
 
-  /* gauge */
-  .gauge { display: flex; align-items: center; gap: 16px; margin-top: 12px; }
-  .gauge svg { flex: none; }
-  .gauge .num { font: 620 27px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: -.04em;
-                font-variant-numeric: tabular-nums; }
-  .gauge .cap { color: var(--dim); font-size: 12px; margin-top: 3px; }
-
-  /* pipeline */
-  .flow { display: flex; align-items: flex-start; gap: 8px; overflow-x: auto; padding: 2px;
-          scrollbar-width: thin; }
-  /* Each lane needs a visible edge. Without one the count sits at the far right of an
-     invisible column and reads as part of the next stage's title -- "0 TRIAGE". */
-  .lane { flex: 1 1 0; min-width: 140px; background: var(--well); border: 1px solid var(--hair);
-          border-radius: 14px; padding: 11px 10px; align-self: stretch; }
-  .lane header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
-  .lane h4 { margin: 0; font: 600 10.5px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
-  .lane .n { font: 11px/1 var(--mono); color: var(--faint); background: var(--glass-2);
-             border-radius: 999px; padding: 3px 7px; }
-  .lane .rail { height: 3px; border-radius: 3px; background: var(--hair); overflow: hidden; margin-bottom: 10px; }
-  .lane .rail i { display: block; height: 100%; background: linear-gradient(90deg, var(--c1), var(--c2)); }
-  .lane.vacant { opacity: .42; }
-  .wi {
-    background: var(--glass-2); border: 1px solid var(--hair); border-radius: var(--r-sm);
-    padding: 10px 11px; margin-bottom: 7px; transition: transform .2s var(--ease), border-color .2s;
-  }
-  .wi:hover { transform: translateY(-1px); border-color: var(--hair-2); }
-  .wi.flag { border-color: color-mix(in oklab, var(--warn) 42%, var(--hair));
-             background: color-mix(in oklab, var(--warn) 7%, var(--glass-2)); }
-  .wi .t { font-size: 12.5px; font-weight: 540; line-height: 1.4; }
-  .wi .m { font: 10.5px/1.5 var(--mono); color: var(--faint); margin-top: 5px; overflow-wrap: anywhere; }
-  .wi .w { font-size: 11.5px; color: var(--warn); margin-top: 6px; }
-  .empty-lane { font: 10.5px/1 var(--mono); color: var(--faint); padding: 8px 2px; }
-
-  /* table */
   table { border-collapse: collapse; width: 100%; font-size: 13px; }
-  thead th {
-    position: sticky; top: 0; z-index: 1; text-align: left;
-    background: color-mix(in oklab, var(--bg) 88%, transparent); backdrop-filter: blur(8px);
-    padding: 11px 16px; font: 500 10.5px/1 var(--mono); letter-spacing: .11em;
-    text-transform: uppercase; color: var(--faint); border-bottom: 1px solid var(--hair);
-  }
-  tbody td { padding: 12px 16px; border-bottom: 1px solid var(--hair); vertical-align: top; }
+  thead th { position: sticky; top: 0; z-index: 1; background: var(--card); text-align: left;
+             padding: 11px 15px; font: 500 10.5px/1 var(--mono); letter-spacing: .1em;
+             text-transform: uppercase; color: var(--faint); border-bottom: 1px solid var(--line); }
+  tbody td { padding: 12px 15px; border-bottom: 1px solid var(--line); }
   tbody tr:last-child td { border-bottom: 0; }
-  tbody tr { transition: background .14s; }
-  tbody tr:hover { background: var(--glass); }
-  tbody tr.clickable { cursor: pointer; }
-  td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
-  .scroll { overflow: auto; max-height: 68vh; }
+  tbody tr { transition: background .15s; }
+  tbody tr:hover { background: var(--raise); }
+  tbody tr.go { cursor: pointer; }
+  tbody tr.go:active { transform: scale(.998); }
+  td.n, th.n { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .scroll { overflow: auto; max-height: 66vh; }
   code, .mono { font-family: var(--mono); font-size: 12.5px; }
 
-  .chip {
-    display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px;
-    font: 11px/1.6 var(--mono); border: 1px solid transparent; white-space: nowrap;
-  }
-  .chip::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
-  .chip.ok   { color: var(--good); background: color-mix(in oklab, var(--good) 12%, transparent); border-color: color-mix(in oklab, var(--good) 26%, transparent); }
-  .chip.warn { color: var(--warn); background: color-mix(in oklab, var(--warn) 12%, transparent); border-color: color-mix(in oklab, var(--warn) 26%, transparent); }
-  .chip.bad  { color: var(--bad);  background: color-mix(in oklab, var(--bad) 12%, transparent);  border-color: color-mix(in oklab, var(--bad) 26%, transparent); }
-  .chip.info { color: var(--c1);   background: color-mix(in oklab, var(--c1) 12%, transparent);   border-color: color-mix(in oklab, var(--c1) 26%, transparent); }
-  .chip.mute { color: var(--faint); background: var(--well); border-color: var(--hair); }
-  .chip.plain::before { display: none; }
+  .tag { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 6px;
+         font: 11px/1.6 var(--mono); border: 1px solid transparent; white-space: nowrap; }
+  .tag.ok { color: var(--good); background: color-mix(in oklab, var(--good) 11%, transparent); }
+  .tag.warn { color: var(--warn); background: color-mix(in oklab, var(--warn) 11%, transparent); }
+  .tag.bad { color: var(--bad); background: color-mix(in oklab, var(--bad) 11%, transparent); }
+  .tag.info { color: var(--accent); background: color-mix(in oklab, var(--accent) 13%, transparent); }
+  .tag.mute { color: var(--faint); background: color-mix(in oklab, var(--faint) 11%, transparent); }
 
-  .meter { height: 5px; border-radius: 999px; background: var(--well); overflow: hidden; margin-top: 8px; }
-  .meter i { display: block; height: 100%; border-radius: 999px;
-             background: linear-gradient(90deg, var(--c1), var(--c2), var(--c3)); }
+  .meter { height: 4px; border-radius: 4px; background: var(--line); overflow: hidden; margin-top: 7px; }
+  .meter i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2));
+             transition: width .6s var(--ease); }
 
-  /* trace */
-  .trace { position: relative; padding-left: 26px; }
-  .trace::before { content: ""; position: absolute; left: 6px; top: 8px; bottom: 8px; width: 1px;
-                   background: linear-gradient(180deg, transparent, var(--hair-2) 12%, var(--hair-2) 88%, transparent); }
-  .ev { position: relative; padding: 10px 0; }
-  .ev::before { content: ""; position: absolute; left: -24px; top: 17px; width: 9px; height: 9px;
-                border-radius: 50%; background: var(--bg); border: 2px solid var(--faint); }
-  .ev.ok::before   { border-color: var(--good); box-shadow: 0 0 12px -2px var(--good); }
-  .ev.bad::before  { border-color: var(--bad);  box-shadow: 0 0 12px -2px var(--bad); }
-  .ev.info::before { border-color: var(--c1);   box-shadow: 0 0 12px -2px var(--c1); }
-  .ev .h { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
-  .ev .ty { font: 600 12.5px/1.5 var(--mono); letter-spacing: -.01em; }
-  .ev .at { font: 10.5px/1.5 var(--mono); color: var(--faint); }
-  .ev .sum { font-size: 12.5px; color: var(--dim); margin-top: 3px; }
-  .ev .sum b { color: var(--ink); font-weight: 560; }
-  .ev details { margin-top: 7px; }
-  .ev summary { cursor: pointer; font: 10.5px/1.6 var(--mono); color: var(--faint); width: max-content; }
-  .ev summary:hover { color: var(--c1); }
-  .ev pre { margin: 7px 0 0; padding: 11px 13px; background: var(--well); border: 1px solid var(--hair);
-            border-radius: 10px; overflow-x: auto; font: 11.5px/1.6 var(--mono); color: var(--dim); max-height: 320px; }
+  .thread { position: relative; padding-left: 24px; margin-top: 13px; }
+  .thread::before { content: ""; position: absolute; left: 5px; top: 10px; bottom: 10px;
+                    width: 1px; background: var(--line-2); }
+  .beat { position: relative; padding: 9px 0; }
+  .beat::before { content: ""; position: absolute; left: -23px; top: 15px; width: 9px; height: 9px;
+                  border-radius: 50%; background: var(--bg); border: 2px solid var(--faint); }
+  .beat.ok::before { border-color: var(--good); }
+  .beat.bad::before { border-color: var(--bad); }
+  .beat.info::before { border-color: var(--accent); }
+  .beat .hd { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
+  .beat .ty { font: 550 12.5px/1.5 var(--mono); }
+  .beat .ts { font: 10.5px/1.5 var(--mono); color: var(--faint); }
+  .beat .sm { font-size: 12.5px; color: var(--dim); margin-top: 3px; }
+  .beat .sm b { color: var(--ink); font-weight: 550; }
+  .beat details { margin-top: 6px; }
+  .beat summary { cursor: pointer; font: 10.5px/1.6 var(--mono); color: var(--faint); width: max-content; }
+  .beat summary:hover { color: var(--accent); }
+  .beat pre { margin: 6px 0 0; padding: 10px 12px; background: var(--raise); border: 1px solid var(--line);
+              border-radius: 9px; overflow-x: auto; font: 11.5px/1.6 var(--mono); color: var(--dim); max-height: 300px; }
 
-  /* command palette */
-  .veil { position: fixed; inset: 0; z-index: 90; background: rgba(4,5,9,.62);
-          backdrop-filter: blur(8px); display: grid; place-items: start center; padding-top: 12vh;
-          animation: fade .18s var(--ease) both; }
-  @keyframes fade { from { opacity: 0; } }
-  .palette {
-    width: min(680px, 92vw); background: color-mix(in oklab, var(--bg) 84%, transparent);
-    border: 1px solid var(--hair-2); border-radius: 16px; overflow: hidden;
-    backdrop-filter: blur(28px) saturate(1.5);
-    box-shadow: 0 40px 90px -30px rgba(0,0,0,.9), inset 0 1px 0 rgba(255,255,255,.07);
-    animation: pop .26s var(--spring) both;
-  }
-  @keyframes pop { from { opacity: 0; transform: translateY(-10px) scale(.97); } }
-  .palette input {
-    width: 100%; font: inherit; font-size: 16px; color: var(--ink); background: none;
-    border: 0; border-bottom: 1px solid var(--hair); padding: 17px 20px; outline: none;
-  }
-  .palette input::placeholder { color: var(--faint); }
-  .palette ul { list-style: none; margin: 0; padding: 6px; max-height: 46vh; overflow-y: auto; }
-  .palette li { display: flex; align-items: center; gap: 11px; padding: 10px 13px; border-radius: 10px;
-                cursor: pointer; font-size: 13.5px; }
-  .palette li[aria-selected="true"] { background: var(--glass-2); }
-  .palette li .g { width: 17px; text-align: center; color: var(--dim); }
-  .palette li .hint { margin-left: auto; font: 10.5px/1 var(--mono); color: var(--faint); }
-  .palette .none { padding: 26px; text-align: center; color: var(--faint); font-size: 13px; }
-
-  /* misc */
-  .note { color: var(--dim); font-size: 12.5px; margin: 10px 2px 0; }
-  .muted { color: var(--faint); font-style: italic; }
-  .void { text-align: center; padding: 72px 20px; }
-  .void .g { font-size: 34px; opacity: .28; }
-  .void h3 { margin: 14px 0 5px; font-size: 16px; font-weight: 580; }
-  .skel { grid-column: span 3; height: 132px; border-radius: var(--r); border: 1px solid var(--hair);
-          background: linear-gradient(100deg, var(--glass) 30%, var(--glass-2) 50%, var(--glass) 70%);
-          background-size: 220% 100%; animation: shim 1.2s linear infinite; }
-  @keyframes shim { to { background-position: -220% 0; } }
-  .back { font: inherit; font-size: 12.5px; background: none; border: 0; color: var(--c1);
-          cursor: pointer; padding: 0 0 12px; }
+  .rule { grid-column: 1 / -1; margin: 14px 2px 0; display: flex; align-items: center; gap: 11px;
+          font: 500 10.5px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--faint); }
+  .rule::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .said.note { color: var(--dim); font-size: 12.5px; margin: 11px 2px 0; }
+  .nothing { text-align: center; padding: 68px 20px; color: var(--dim); }
+  .nothing h3 { margin: 12px 0 5px; font: 550 15.5px/1.3 var(--display); color: var(--ink); }
+  .load { grid-column: span 3; height: 118px; border-radius: var(--r); border: 1px solid var(--line);
+          background: linear-gradient(100deg, var(--card) 32%, var(--raise) 50%, var(--card) 68%);
+          background-size: 220% 100%; animation: sweep 1.25s linear infinite; }
+  @keyframes sweep { to { background-position: -220% 0; } }
+  .back { font: 400 13px/1 var(--sans); background: none; border: 0; color: var(--accent);
+          cursor: pointer; padding: 0 0 13px; }
   .back:hover { text-decoration: underline; }
-  h2.rule { grid-column: 1 / -1; margin: 16px 2px 0; display: flex; align-items: center; gap: 12px;
-            font: 500 10.5px/1 var(--mono); letter-spacing: .13em; text-transform: uppercase; color: var(--faint); }
-  h2.rule::after { content: ""; flex: 1; height: 1px; background: var(--hair); }
-  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; } }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after {
+    animation-duration: .001ms !important; transition-duration: .001ms !important; } }
 </style>
 </head>
 <body>
-<div id="shell">
-  <header class="top">
-    <div class="logo"><span class="glyph"></span>
-      <span class="wordmark">software<span>&#8202;factory</span></span></div>
-    <nav class="tabs" id="tabs"></nav>
-    <span class="spacer"></span>
-    <button class="kbtn" id="palette-btn"><span>Search</span><kbd>&#8984;K</kbd></button>
-    <div class="seg" id="window"></div>
-    <button class="kbtn" id="auto" aria-pressed="false" title="refresh every 5s">auto</button>
-    <div class="live"><span class="beacon" id="beacon"></span><span id="stamp">reading</span></div>
-  </header>
+<div class="shell">
+  <aside class="side">
+    <div class="brand"><span class="dot-logo"></span><b>software<span>&#8202;factory</span></b></div>
+    <nav id="nav"></nav>
+    <footer>
+      <div class="pulse"><span class="bead live" id="bead"></span><span id="stamp">reading</span></div>
+      <div class="keys"><kbd>/</kbd> ask &middot; <kbd>r</kbd> refresh</div>
+    </footer>
+  </aside>
   <main>
-    <div class="head">
-      <h1 id="title">Overview</h1>
-      <p id="subtitle">Metrics, their trend, and when the work actually happened.</p>
+    <div class="titlebar">
+      <div>
+        <h1 id="title">Overview</h1>
+        <p class="lede" id="lede">Metrics, their trend, and when the work actually happened.</p>
+      </div>
+      <div class="tools">
+        <div class="seg" id="window"></div>
+        <button class="ghost" id="auto" aria-pressed="false" title="refresh every 5s">auto</button>
+      </div>
     </div>
+    <div class="ask">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+        stroke-linecap="round" aria-hidden="true"><path d="M12 17h.01M9.1 9a3 3 0 015.8 1c0 2-3 2.5-3 4"/>
+        <circle cx="12" cy="12" r="9"/></svg>
+      <input id="ask" type="text" autocomplete="off" spellcheck="false"
+        placeholder="Ask what a run decided, tried, or was constrained by">
+      <span class="hint">answers from the record, never re-run</span>
+    </div>
+    <div id="answers" class="answers"></div>
     <div id="content"></div>
   </main>
 </div>
 <script>
 const content = document.getElementById('content');
 const titleEl = document.getElementById('title');
-const subEl = document.getElementById('subtitle');
-const beacon = document.getElementById('beacon');
+const ledeEl = document.getElementById('lede');
+const bead = document.getElementById('bead');
 const stamp = document.getElementById('stamp');
+const askEl = document.getElementById('ask');
+const answersEl = document.getElementById('answers');
 
 // Everything this page renders came from the ledger, and the ledger is full of text from
 // outside the trust boundary: model output, work-item titles written by whoever opened the
@@ -702,6 +752,27 @@ function esc(v) {
   return String(v === null || v === undefined ? '' : v)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// A short, real tap. Long buzzes are the reason people turn haptics off, and a page that
+// vibrates on a device that cannot is a page that throws -- so this is guarded and quiet.
+function tap(ms) {
+  try { if (navigator.vibrate) navigator.vibrate(ms || 6); } catch (e) { /* not available */ }
+}
+
+const ICONS = {
+  overview: 'M3 13h4l3 7 4-16 3 9h4',
+  activity: 'M3 5h18M3 12h18M3 19h18',
+  runs: 'M8 5v14l11-7z',
+  definition: 'M12 3v3m0 12v3m9-9h-3M6 12H3m13.5-6.5l-2 2m-9 9l-2 2m0-13l2 2m9 9l2 2M15 12a3 3 0 11-6 0 3 3 0 016 0z',
+  evaluation: 'M12 3a9 9 0 100 18 9 9 0 000-18zm0 5a4 4 0 100 8 4 4 0 000-8z',
+  registry: 'M4 6h16M4 12h16M4 18h10',
+};
+
+function icon(name) {
+  return `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="${ICONS[name] || ICONS.overview}"/></svg>`;
 }
 
 const VIEWS = [
@@ -715,15 +786,13 @@ const VIEWS = [
 
 let view = 'overview', days = 7, runId = null, timer = null, lastData = null;
 
-/* ------------------------------------------------------------------- chrome */
-
-const tabs = document.getElementById('tabs');
+const nav = document.getElementById('nav');
 VIEWS.forEach(([id, label]) => {
   const b = document.createElement('button');
   b.dataset.view = id;
-  b.textContent = label;
-  b.addEventListener('click', () => go(id));
-  tabs.appendChild(b);
+  b.innerHTML = `${icon(id)}<span>${esc(label)}</span>`;
+  b.addEventListener('click', () => { tap(); go(id); });
+  nav.appendChild(b);
 });
 
 const windowEl = document.getElementById('window');
@@ -731,7 +800,7 @@ const windowEl = document.getElementById('window');
   const b = document.createElement('button');
   b.textContent = d + 'd';
   b.setAttribute('aria-pressed', String(d === days));
-  b.addEventListener('click', () => { days = d; syncWindow(); load(); });
+  b.addEventListener('click', () => { tap(); days = d; syncWindow(); load(); });
   windowEl.appendChild(b);
 });
 function syncWindow() {
@@ -741,6 +810,7 @@ function syncWindow() {
 
 const autoBtn = document.getElementById('auto');
 autoBtn.addEventListener('click', () => {
+  tap();
   const on = autoBtn.getAttribute('aria-pressed') !== 'true';
   autoBtn.setAttribute('aria-pressed', String(on));
   if (timer) { clearInterval(timer); timer = null; }
@@ -750,172 +820,116 @@ autoBtn.addEventListener('click', () => {
 function go(next, id) {
   view = next; runId = id || null;
   const meta = VIEWS.find(v => v[0] === next);
-  tabs.querySelectorAll('button').forEach(b =>
+  nav.querySelectorAll('button').forEach(b =>
     b.setAttribute('aria-current', String(b.dataset.view === next)));
   titleEl.textContent = next === 'run' ? 'Run' : (meta ? meta[1] : next);
-  subEl.textContent = next === 'run'
+  ledeEl.textContent = next === 'run'
     ? 'Everything the ledger recorded about one run, in the order it happened.'
     : (meta ? meta[2] : '');
   load();
 }
 
 function status(kind, text) {
-  beacon.className = 'beacon' + (kind === 'ok' ? '' : ' ' + kind);
+  bead.className = 'bead' + (kind === 'ok' ? ' live' : ' ' + kind);
   stamp.textContent = text;
 }
 
-/* ------------------------------------------------------- command palette */
+/* ------------------------------------------------------------------- ask */
 
-const paletteBtn = document.getElementById('palette-btn');
-let veil = null, choices = [], cursor = 0;
-
-function commands() {
-  const list = VIEWS.map(([id, label, desc]) => ({
-    glyph: '◇', label, hint: 'view', run: () => go(id), text: label + ' ' + desc,
-  }));
-  [1, 7, 30, 90, 365].forEach(d => list.push({
-    glyph: '◷', label: `Window: last ${d} day${d > 1 ? 's' : ''}`, hint: d + 'd',
-    run: () => { days = d; syncWindow(); load(); }, text: 'window days ' + d,
-  }));
-  // Whatever is on screen becomes addressable. A palette that only knows the six views is
-  // a menu; one that knows the runs and work items in front of you is a way to move.
-  if (lastData && Array.isArray(lastData.runs)) {
-    lastData.runs.forEach(r => list.push({
-      glyph: '▸', label: r.id, hint: [r.stage || '', r.status || ''].join(' ').trim(),
-      run: () => go('run', r.id), text: [r.id, r.agent, r.stage, r.status].join(' '),
-    }));
-  }
-  if (lastData && Array.isArray(lastData.workItems)) {
-    lastData.workItems.forEach(w => list.push({
-      glyph: '▤', label: w.title, hint: w.stage,
-      run: () => {}, text: [w.id, w.title, w.stage].join(' '),
-    }));
-  }
-  return list;
-}
-
-function openPalette() {
-  if (veil) return;
-  const all = commands();
-  veil = document.createElement('div');
-  veil.className = 'veil';
-  veil.innerHTML = `<div class="palette" role="dialog" aria-label="Command palette">
-    <input type="text" placeholder="Jump to a view, a run, a window…" autocomplete="off" spellcheck="false">
-    <ul role="listbox"></ul></div>`;
-  document.body.appendChild(veil);
-  const input = veil.querySelector('input');
-  const list = veil.querySelector('ul');
-
-  const paint = () => {
-    const q = input.value.trim().toLowerCase();
-    choices = q ? all.filter(c => c.text.toLowerCase().includes(q)) : all;
-    cursor = 0;
-    list.innerHTML = choices.length
-      ? choices.map((c, i) =>
-          `<li role="option" data-i="${i}" aria-selected="${i === 0}">`
-          + `<span class="g">${c.glyph}</span><span>${esc(c.label)}</span>`
-          + `<span class="hint">${esc(c.hint)}</span></li>`).join('')
-      : `<div class="none">Nothing matches that.</div>`;
-  };
-  const move = step => {
-    if (!choices.length) return;
-    cursor = (cursor + step + choices.length) % choices.length;
-    list.querySelectorAll('li').forEach((li, i) => li.setAttribute('aria-selected', String(i === cursor)));
-    const active = list.querySelector('li[aria-selected="true"]');
-    if (active) active.scrollIntoView({ block: 'nearest' });
-  };
-  const pick = () => { const c = choices[cursor]; closePalette(); if (c) c.run(); };
-
-  input.addEventListener('input', paint);
-  veil.addEventListener('keydown', e => {
-    if (e.key === 'Escape') { closePalette(); return; }
-    if (e.key === 'ArrowDown') { e.preventDefault(); move(1); }
-    if (e.key === 'ArrowUp') { e.preventDefault(); move(-1); }
-    if (e.key === 'Enter') { e.preventDefault(); pick(); }
-  });
-  list.addEventListener('click', e => {
-    const li = e.target.closest('li');
-    if (li) { cursor = Number(li.dataset.i); pick(); }
-  });
-  veil.addEventListener('click', e => { if (e.target === veil) closePalette(); });
-  paint();
-  input.focus();
-}
-function closePalette() { if (veil) { veil.remove(); veil = null; } }
-
-paletteBtn.addEventListener('click', openPalette);
-document.addEventListener('keydown', e => {
-  if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); openPalette(); return; }
-  if (veil) return;
-  if (e.key === '/') { e.preventDefault(); openPalette(); return; }
-  if (e.key === 'r') { load(); return; }
-  const n = parseInt(e.key, 10);
-  if (n >= 1 && n <= VIEWS.length) go(VIEWS[n - 1][0]);
+askEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { tap(10); ask(askEl.value); }
+  if (e.key === 'Escape') { askEl.value = ''; answersEl.innerHTML = ''; askEl.blur(); }
 });
 
-/* -------------------------------------------------------------- drawing */
+async function ask(question) {
+  if (!question.trim()) { answersEl.innerHTML = ''; return; }
+  answersEl.innerHTML = `<div class="answer"><div class="who">reading the record…</div></div>`;
+  let data;
+  try {
+    data = await (await fetch(`/api/ask?q=${encodeURIComponent(question)}`)).json();
+  } catch (err) {
+    answersEl.innerHTML = `<div class="answer"><div class="who">could not reach the factory</div>
+      <div class="said">${esc(err)}</div></div>`;
+    return;
+  }
+  if (data.error) {
+    answersEl.innerHTML = `<div class="answer"><div class="who">${esc(data.error)}</div>
+      <div class="said">${esc(data.message)}</div></div>`;
+    return;
+  }
+  if (!data.answers || !data.answers.length) {
+    answersEl.innerHTML = `<div class="answer"><div class="who">the record does not say</div>
+      <div class="said q">${esc(data.note)}</div></div>`;
+    return;
+  }
+  answersEl.innerHTML = data.answers.map(a =>
+    `<div class="answer"><div class="who">${esc(a.workItem)}</div>`
+    + (a.citations || []).map(c =>
+        `<blockquote>${esc(c.text)}</blockquote>`
+        + `<div class="from">${esc(c.kind)} · ${esc(c.stage)} · ${esc(c.run_id || c.runId || '')}</div>`
+      ).join('')
+    + `</div>`).join('')
+    + `<div class="said note">${esc(data.note)}</div>`;
+}
+
+document.addEventListener('keydown', e => {
+  if (e.target === askEl) return;
+  if (e.key === '/') { e.preventDefault(); askEl.focus(); return; }
+  if (e.key === 'r') { tap(); load(); return; }
+  const n = parseInt(e.key, 10);
+  if (n >= 1 && n <= VIEWS.length) { tap(); go(VIEWS[n - 1][0]); }
+});
+
+/* --------------------------------------------------------------- drawing */
 
 function fmt(v) {
   if (v === null || v === undefined || v === '') return '—';
   if (typeof v === 'number') {
-    return Number.isInteger(v) ? String(v)
-      : String(Number(v.toFixed(3))).replace(/\.?0+$/, m => m.includes('.') ? '' : m);
+    return Number.isInteger(v) ? String(v) : String(Number(v.toFixed(3)));
   }
   return String(v);
 }
 function pct(v) { return v === null || v === undefined ? '—' : Math.round(v * 100) + '%'; }
 
-function delta(v, unit) {
-  if (v === null || v === undefined) return `<div class="delta flat">no comparison available</div>`;
+function trend(v, unit) {
+  if (v === null || v === undefined) return `<div class="trend flat">no comparison</div>`;
   const cls = v > 0 ? 'up' : (v < 0 ? 'down' : 'flat');
   const arrow = v > 0 ? '↑' : (v < 0 ? '↓' : '→');
-  return `<div class="delta ${cls}">${arrow} ${esc(fmt(Math.abs(v)))}${unit ? ' ' + esc(unit) : ''}</div>`;
+  return `<div class="trend ${cls}">${arrow} ${esc(fmt(Math.abs(v)))}${unit ? ' ' + esc(unit) : ''}</div>`;
 }
 
-function tile(inner, opts) {
+function cell(inner, opts) {
   const o = opts || {};
-  return `<div class="tile ${o.cls || ''}" style="--i:${o.i || 0}">${inner}</div>`;
+  return `<div class="cell ${o.cls || ''}" style="--i:${o.i || 0}">${inner}</div>`;
 }
 
-function stat(label, value, unit, d, i, cls) {
+function stat(label, value, unit, extra, i, cls) {
   const long = String(value === null || value === undefined ? '' : value).length > 16;
-  return tile(
-    `<div class="label">${esc(label)}</div>`
-    + `<div class="figure${long ? ' id' : ''}">${esc(value)}`
-    + `${unit ? `<span class="u">${esc(unit)}</span>` : ''}</div>`
-    + (d || ''), { i, cls });
+  return cell(`<div class="cap">${esc(label)}</div>`
+    + `<div class="big${long ? ' id' : ''}">${esc(value)}`
+    + `${unit ? `<u>${esc(unit)}</u>` : ''}</div>` + (extra || ''), { i, cls });
 }
 
-/** An area chart from one series. Drawn as SVG path data rather than by a library: this
- *  page loads nothing from anywhere, and a chart is arithmetic. */
-function area(values, opts) {
-  const o = opts || {};
-  const w = 1000, h = 132, pad = 4;
-  const n = values.length;
-  if (!n) return '<div class="muted">no activity in this window</div>';
+/** Charts are arithmetic and SVG path data. This page loads nothing from anywhere. */
+function plot(values, key) {
+  const w = 1000, h = 118, pad = 6, n = values.length;
+  if (!n) return `<div class="said q">no activity in this window</div>`;
   const top = Math.max(1, ...values);
   const x = i => n === 1 ? w / 2 : (i / (n - 1)) * w;
   const y = v => pad + (1 - v / top) * (h - pad * 2);
-  const line = values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join('');
-  const id = 'g' + (o.key || 'a');
-  const rules = [0.25, 0.5, 0.75].map(f =>
-    `<line class="grid" x1="0" x2="${w}" y1="${(pad + f * (h - pad * 2)).toFixed(1)}" y2="${(pad + f * (h - pad * 2)).toFixed(1)}"/>`).join('');
-  return `<svg class="chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img"
-     aria-label="${esc(o.aria || 'activity over the window')}">
-    <defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="var(--c1)" stop-opacity=".42"/>
-      <stop offset="100%" stop-color="var(--c2)" stop-opacity="0"/>
-    </linearGradient></defs>
-    ${rules}
-    <path d="${line}L${w},${h}L0,${h}Z" fill="url(#${id})"/>
-    <path d="${line}" fill="none" stroke="var(--c1)" stroke-width="2"
-          stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
-  </svg>`;
+  const d = values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join('');
+  return `<svg class="plot" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img"
+      aria-label="activity per bucket">
+    <defs><linearGradient id="f${key}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="var(--accent)" stop-opacity=".34"/>
+      <stop offset="100%" stop-color="var(--accent)" stop-opacity="0"/></linearGradient></defs>
+    <path d="${d}L${w},${h}L0,${h}Z" fill="url(#f${key})"/>
+    <path d="${d}" fill="none" stroke="var(--accent)" stroke-width="2"
+      stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>`;
 }
 
-function sparkline(values, colour) {
-  const w = 300, h = 34;
-  const n = values.length;
+function spark(values, colour) {
+  const w = 300, h = 30, n = values.length;
   if (!n) return '';
   const top = Math.max(1, ...values);
   const x = i => n === 1 ? w / 2 : (i / (n - 1)) * w;
@@ -923,25 +937,23 @@ function sparkline(values, colour) {
   const d = values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join('');
   return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">
     <path d="${d}" fill="none" stroke="${colour}" stroke-width="1.6"
-          stroke-linejoin="round" vector-effect="non-scaling-stroke"/></svg>`;
+      stroke-linejoin="round" vector-effect="non-scaling-stroke"/></svg>`;
 }
 
-function gauge(share, caption, key) {
-  const size = 78, r = 32, c = 2 * Math.PI * r;
+function ring(share, caption, key) {
+  const size = 68, r = 28, c = 2 * Math.PI * r;
   const filled = share === null || share === undefined ? 0 : Math.max(0, Math.min(1, share));
-  const id = 'gg' + key;
-  return `<div class="gauge">
+  return `<div class="ring">
     <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true">
-      <defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0%" stop-color="var(--c1)"/><stop offset="100%" stop-color="var(--c3)"/>
-      </linearGradient></defs>
-      <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="var(--well)" stroke-width="7"/>
-      <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="url(#${id})" stroke-width="7"
-        stroke-linecap="round" stroke-dasharray="${(c * filled).toFixed(1)} ${c.toFixed(1)}"
-        transform="rotate(-90 ${size / 2} ${size / 2})"/>
-    </svg>
-    <div><div class="num">${share === null || share === undefined ? '—' : pct(share)}</div>
-    <div class="cap">${esc(caption)}</div></div></div>`;
+      <defs><linearGradient id="r${key}" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="var(--accent)"/>
+        <stop offset="100%" stop-color="var(--accent-2)"/></linearGradient></defs>
+      <circle cx="${size/2}" cy="${size/2}" r="${r}" fill="none" stroke="var(--line)" stroke-width="6"/>
+      <circle cx="${size/2}" cy="${size/2}" r="${r}" fill="none" stroke="url(#r${key})" stroke-width="6"
+        stroke-linecap="round" stroke-dasharray="${(c*filled).toFixed(1)} ${c.toFixed(1)}"
+        transform="rotate(-90 ${size/2} ${size/2})"/></svg>
+    <div><div class="n">${share === null || share === undefined ? '—' : pct(share)}</div>
+    <div class="u">${esc(caption)}</div></div></div>`;
 }
 
 function bucketLabel(seconds) {
@@ -953,91 +965,63 @@ function bucketLabel(seconds) {
 /* ------------------------------------------------------------- renderers */
 
 function renderOverview(d) {
-  const r = d.current.runs;
-  const t = d.trend || {};
+  const r = d.current.runs, t = d.trend || {};
   const s = d.series || { runs: [], handoffs: [], gateFailures: [], costUnits: [], bucketSeconds: 3600 };
   const measures = d.current.measures || [];
-  const available = measures.filter(m => m.availability === 'available');
-  const missing = measures.filter(m => m.availability !== 'available');
-  const named = n => available.find(m => m.name === n);
-
-  const spent = (s.costUnits || []).reduce((a, b) => a + b, 0);
-
-  const hero = tile(
-    `<div class="label">activity — last ${esc(d.days || days)} days</div>`
-    + `<div class="figure">${esc(r.total)}<span class="u">runs</span></div>`
-    + delta(t.runs, 'vs previous')
-    + area(s.runs, { key: 'runs', aria: 'runs per bucket over the window' })
-    + `<div class="axis"><span>${esc(String(s.start || '').slice(0, 10))}</span>`
-    + `<span>${esc(bucketLabel(s.bucketSeconds || 3600))}</span>`
-    + `<span>${esc(String(s.end || '').slice(0, 10))}</span></div>`,
-    { cls: 'w6', i: 0 });
-
-  const gates = named('gate_pass_rate');
-  const gateTile = tile(
-    `<h3>Gate pass rate</h3><div class="label">first attempts only</div>`
-    + gauge(gates ? gates.value : null, gates ? `${gates.sample} evaluated` : 'not measured', 'gate')
-    + sparkline(s.gateFailures, 'var(--bad)')
-    + `<p class="sub">the line is gate <em>failures</em> per bucket</p>`,
-    { cls: 'w3', i: 1 });
-
+  const shown = measures.filter(m => m.availability === 'available');
+  const absent = measures.filter(m => m.availability !== 'available');
+  const gates = shown.find(m => m.name === 'gate_pass_rate');
   const autonomy = measures.find(m => m.name === 'autonomy');
-  const autoTile = tile(
-    `<h3>Autonomy</h3><div class="label">merged with no human commits</div>`
-    + (autonomy && autonomy.availability === 'available'
-        ? gauge(autonomy.value, `${autonomy.sample} merged changes`, 'auto')
-        : `<div class="gauge">${gauge(null, 'not observable', 'auto')}</div>`
-          + `<p class="sub muted">${esc(autonomy ? autonomy.reason : 'no measurement')}</p>`),
-    { cls: 'w3', i: 2 });
 
-  const handoffTile = tile(
-    `<div class="label">reached handoff</div>`
-    + `<div class="figure sm">${esc((s.handoffs || []).reduce((a, b) => a + b, 0))}`
-    + `<span class="u">changes</span></div>`
-    + sparkline(s.handoffs, 'var(--good)'),
-    { cls: 'w3', i: 3 });
-
-  const costTile = tile(
-    `<div class="label">spend, estimated</div>`
-    + `<div class="figure sm">${esc(spent.toFixed(2))}<span class="u">units</span></div>`
-    + sparkline(s.costUnits, 'var(--c3)')
-    + `<p class="sub muted">from recorded usage and declared prices, not billing</p>`,
-    { cls: 'w3', i: 4 });
-
-  const mixTile = tile(
-    `<h3>Run mix</h3>`
-    + [['work', r.work], ['evaluation', r.evaluation], ['benchmark', r.benchmark],
-       ['improvement', r.improvement]].map(([name, n]) =>
-      `<div style="margin-top:10px"><div style="display:flex;justify-content:space-between;font-size:12.5px">`
-      + `<span>${esc(name)}</span><span class="mono">${esc(n)}</span></div>`
-      + `<div class="meter"><i style="width:${r.total ? Math.round((n / r.total) * 100) : 0}%"></i></div></div>`).join('')
-    + `<p class="sub">${esc(r.note)}</p>`,
-    { cls: 'w6', i: 5 });
-
-  const metricTiles = available
-    .filter(m => m.name !== 'gate_pass_rate')
-    .map((m, i) => tile(
-      `<h3>${esc(m.name)}</h3>`
-      + `<div class="figure sm">${esc(fmt(m.value))}<span class="u">${esc(m.unit || '')}</span></div>`
-      + delta(t[m.name], m.unit)
-      + (m.excludes && m.excludes.length
-          ? `<p class="sub muted">excludes ${esc(m.excludes.join(', '))}</p>` : ''),
-      { cls: 'w3', i: 6 + i })).join('');
-
-  const missingRows = missing.map(m =>
+  const rows = absent.map(m =>
     `<tr><td><code>${esc(m.name)}</code></td>`
-    + `<td><span class="chip mute">${esc(String(m.availability).replace(/_/g, ' '))}</span></td>`
-    + `<td class="note" style="margin:0">${esc(m.reason)}</td></tr>`).join('');
+    + `<td><span class="tag mute">${esc(String(m.availability).replace(/_/g, ' '))}</span></td>`
+    + `<td>${esc(m.reason)}</td></tr>`).join('');
 
-  return `<div class="bento">${hero}${gateTile}${autoTile}${handoffTile}${costTile}${mixTile}`
-    + (metricTiles ? `<h2 class="rule">measured</h2>${metricTiles}` : '')
-    + (missing.length
-        ? `<h2 class="rule">not measured, and why</h2>`
-          + tile(`<div class="scroll"><table><thead><tr><th>metric</th><th>state</th><th>reason</th>`
-            + `</tr></thead><tbody>${missingRows}</tbody></table></div>`
-            + `<p class="note">A metric with no data reports its absence. "No change" and "we could `
-            + `not look" are different things, and the second must never render as the first.</p>`,
-            { cls: 'w12 ', i: 0 })
+  return `<div class="grid">`
+    + cell(`<div class="cap">activity — last ${esc(d.days || days)} days</div>`
+        + `<div class="big">${esc(r.total)}<u>runs</u></div>` + trend(t.runs, 'vs previous')
+        + plot(s.runs, 'runs')
+        + `<div class="scale"><span>${esc(String(s.start || '').slice(0, 10))}</span>`
+        + `<span>${esc(bucketLabel(s.bucketSeconds || 3600))}</span>`
+        + `<span>${esc(String(s.end || '').slice(0, 10))}</span></div>`, { cls: 'w6', i: 0 })
+    + cell(`<h3>Gate pass rate</h3><div class="cap">first attempts only</div>`
+        + ring(gates ? gates.value : null, gates ? `${gates.sample} evaluated` : 'not measured', 'g')
+        + spark(s.gateFailures, 'var(--bad)')
+        + `<div class="said q">the line is gate failures per bucket</div>`, { cls: 'w3', i: 1 })
+    + cell(`<h3>Autonomy</h3><div class="cap">merged, no human commits</div>`
+        + (autonomy && autonomy.availability === 'available'
+            ? ring(autonomy.value, `${autonomy.sample} merged`, 'a')
+            : ring(null, 'not observable', 'a')
+              + `<div class="said q">${esc(autonomy ? autonomy.reason : 'no measurement')}</div>`),
+        { cls: 'w3', i: 2 })
+    + stat('reached handoff', (s.handoffs || []).reduce((a, b) => a + b, 0), 'changes',
+        spark(s.handoffs, 'var(--good)'), 3, 'w3')
+    + stat('spend, estimated', (s.costUnits || []).reduce((a, b) => a + b, 0).toFixed(2), 'units',
+        spark(s.costUnits, 'var(--accent-2)')
+        + `<div class="said q">recorded usage and declared prices, not billing</div>`, 4, 'w3')
+    + cell(`<h3>Run mix</h3>`
+        + [['work', r.work], ['evaluation', r.evaluation], ['benchmark', r.benchmark],
+           ['improvement', r.improvement]].map(([k, n]) =>
+          `<div style="margin-top:10px"><div style="display:flex;justify-content:space-between;font-size:12.5px">`
+          + `<span>${esc(k)}</span><span class="mono">${esc(n)}</span></div>`
+          + `<div class="meter"><i style="width:${r.total ? Math.round((n / r.total) * 100) : 0}%"></i></div></div>`).join('')
+        + `<div class="said">${esc(r.note)}</div>`, { cls: 'w6', i: 5 })
+    + (shown.filter(m => m.name !== 'gate_pass_rate').length
+        ? `<div class="rule">measured</div>` + shown.filter(m => m.name !== 'gate_pass_rate')
+            .map((m, i) => stat(m.name, fmt(m.value), m.unit || '',
+              trend(t[m.name], m.unit)
+              + (m.excludes && m.excludes.length
+                  ? `<div class="said q">excludes ${esc(m.excludes.join(', '))}</div>` : ''),
+              i, 'w3')).join('')
+        : '')
+    + (absent.length
+        ? `<div class="rule">not measured, and why</div>`
+          + cell(`<div class="scroll"><table><thead><tr><th>metric</th><th>state</th>`
+            + `<th>reason</th></tr></thead><tbody>${rows}</tbody></table></div>`, { cls: 'w12 bare', i: 0 })
+          + `<div class="said note" style="grid-column:1/-1">A metric with no data reports its `
+          + `absence. "No change" and "we could not look" are different things, and the `
+          + `second must never render as the first.</div>`
         : '')
     + `</div>`;
 }
@@ -1046,7 +1030,7 @@ const STAGES = ['intake', 'triage', 'design', 'build', 'review', 'verify', 'hand
 
 function renderActivity(d) {
   if (!d.workItems || !d.workItems.length) {
-    return void_('▤', 'No work items yet', d.note || 'Run `sf work` and this board fills from the ledger.');
+    return nothing('No work items yet', d.note || 'Run `sf work` and this board fills from the ledger.');
   }
   const byStage = new Map(STAGES.map(s => [s, []]));
   d.workItems.forEach(w => {
@@ -1055,64 +1039,60 @@ function renderActivity(d) {
     byStage.get(k).push(w);
   });
   const most = Math.max(1, ...[...byStage.values()].map(v => v.length));
-
   const lanes = [...byStage.entries()].map(([stage, items]) =>
-    `<div class="lane ${items.length ? '' : 'vacant'}">`
-    + `<header><h4>${esc(stage)}</h4><span class="n">${items.length}</span></header>`
-    + `<div class="rail"><i style="width:${Math.round((items.length / most) * 100)}%"></i></div>`
+    `<div class="lane ${items.length ? '' : 'none'}">`
+    + `<div class="top"><h4>${esc(stage)}</h4><span class="ct">${items.length}</span></div>`
+    + `<div class="bar"><i style="width:${Math.round((items.length / most) * 100)}%"></i></div>`
     + (items.length ? items.map(w =>
-        `<div class="wi ${w.needsAttention ? 'flag' : ''}">`
+        `<div class="card2 ${w.needsAttention ? 'hot' : ''}">`
         + `<div class="t">${esc(w.title)}</div>`
-        + `<div class="m">${esc(w.id)} &middot; ${esc(w.workClass || '')}`
-        + `${w.rework ? ' &middot; rework &times;' + esc(w.rework) : ''}</div>`
-        + (w.why ? `<div class="w">${esc(w.why)}</div>` : '') + `</div>`).join('')
-      : `<div class="empty-lane">—</div>`)
-    + `</div>`).join('');
+        + `<div class="m">${esc(w.id)} · ${esc(w.workClass || '')}`
+        + `${w.rework ? ' · rework &times;' + esc(w.rework) : ''}</div>`
+        + (w.why ? `<div class="y">${esc(w.why)}</div>` : '') + `</div>`).join('')
+      : `<div class="said q" style="font-size:11px">—</div>`) + `</div>`).join('');
 
   const flagged = d.needingAttention || 0;
-  return `<div class="bento">`
+  return `<div class="grid">`
     + stat('work items', d.workItems.length, '', '', 0)
     + stat('needing a person', flagged, '',
-        flagged ? `<div class="delta down">↑ sorted first below</div>`
-                : `<div class="delta up">→ nothing is waiting on you</div>`, 1)
-    + tile(`<h3>Pipeline</h3><div class="flow" style="margin-top:12px">${lanes}</div>`
-        + `<p class="note">${esc(d.note || '')}</p>`, { cls: 'w12', i: 2 })
+        flagged ? `<div class="trend down">↑ sorted first</div>`
+                : `<div class="trend up">→ nothing waiting on you</div>`, 1)
+    + cell(`<h3>Pipeline</h3><div class="lanes">${lanes}</div>`
+        + `<div class="said">${esc(d.note || '')}</div>`, { cls: 'w12', i: 2 })
     + `</div>`;
 }
 
-function statusChip(s) {
+function tagFor(s) {
   const v = String(s || '').toLowerCase();
   const cls = /^(ok|pass|passed|succeeded|complete|completed|handoff|merged)$/.test(v) ? 'ok'
     : /^(blocked|failed|fail|refused|violation|closed)$/.test(v) ? 'bad'
     : /^(running|open|opened)$/.test(v) ? 'info' : 'warn';
-  return `<span class="chip ${cls}">${esc(v || 'unknown')}</span>`;
+  return `<span class="tag ${cls}">${esc(v || 'unknown')}</span>`;
 }
 
 function renderRuns(d) {
   if (!d.runs || !d.runs.length) {
-    return void_('▸', 'No runs recorded', 'A run appears the moment `sf work` writes its first ledger entry.');
+    return nothing('No runs recorded', 'A run appears the moment `sf work` writes its first ledger entry.');
   }
-  const spent = d.runs.reduce((a, r) => a + (r.costUnits || 0), 0);
   const rows = d.runs.map(r =>
-    `<tr class="clickable" data-run="${esc(r.id)}">`
-    + `<td><code>${esc(r.id)}</code></td><td>${esc(r.agent || '—')}</td>`
-    + `<td><span class="chip mute plain">${esc(r.stage || '?')}</span></td>`
-    + `<td>${statusChip(r.status)}</td>`
-    + `<td class="num">${esc(r.modelCalls)}</td><td class="num">${esc(r.toolCalls)}</td>`
-    + `<td class="num">${r.gatesFailed ? `<span class="chip bad">${esc(r.gatesFailed)}</span>` : '0'}</td>`
-    + `<td class="num">${esc(r.costUnits)}</td></tr>`).join('');
-
-  return `<div class="bento">`
+    `<tr class="go" data-run="${esc(r.id)}"><td><code>${esc(r.id)}</code></td>`
+    + `<td>${esc(r.agent || '—')}</td><td><span class="tag mute">${esc(r.stage || '?')}</span></td>`
+    + `<td>${tagFor(r.status)}</td><td class="n">${esc(r.modelCalls)}</td>`
+    + `<td class="n">${esc(r.toolCalls)}</td>`
+    + `<td class="n">${r.gatesFailed ? `<span class="tag bad">${esc(r.gatesFailed)}</span>` : '0'}</td>`
+    + `<td class="n">${esc(r.costUnits)}</td></tr>`).join('');
+  const spent = d.runs.reduce((a, r) => a + (r.costUnits || 0), 0);
+  return `<div class="grid">`
     + stat('runs recorded', d.total, '', '', 0)
-    + stat('spend', spent.toFixed(3), 'units', `<div class="delta flat">estimated</div>`, 1)
+    + stat('spend', spent.toFixed(3), 'units', `<div class="trend flat">estimated</div>`, 1)
     + stat('shown', d.shown, d.truncated ? 'of ' + d.total : '', '', 2)
     + stat('gates failed', d.runs.reduce((a, r) => a + (r.gatesFailed || 0), 0), '', '', 3)
-    + tile(`<div class="scroll"><table><thead><tr><th>run</th><th>agent</th><th>stage</th>`
-      + `<th>status</th><th class="num">model</th><th class="num">tools</th>`
-      + `<th class="num">gates failed</th><th class="num">cost</th></tr></thead>`
-      + `<tbody>${rows}</tbody></table></div>`, { cls: 'w12 flush', i: 4 })
-    + `<p class="note" style="grid-column:1/-1">${esc(d.costNote || '')} `
-    + `Click a row, or press ⌘K and type a run id.</p></div>`;
+    + cell(`<div class="scroll"><table><thead><tr><th>run</th><th>agent</th><th>stage</th>`
+      + `<th>status</th><th class="n">model</th><th class="n">tools</th>`
+      + `<th class="n">gates failed</th><th class="n">cost</th></tr></thead>`
+      + `<tbody>${rows}</tbody></table></div>`, { cls: 'w12 bare', i: 4 })
+    + `<div class="said note" style="grid-column:1/-1">${esc(d.costNote || '')} Click a row to inspect.</div>`
+    + `</div>`;
 }
 
 const SUMMARY_KEYS = ['stage', 'agent', 'tier', 'gate', 'outcome', 'status', 'tool',
@@ -1123,10 +1103,10 @@ function summarise(payload) {
   const parts = SUMMARY_KEYS
     .filter(k => payload[k] !== undefined && payload[k] !== null && payload[k] !== '')
     .map(k => `${esc(k)} <b>${esc(fmt(payload[k]))}</b>`);
-  return parts.length ? `<div class="sum">${parts.join(' &middot; ')}</div>` : '';
+  return parts.length ? `<div class="sm">${parts.join(' · ')}</div>` : '';
 }
 
-function evClass(type) {
+function beatClass(type) {
   if (/violation|escalation/.test(type)) return 'bad';
   if (/gate|finished/.test(type)) return 'ok';
   if (/model|tool|pack/.test(type)) return 'info';
@@ -1134,97 +1114,87 @@ function evClass(type) {
 }
 
 function renderRun(d) {
-  const gates = (d.gates || []).map(g => {
-    const ok = /^(pass|passed|true)$/i.test(String(g.outcome));
-    return `<span class="chip ${ok ? 'ok' : 'bad'}">${esc(g.gate)}</span>`;
-  }).join(' ');
-
-  const events = (d.entries || []).map(e => {
+  const gates = (d.gates || []).map(g =>
+    `<span class="tag ${/^(pass|passed|true)$/i.test(String(g.outcome)) ? 'ok' : 'bad'}">`
+    + `${esc(g.gate)}</span>`).join(' ');
+  const beats = (d.entries || []).map(e => {
     // A text node, not a string: the inspector returns whole ledger payloads by design,
-    // and JSON.stringify escapes JSON metacharacters rather than HTML ones -- so
-    // `</pre><img src=x onerror=...>` in model output closed the element and ran.
+    // and JSON.stringify escapes JSON metacharacters rather than HTML ones.
     const pre = document.createElement('pre');
     pre.textContent = JSON.stringify(e.payload, null, 2);
-    return `<div class="ev ${evClass(e.type)}">`
-      + `<div class="h"><span class="ty">${esc(e.type)}</span>`
-      + `<span class="at">${esc(e.at)}</span><span class="at">#${esc(e.seq)}</span></div>`
-      + summarise(e.payload)
+    return `<div class="beat ${beatClass(e.type)}"><div class="hd">`
+      + `<span class="ty">${esc(e.type)}</span><span class="ts">${esc(e.at)}</span>`
+      + `<span class="ts">#${esc(e.seq)}</span></div>${summarise(e.payload)}`
       + `<details><summary>payload</summary>${pre.outerHTML}</details></div>`;
   }).join('');
-
   const trouble = [...(d.escalations || []), ...(d.violations || [])];
-  return `<button class="back" data-back="runs">← all runs</button><div class="bento">`
+  return `<button class="back" data-back="runs">← all runs</button><div class="grid">`
     + stat('run', d.run, '', '', 0)
     + stat('tool calls', d.toolCalls, '', '', 1)
-    + stat('spend', d.costUnits, 'units', `<div class="delta flat">estimate, not billing</div>`, 2)
+    + stat('spend', d.costUnits, 'units', `<div class="trend flat">estimate</div>`, 2)
     + stat('ledger entries', (d.entries || []).length, '', '', 3)
-    + (gates ? tile(`<h3>Gates</h3><div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px">${gates}</div>`, { cls: 'w6', i: 4 }) : '')
-    + (trouble.length
-        ? tile(`<h3>Escalations and violations</h3>`
-            + trouble.map(t => `<p class="sub"><b>${esc(t.kind || t.gate || 'event')}</b> — `
-              + `${esc(t.reason || t.message || JSON.stringify(t))}</p>`).join(''), { cls: 'w6', i: 5 })
-        : '')
-    + tile(`<h3>Trace</h3><div class="trace" style="margin-top:12px">${events}</div>`
-        + `<p class="note">${esc(d.costNote || '')}</p>`, { cls: 'w12', i: 6 })
+    + (gates ? cell(`<h3>Gates</h3><div style="margin-top:11px;display:flex;flex-wrap:wrap;gap:6px">`
+        + `${gates}</div>`, { cls: 'w6', i: 4 }) : '')
+    + (trouble.length ? cell(`<h3>Escalations and violations</h3>`
+        + trouble.map(t => `<div class="said"><b>${esc(t.kind || t.gate || 'event')}</b> — `
+          + `${esc(t.reason || t.message || JSON.stringify(t))}</div>`).join(''), { cls: 'w6', i: 5 }) : '')
+    + cell(`<h3>Trace</h3><div class="thread">${beats}</div>`
+        + `<div class="said note">${esc(d.costNote || '')}</div>`, { cls: 'w12', i: 6 })
     + `</div>`;
 }
 
-function chipTile(label, values, i) {
+function tagCell(label, values, i) {
   if (!values || !values.length) {
-    return tile(`<h3>${esc(label)}</h3><p class="sub muted">none declared</p>`, { cls: 'w4', i });
+    return cell(`<h3>${esc(label)}</h3><div class="said q">none declared</div>`, { cls: 'w4', i });
   }
-  return tile(`<h3>${esc(label)} <span class="chip mute plain">${values.length}</span></h3>`
-    + `<div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px">`
-    + values.map(v => `<span class="chip info">${esc(v)}</span>`).join('') + `</div>`,
-    { cls: 'w4', i });
+  return cell(`<h3>${esc(label)} <span class="tag mute">${values.length}</span></h3>`
+    + `<div style="margin-top:11px;display:flex;flex-wrap:wrap;gap:6px">`
+    + values.map(v => `<span class="tag info">${esc(v)}</span>`).join('') + `</div>`, { cls: 'w4', i });
 }
 
 function renderDefinition(d) {
-  if (d.available === false) return unavailableTile('Definition', d.reason);
-  return `<div class="bento">`
-    + stat('factory', d.factory, '', '', 0)
-    + stat('agents', (d.agents || []).length, '', '', 1)
+  if (d.available === false) return unavailable('Definition', d.reason);
+  return `<div class="grid">`
+    + stat('factory', d.factory, '', '', 0) + stat('agents', (d.agents || []).length, '', '', 1)
     + stat('skills', (d.skills || []).length, '', '', 2)
     + stat('repositories', (d.repositories || []).length, '', '', 3)
-    + `<h2 class="rule">components</h2>`
-    + chipTile('agents', d.agents, 0) + chipTile('automations', d.automations, 1)
-    + chipTile('runners', d.runners, 2) + chipTile('scorers', d.scorers, 3)
-    + chipTile('skills', d.skills, 4) + chipTile('principals', d.principals, 5)
-    + ((d.unloaded || []).length ? chipTile('failed to load', d.unloaded, 6) : '')
-    + chipTile('repositories', d.repositories, 7)
-    + `<p class="note" style="grid-column:1/-1">${esc(d.note || '')}</p></div>`;
+    + `<div class="rule">components</div>`
+    + tagCell('agents', d.agents, 0) + tagCell('automations', d.automations, 1)
+    + tagCell('runners', d.runners, 2) + tagCell('scorers', d.scorers, 3)
+    + tagCell('skills', d.skills, 4) + tagCell('principals', d.principals, 5)
+    + ((d.unloaded || []).length ? tagCell('failed to load', d.unloaded, 6) : '')
+    + tagCell('repositories', d.repositories, 7)
+    + `<div class="said note" style="grid-column:1/-1">${esc(d.note || '')}</div></div>`;
 }
 
 function renderEvaluation(d) {
   const names = Object.keys(d.scorers || {});
   if (!names.length && !(d.proposals || []).length) {
-    return void_('◎', 'Nothing evaluated yet',
+    return nothing('Nothing evaluated yet',
       'Scorers record here once runs are sampled, and proposals once the improvement loop opens one.');
   }
-  const scorerTiles = names.map((name, i) => {
+  const scorers = names.map((name, i) => {
     const s = d.scorers[name];
     const outcomes = Object.entries(s.outcomes || {});
     const passed = outcomes.filter(([k]) => /pass|ok/i.test(k)).reduce((a, [, v]) => a + v, 0);
-    const rate = s.sampled ? passed / s.sampled : null;
-    return tile(`<h3>${esc(name)}</h3>` + gauge(rate, `${s.sampled} sampled`, 'sc' + i)
-      + `<div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px">`
-      + outcomes.map(([k, v]) => `<span class="chip ${/pass|ok/i.test(k) ? 'ok' : 'bad'}">`
+    return cell(`<h3>${esc(name)}</h3>`
+      + ring(s.sampled ? passed / s.sampled : null, `${s.sampled} sampled`, 's' + i)
+      + `<div style="margin-top:11px;display:flex;flex-wrap:wrap;gap:6px">`
+      + outcomes.map(([k, v]) => `<span class="tag ${/pass|ok/i.test(k) ? 'ok' : 'bad'}">`
         + `${esc(k)} ${esc(v)}</span>`).join('') + `</div>`, { cls: 'w4', i });
   }).join('');
-
   const props = (d.proposals || []).map(p =>
     `<tr><td><code>${esc(p.id)}</code></td><td>${esc(p.target)}</td>`
-    + `<td>${statusChip(p.status)}</td>`
+    + `<td>${tagFor(p.status)}</td>`
     + `<td>${esc((p.evidence || []).join('; ') || 'no evidence recorded')}</td></tr>`).join('');
-
-  return `<div class="bento">`
-    + (scorerTiles ? `<h2 class="rule">scorers</h2>${scorerTiles}` : '')
-    + `<h2 class="rule">improvement proposals</h2>`
-    + tile(props
+  return `<div class="grid">`
+    + (scorers ? `<div class="rule">scorers</div>${scorers}` : '')
+    + `<div class="rule">improvement proposals</div>`
+    + cell(props
         ? `<div class="scroll"><table><thead><tr><th>proposal</th><th>target</th><th>status</th>`
           + `<th>evidence</th></tr></thead><tbody>${props}</tbody></table></div>`
-        : `<p class="sub muted">No proposal has been opened. The loop proposes; it never applies.</p>`,
-        { cls: props ? 'w12 flush' : 'w12', i: 0 })
+        : `<div class="said q">No proposal has been opened. The loop proposes; it never applies.</div>`,
+        { cls: props ? 'w12 bare' : 'w12', i: 0 })
     + `</div>`;
 }
 
@@ -1232,54 +1202,45 @@ function renderRegistry(d) {
   const m = d.memory || {};
   const lanes = Object.entries(m).filter(([k]) =>
     !['available', 'reason', 'total', 'quarantined', 'bytes'].includes(k));
-
-  const memTiles = m.available === false
-    ? tile(`<h3>Memory</h3><p class="sub muted">${esc(m.reason)}</p>`, { cls: 'w6', i: 0 })
+  const mem = m.available === false
+    ? cell(`<h3>Memory</h3><div class="said q">${esc(m.reason)}</div>`, { cls: 'w6', i: 0 })
     : stat('memories', fmt(m.total), '', '', 0)
       + stat('quarantined', fmt(m.quarantined), '',
-          m.quarantined ? `<div class="delta down">↑ held out of retrieval</div>`
-                        : `<div class="delta up">→ clean</div>`, 1)
+          m.quarantined ? `<div class="trend down">↑ held out of retrieval</div>`
+                        : `<div class="trend up">→ clean</div>`, 1)
       + stat('size', fmt(Math.round((m.bytes || 0) / 1024)), 'KiB', '', 2)
-      + (lanes.length ? tile(`<h3>Lanes</h3>`
-          + lanes.map(([lane, n]) =>
-            `<div style="margin-top:10px"><div style="display:flex;justify-content:space-between;font-size:12.5px">`
-            + `<span>${esc(lane)}</span><span class="mono">${esc(n)}</span></div>`
-            + `<div class="meter"><i style="width:${m.total ? Math.round((n / m.total) * 100) : 0}%"></i></div></div>`
-          ).join(''), { cls: 'w3', i: 3 }) : '');
-
+      + (lanes.length ? cell(`<h3>Lanes</h3>` + lanes.map(([lane, n]) =>
+          `<div style="margin-top:10px"><div style="display:flex;justify-content:space-between;font-size:12.5px">`
+          + `<span>${esc(lane)}</span><span class="mono">${esc(n)}</span></div>`
+          + `<div class="meter"><i style="width:${m.total ? Math.round((n / m.total) * 100) : 0}%"></i>`
+          + `</div></div>`).join(''), { cls: 'w3', i: 3 }) : '');
   const skills = (d.skills || []).map(s =>
-    `<tr><td><code>${esc(s.name)}</code></td><td>${statusChip(s.status)}</td>`
-    + `<td class="num">${esc(pct(s.precision))}</td><td class="num">${esc(pct(s.recall))}</td>`
-    + `<td class="num">${esc(s.offered)}</td><td class="num">${esc(s.helped)}</td></tr>`).join('');
-
-  return `<div class="bento"><h2 class="rule">memory fabric</h2>${memTiles}`
-    + `<h2 class="rule">skills</h2>`
-    + tile(skills
+    `<tr><td><code>${esc(s.name)}</code></td><td>${tagFor(s.status)}</td>`
+    + `<td class="n">${esc(pct(s.precision))}</td><td class="n">${esc(pct(s.recall))}</td>`
+    + `<td class="n">${esc(s.offered)}</td><td class="n">${esc(s.helped)}</td></tr>`).join('');
+  return `<div class="grid"><div class="rule">memory fabric</div>${mem}`
+    + `<div class="rule">skills</div>`
+    + cell(skills
         ? `<div class="scroll"><table><thead><tr><th>skill</th><th>status</th>`
-          + `<th class="num">precision</th><th class="num">recall</th><th class="num">offered</th>`
-          + `<th class="num">helped</th></tr></thead><tbody>${skills}</tbody></table></div>`
-        : `<p class="sub muted">No skills are declared in this factory.</p>`,
-        { cls: skills ? 'w12 flush' : 'w12', i: 0 })
-    + `<p class="note" style="grid-column:1/-1">Precision is, of the times a skill was loaded, `
-    + `how often it helped. Recall counts retrospectively-detected misses and is an estimate `
-    + `with a stated derivation, not a measurement.</p></div>`;
+          + `<th class="n">precision</th><th class="n">recall</th><th class="n">offered</th>`
+          + `<th class="n">helped</th></tr></thead><tbody>${skills}</tbody></table></div>`
+        : `<div class="said q">No skills are declared in this factory.</div>`,
+        { cls: skills ? 'w12 bare' : 'w12', i: 0 })
+    + `<div class="said note" style="grid-column:1/-1">Precision is, of the times a skill was `
+    + `loaded, how often it helped. Recall counts retrospectively-detected misses and is an `
+    + `estimate with a stated derivation, not a measurement.</div></div>`;
 }
 
-function unavailableTile(what, reason) {
-  return `<div class="bento">` + tile(`<h3>${esc(what)} is not available</h3>`
-    + `<p class="sub">${esc(reason)}</p>`
-    + `<p class="sub muted">The factory is fine and the page is fine — this one panel has `
-    + `nothing behind it, and an operator needs to know which and why.</p>`, { cls: 'w6', i: 0 })
-    + `</div>`;
+function unavailable(what, reason) {
+  return `<div class="grid">` + cell(`<h3>${esc(what)} is not available</h3>`
+    + `<div class="said">${esc(reason)}</div>`
+    + `<div class="said q">The factory is fine and the page is fine — this one panel has `
+    + `nothing behind it, and an operator needs to know which and why.</div>`,
+    { cls: 'w6', i: 0 }) + `</div>`;
 }
 
-function void_(glyph, head, body) {
-  return `<div class="void"><div class="g">${glyph}</div><h3>${esc(head)}</h3>`
-    + `<p class="note">${esc(body)}</p></div>`;
-}
-
-function renderError(d) {
-  return unavailableTile(String(d.error), String(d.message));
+function nothing(head, body) {
+  return `<div class="nothing"><h3>${esc(head)}</h3><div class="said">${esc(body)}</div></div>`;
 }
 
 /* ------------------------------------------------------------------ load */
@@ -1293,8 +1254,8 @@ async function load(opts) {
   const quiet = opts && opts.quiet;
   if (!quiet) {
     status('ok', 'reading');
-    content.innerHTML = `<div class="bento"><div class="skel"></div><div class="skel"></div>`
-      + `<div class="skel"></div><div class="skel"></div></div>`;
+    content.innerHTML = `<div class="grid"><div class="load"></div><div class="load"></div>`
+      + `<div class="load"></div><div class="load"></div></div>`;
   }
   const q = new URLSearchParams({ days: String(days) });
   if (view === 'run' && runId) q.set('run', runId);
@@ -1303,21 +1264,25 @@ async function load(opts) {
     data = await (await fetch(`/api/${view}?${q}`)).json();
   } catch (err) {
     status('down', 'unreachable');
-    content.innerHTML = unavailableTile('Could not reach the factory', String(err));
+    content.innerHTML = unavailable('Could not reach the factory', String(err));
     return;
   }
   lastData = data;
-  if (data && data.error) { content.innerHTML = renderError(data); status('stale', String(data.error)); return; }
+  if (data && data.error) {
+    content.innerHTML = unavailable(String(data.error), String(data.message));
+    status('stale', String(data.error));
+    return;
+  }
   const render = RENDER[view];
-  content.innerHTML = render ? render(data) : renderError({ error: 'view.unknown', message: view });
+  content.innerHTML = render ? render(data) : unavailable('view.unknown', view);
   status('ok', new Date().toLocaleTimeString());
 }
 
 content.addEventListener('click', e => {
   const row = e.target.closest('tr[data-run]');
-  if (row) { go('run', row.dataset.run); return; }
+  if (row) { tap(); go('run', row.dataset.run); return; }
   const back = e.target.closest('[data-back]');
-  if (back) go(back.dataset.back);
+  if (back) { tap(); go(back.dataset.back); }
 });
 
 go('overview');
