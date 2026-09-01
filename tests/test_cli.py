@@ -1432,3 +1432,21 @@ def test_every_command_can_explain_itself() -> None:
 
     assert checked > 60, f"only {checked} commands swept"
     assert broken == [], broken
+
+
+def test_a_ledger_command_takes_the_state_directory_too(tmp_path: Path) -> None:
+    """Sixteen commands take a ledger file positionally; eight others take `--state` and
+    append `ledger.jsonl`. An operator who learns the second spelling and types it for the
+    first got `IsADirectoryError` straight through the terminal — an uncaught traceback,
+    because it is not a `FactoryError` and nothing else was looking.
+    """
+    state = tmp_path / ".factory"
+    state.mkdir()
+    (state / "ledger.jsonl").write_text("", encoding="utf-8")
+
+    as_dir = runner.invoke(app, ["spend", str(state)])
+    as_file = runner.invoke(app, ["spend", str(state / "ledger.jsonl")])
+
+    assert as_dir.exit_code == as_file.exit_code
+    assert "Traceback" not in as_dir.output
+    assert as_dir.exception is None or isinstance(as_dir.exception, SystemExit)
