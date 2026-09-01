@@ -1880,12 +1880,24 @@ class Coordinator:
     #: When the run never produced output, the gates evaluate an empty result and fail --
     #: truthfully, but about a consequence. The blocker already named the real cause; only
     #: the action did not, so the two disagreed and the action is what an operator reads.
+    #:
+    #: `GATE_FAILED` belongs here despite its name, which is the reason it was missed the
+    #: first time. Nothing in the orchestrator ever sets it: `TurnLoop` is its only writer,
+    #: and it means the model's output never validated, not that an eval gate failed. So it
+    #: always arrives carrying the loop's own account of what went wrong -- a truncated
+    #: answer, a run of empty turns, a field the schema rejected -- and that account is
+    #: strictly better than the remediation of whichever gate happened to notice the
+    #: absence afterwards. A trial blocked a DESIGN stage whose real reason was `output was
+    #: cut off ... Unterminated string` and told the operator to `Emit the calibration
+    #: block required by the stage's output schema`, which sends somebody to rewrite a
+    #: prompt that was never the problem.
     _RUN_FAILURES = frozenset(
         {
             RunStatus.PROVIDER_FAILED,
             RunStatus.SETUP_FAILED,
             RunStatus.BUDGET_EXCEEDED,
             RunStatus.CANCELLED,
+            RunStatus.GATE_FAILED,
         }
     )
 
