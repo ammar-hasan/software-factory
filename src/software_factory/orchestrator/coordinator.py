@@ -2029,9 +2029,8 @@ def _budget_from(execution: Any) -> Budget:
     many tokens, everything else as usual", and reading an unset field as zero would end
     every run on its first turn.
 
-    `turns` has no counterpart in the definition schema and keeps the harness default. It is
-    a bound of the same kind, but adding it to the schema is a definition change, and
-    inventing a value here would apply a limit nobody wrote.
+    `turns` is settable too, since a live trial showed it was the bound that mattered most
+    and the only one an operator could not reach.
     """
     default = Budget()
     declared = getattr(execution, "budget", None)
@@ -2042,5 +2041,5 @@ def _budget_from(execution: Any) -> Budget:
         tool_calls=int(declared.tool_calls or default.tool_calls),
         tokens=int(declared.tokens or default.tokens),
         cost_units=float(declared.cost_units or default.cost_units),
-        turns=default.turns,
+        turns=int(declared.turns or default.turns),
     )

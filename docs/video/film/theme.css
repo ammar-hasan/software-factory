@@ -202,6 +202,13 @@
   text-transform: uppercase;
 }
 
+/* A file path is a literal string; upper-casing it would misquote it. */
+.plate-cap.path {
+  text-transform: none;
+  letter-spacing: 0.06em;
+  font-size: 13px;
+}
+
 /* ------------------------------------------------------------------- lists */
 
 .mechs {
@@ -239,8 +246,8 @@
 .queue {
   display: flex;
   flex-wrap: wrap;
-  gap: 9px;
-  max-width: 27em;
+  gap: 10px;
+  max-width: 41em;
 }
 
 .tik {
@@ -265,14 +272,14 @@
 
 .two {
   display: grid;
-  grid-template-columns: 268px 1fr;
+  grid-template-columns: 420px 1fr;
   gap: 30px;
   align-items: start;
 }
 
 .card {
   display: block;
-  width: 268px;
+  width: 420px;
   height: auto;
   border: 1px solid var(--sfline2);
   border-radius: 12px;
@@ -294,14 +301,14 @@
 }
 
 .mark .dot {
-  width: 30px;
-  height: 30px;
-  border-radius: 9px;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
   background: linear-gradient(140deg, var(--accent), #58e6d0);
 }
 
 .mark .wm {
-  font-size: 31px;
+  font-size: 44px;
   font-weight: 300;
   color: var(--sfdim);
   letter-spacing: -0.01em;
@@ -314,7 +321,7 @@
 
 .foot {
   font-family: var(--sfmono);
-  font-size: 15px;
+  font-size: 16px;
   color: var(--sffaint);
   letter-spacing: 0.05em;
 }

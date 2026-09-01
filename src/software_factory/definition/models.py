@@ -168,6 +168,18 @@ class Budget(Strict):
     tool_calls: int | None = Field(default=None, alias="toolCalls", gt=0)
     tokens: int | None = Field(default=None, gt=0)
     cost_units: float | None = Field(default=None, alias="costUnits", gt=0)
+    turns: int | None = Field(default=None, gt=0)
+    """How many model calls one run may make.
+
+    The harness has always had this bound; the definition could not set it, so the only way
+    to change it was to edit the code. A live trial made the omission concrete: adding a
+    `--version` flag took sixty-five turns across five stages, eighteen of them in triage,
+    with an awareness pack of a thousand tokens. The cost was the transcript growing, and
+    the one bound that speaks to that was the one an operator could not reach.
+
+    A ceiling, not a target. Truncating a stage produces worse work rather than cheaper
+    work, so this is for stopping a run that has clearly lost the thread -- not for making
+    a careful one hurry."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
@@ -748,6 +749,13 @@ def test_an_agent_cannot_send_as_somebody_else(definition, repo: Path, tmp_path:
 # ------------------------------------------------------- the budget the definition declares
 
 
+@dataclass
+class _WithBudget:
+    """Stands in for the resolved execution block, carrying only what `_budget_from` reads."""
+
+    budget: object | None
+
+
 def test_a_declared_budget_reaches_the_run(definition, repo: Path, tmp_path: Path) -> None:
     """`ExecutionDefaults.budget` was declared, validated, inheritance-resolved and read by
     nothing: every run got `Budget()` whatever the definition said.
@@ -757,16 +765,15 @@ def test_a_declared_budget_reaches_the_run(definition, repo: Path, tmp_path: Pat
     real product trial spent 700,000 input tokens adding a `--version` flag with no way to
     say otherwise.
     """
+    from software_factory.definition.models import Budget as Declared
     from software_factory.orchestrator.coordinator import _budget_from
 
-    class Declared:
-        budget = type(
-            "B",
-            (),
-            {"wall_clock_s": 90.0, "tool_calls": 7, "tokens": 50_000, "cost_units": 2.5},
-        )()
-
-    budget = _budget_from(Declared())
+    # The real model, not a hand-made double. A double drifts from the schema silently:
+    # these two tests were written with stand-ins and stopped matching the moment `turns`
+    # was added, which is the same way a double stops testing the thing it stands for.
+    budget = _budget_from(
+        _WithBudget(Declared(wallClockSeconds=90, toolCalls=7, tokens=50_000, costUnits=2.5))
+    )
 
     assert budget.tokens == 50_000
     assert budget.tool_calls == 7
@@ -777,31 +784,58 @@ def test_a_declared_budget_reaches_the_run(definition, repo: Path, tmp_path: Pat
 def test_an_unset_field_keeps_the_harness_default(definition, repo: Path, tmp_path: Path) -> None:
     """A definition setting only `tokens` means "this many tokens, everything else as
     usual". Reading an unset field as zero would end every run on its first turn."""
+    from software_factory.definition.models import Budget as Declared
     from software_factory.harness.loop import Budget
     from software_factory.orchestrator.coordinator import _budget_from
 
-    class PartlyDeclared:
-        budget = type(
-            "B",
-            (),
-            {"wall_clock_s": None, "tool_calls": None, "tokens": 1_000, "cost_units": None},
-        )()
-
-    budget = _budget_from(PartlyDeclared())
+    budget = _budget_from(_WithBudget(Declared(tokens=1_000)))
 
     assert budget.tokens == 1_000
     assert budget.tool_calls == Budget().tool_calls
     assert budget.wall_clock_s == Budget().wall_clock_s
 
 
+def test_the_turn_bound_is_settable_from_the_definition(
+    definition, repo: Path, tmp_path: Path
+) -> None:
+    """The harness always had this bound; the definition could not set it.
+
+    A live trial made the omission concrete: adding a `--version` flag took sixty-five turns
+    across five stages, eighteen of them in triage, with an awareness pack of a thousand
+    tokens. The cost was the transcript growing — and the one bound that speaks to that was
+    the only one an operator could not reach without editing the code.
+    """
+    from software_factory.definition.models import Budget as Declared
+    from software_factory.orchestrator.coordinator import _budget_from
+
+    assert _budget_from(_WithBudget(Declared(turns=6))).turns == 6
+
+
+def test_a_definition_accepts_a_turn_bound(tmp_path: Path) -> None:
+    """Through the real loader, because a field the schema rejects is a field nobody can
+    set however well the resolver reads it."""
+    import yaml
+
+    from software_factory.definition import load_strict
+
+    root = tmp_path / "turns"
+    root.mkdir()
+    init_factory(root, name="demo", owner="acme", repo="demo")
+    document = yaml.safe_load((root / "factory.yaml").read_text(encoding="utf-8"))
+    document["agentDefaults"]["budget"] = {"turns": 6, "tokens": 50_000}
+    (root / "factory.yaml").write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    loaded = load_strict(root)
+
+    assert loaded.factory.agent_defaults.budget is not None
+    assert loaded.factory.agent_defaults.budget.turns == 6
+
+
 def test_no_declared_budget_is_the_harness_default(definition, repo: Path, tmp_path: Path) -> None:
     from software_factory.harness.loop import Budget
     from software_factory.orchestrator.coordinator import _budget_from
 
-    class Nothing:
-        budget = None
-
-    assert _budget_from(Nothing()) == Budget()
+    assert _budget_from(_WithBudget(None)) == Budget()
 
 
 def test_the_declared_budget_is_what_the_loop_is_given(
