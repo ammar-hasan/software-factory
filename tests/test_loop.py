@@ -144,6 +144,7 @@ def loop(
     schema: dict | None = None,
     task: str = "The importer mangles BOM headers.",
     repair_budget: int = 3,
+    should_stop=None,
 ) -> TurnLoop:
     registry = registry or ToolRegistry()
     return TurnLoop(
@@ -158,6 +159,7 @@ def loop(
         task=task,
         output_schema=schema,
         repair_budget=repair_budget,
+        should_stop=should_stop,
     )
 
 
@@ -543,3 +545,59 @@ def test_running_out_of_turns_is_a_budget_breach_not_a_silent_stop() -> None:
     assert result.status is RunStatus.BUDGET_EXCEEDED
     assert "turns: 3 of 3" in (result.reason or "")
     assert result.spend.turns == 3
+
+
+# ---------------------------------------------------------------- stopping in flight
+
+
+def test_a_stop_ends_the_run_before_the_turn_is_spent() -> None:
+    """Checked before the model call, not after.
+
+    Nothing could stop a run in flight: `StageMachine.cancel` acts between stages, on an
+    item nobody is executing. A live run against a hosted model took ten minutes and a
+    hundred thousand input tokens in a single stage, and the only thing that would have
+    ended it early was the budget ceiling -- a bound on the total, not a way for a person to
+    intervene before it is reached. A stop observed *after* the call has already paid for
+    the thing it was asked to prevent.
+    """
+
+    class Exploding:
+        name = "must-not-be-called"
+
+        def complete(self, *args, **kwargs):
+            raise AssertionError("the provider was called after a stop was signalled")
+
+    result = loop(Exploding(), should_stop=lambda: "stopped by amaya: wrong branch").run()
+
+    assert result.status is RunStatus.CANCELLED
+    assert "amaya" in result.reason
+    assert result.spend.turns == 0, "a stopped run still counted a turn"
+
+
+def test_a_run_that_is_not_stopped_proceeds() -> None:
+    """The guard must not be so eager that it stops everything."""
+    result = loop(StubProvider([says('{"summary": "done"}')]), should_stop=lambda: "").run()
+
+    assert result.status is not RunStatus.CANCELLED
+
+
+def test_a_stop_signalled_mid_run_ends_it_at_the_next_turn() -> None:
+    """A stage is the unit a schedule thinks in; a turn is the unit spend happens in."""
+    calls = {"n": 0}
+
+    def signal() -> str:
+        calls["n"] += 1
+        return "" if calls["n"] < 2 else "stopped by amaya: enough"
+
+    result = loop(
+        StubProvider([says("not json"), says('{"summary": "done"}')]),
+        schema={
+            "type": "object",
+            "required": ["summary"],
+            "properties": {"summary": {"type": "string"}},
+        },
+        should_stop=signal,
+    ).run()
+
+    assert result.status is RunStatus.CANCELLED
+    assert result.spend.turns == 1, "the stop did not take effect at the next turn"

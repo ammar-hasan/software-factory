@@ -222,6 +222,15 @@ class TurnLoop:
     repair_budget: int = 3
     per_mtok_in: float = 0.0
     per_mtok_out: float = 0.0
+    should_stop: Any = None
+    """A callable returning a reason to stop, or empty/None to continue.
+
+    Checked between turns rather than only between stages. A stage is the unit a schedule
+    thinks in; a turn is the unit spend happens in, and a stop that takes effect at the next
+    stage boundary can be ten minutes and a hundred thousand tokens away — which is
+    indistinguishable from not working.
+    """
+
     _violation_mark: int = 0
 
     def run(self) -> RunResult:
@@ -241,6 +250,14 @@ class TurnLoop:
             breach = self.budget.exceeded(result.spend)
             if breach:
                 return self._end(result, RunStatus.BUDGET_EXCEEDED, breach)
+
+            # Before the turn's spend, not after it. A stop observed after the model call
+            # has already paid for the thing it was asked to prevent.
+            if self.should_stop is not None:
+                reason = self.should_stop()
+                if reason:
+                    return self._end(result, RunStatus.CANCELLED, str(reason))
+
             result.spend.turns += 1
 
             if not warned and self.budget.nearest_fraction(result.spend) >= 0.8:

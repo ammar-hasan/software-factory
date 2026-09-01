@@ -52,6 +52,9 @@ cannot be scripted, and PR-2 makes the local path the reference one.
 | `sf schedule list` | Every schedule this factory declares, and when each next fires. |
 | `sf schedule run` | Fire everything due, through the same intake path as any other event. |
 | `sf spec induct` | Propose draft spec units from an existing codebase. |
+| `sf stop clear` | Withdraw a stop so the work can be resumed. |
+| `sf stop list` | Every outstanding stop. |
+| `sf stop now` | Stop a running work item, or the whole fleet. |
 | `sf workspace init` | Write a workspace file listing factory roots (FR-1.5). |
 | `sf workspace list` | Every factory in the workspace, side by side. |
 | `sf workspace metrics` | Fold every factory's ledger over one window, side by side. |

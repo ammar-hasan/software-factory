@@ -2931,6 +2931,115 @@ def workspace_metrics(
     raise typer.Exit(EXIT_OK)
 
 
+stop_app = typer.Typer(
+    help="Stop work that is already running, and withdraw a stop.", no_args_is_help=True
+)
+app.add_typer(stop_app, name="stop")
+
+
+@stop_app.command("now")
+def stop_now(
+    work_item: Annotated[str, typer.Argument(help="The work item to stop, or `*` for everything.")],
+    by: Annotated[str, typer.Option("--by", help="Who is stopping it. Required.")],
+    reason: Annotated[str, typer.Option("--reason", help="Why. Required.")],
+    state: Annotated[
+        Path, typer.Option("--state", help="Where run state and the ledger live.")
+    ] = Path(".factory"),
+    as_json: JsonOpt = False,
+) -> None:
+    """Stop a running work item, or the whole fleet.
+
+    Takes effect **between turns**, not at the next stage boundary. A stage is the unit a
+    schedule thinks in; a turn is the unit spend happens in, and a stop that lands ten
+    minutes and a hundred thousand tokens later is indistinguishable from one that does not
+    work.
+
+    `--by` and `--reason` are required rather than optional. `EMERGENCY_STOP` is a
+    person-only capability, and a stop that leaves no record is an unexplained gap in a
+    run's history -- exactly the gap somebody will later be trying to explain.
+    """
+    from software_factory.ledger import EntryType, Ledger
+    from software_factory.orchestrator.stopping import ALL, StopBook
+
+    if not by.strip() or not reason.strip():
+        console.print("[red]--by and --reason are both required[/]")
+        raise typer.Exit(EXIT_UNUSABLE)
+
+    stop = StopBook.in_state(state).request(work_item, by=by.strip(), reason=reason.strip())
+    ledger_path = state / "ledger.jsonl"
+    if ledger_path.exists():
+        Ledger(ledger_path).append(
+            EntryType.HUMAN_DECISION,
+            actor=by.strip(),
+            subject=work_item,
+            payload={"decision": "emergency_stop", **stop.as_dict()},
+        )
+
+    if as_json:
+        _emit({"ok": True, "stop": stop.as_dict()})
+        raise typer.Exit(EXIT_OK)
+
+    scope = "the whole fleet" if work_item == ALL else work_item
+    console.print(f"[yellow]stopping[/] {scope} — {stop.reason}")
+    console.print(
+        "[dim]Takes effect between turns. A run already inside a model call finishes that "
+        "call and then stops.[/]"
+    )
+    raise typer.Exit(EXIT_OK)
+
+
+@stop_app.command("list")
+def stop_list(
+    state: Annotated[
+        Path, typer.Option("--state", help="Where run state and the ledger live.")
+    ] = Path(".factory"),
+    as_json: JsonOpt = False,
+) -> None:
+    """Every outstanding stop."""
+    from software_factory.orchestrator.stopping import StopBook
+
+    stops = StopBook.in_state(state).all()
+    if as_json:
+        _emit({"ok": True, "stops": [s.as_dict() for s in stops]})
+        raise typer.Exit(EXIT_OK)
+    if not stops:
+        console.print("[dim]nothing is stopped[/]")
+        raise typer.Exit(EXIT_OK)
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("subject", "by", "at", "reason"):
+        table.add_column(column, overflow="fold")
+    for stop in stops:
+        table.add_row(stop.subject, stop.by, stop.at.isoformat(), stop.reason)
+    console.print(table)
+    raise typer.Exit(EXIT_OK)
+
+
+@stop_app.command("clear")
+def stop_clear(
+    work_item: Annotated[
+        str | None, typer.Argument(help="Which stop to withdraw. Omit for all of them.")
+    ] = None,
+    state: Annotated[
+        Path, typer.Option("--state", help="Where run state and the ledger live.")
+    ] = Path(".factory"),
+    as_json: JsonOpt = False,
+) -> None:
+    """Withdraw a stop so the work can be resumed.
+
+    Separate from issuing one, and never implicit. A stop that expired on its own would be
+    a stop an operator has to keep re-issuing to be sure of, which is the opposite of what
+    a stop is for.
+    """
+    from software_factory.orchestrator.stopping import StopBook
+
+    withdrawn = StopBook.in_state(state).clear(work_item)
+    if as_json:
+        _emit({"ok": True, "withdrawn": withdrawn})
+    else:
+        console.print(f"[green]withdrew[/] {withdrawn} stop(s)")
+    raise typer.Exit(EXIT_OK)
+
+
 def main() -> None:
     """Console-script entry point."""
     app()

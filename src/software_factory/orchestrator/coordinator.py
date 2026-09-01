@@ -738,6 +738,7 @@ class Coordinator:
         allow_unsandboxed: bool = False,
         recording_policy: RecordingPolicy | None = None,
         spend_cap: SpendCap | None = None,
+        stops: Any = None,
     ) -> None:
         self.definition = definition
         self.provider = provider
@@ -745,6 +746,11 @@ class Coordinator:
         self.ledger = ledger
         self.spec = spec or SpecStore()
         self.memory = memory or MemoryStore(ledger.path.parent / "memory.jsonl")
+        # Beside the ledger by default, because that is where a state directory is and an
+        # operator stopping a fleet should not have to know a second path.
+        from software_factory.orchestrator.stopping import StopBook
+
+        self.stops = stops if stops is not None else StopBook.in_state(ledger.path.parent)
         self.skills = skills or _registry_from(definition)
         self.pack_budget_tokens = pack_budget_tokens
         self.machine = StageMachine()
@@ -791,6 +797,13 @@ class Coordinator:
         # A work item can be run more than once (a resume after a block), and each run
         # starts from the source, so discarding the previous workspace is intended here
         # rather than stumbled into.
+        stop = self._stop_reason(item)
+        if stop:
+            # Before a workspace is built and before anything is spent. A stop issued while
+            # a work item sat in the queue must not be discovered a stage later.
+            self._block(item, Blocker.AWAITING_HUMAN, stop)
+            return outcome
+
         workspace = self.workspaces.create(run_id=item.id, replace=True)
         # The commit this work sits on. `WorkItem.base_commit` was declared and written by
         # nothing, so every run fell through to a `HEAD~1` guess -- see `_parent_commit`.
@@ -982,6 +995,7 @@ class Coordinator:
             role_prompt=prompt,
             task=item.request,
             output_schema=STAGE_SCHEMAS.get(stage),
+            should_stop=lambda: self._stop_reason(item),
         )
         conversation = self.conversations.setdefault(
             (item.id, agent_name), ConversationState(work_item_id=item.id, agent=agent_name)
@@ -1626,6 +1640,22 @@ class Coordinator:
             subject=item.id,
             payload={"blocker": blocker.value, "action": action},
         )
+
+    def _stop_reason(self, item: Any) -> str:
+        """Why this work item should stop now, or empty.
+
+        Re-read from disk every call rather than cached: the person stopping a run is at a
+        different terminal from the process running it, and a cached answer is one this
+        process cannot change its mind about.
+        """
+        if self.stops is None:
+            return ""
+        stop = self.stops.stopped(item.id)
+        if stop is None:
+            return ""
+        who = stop.by or "an operator"
+        scope = "everything" if stop.everything else item.id
+        return f"stopped by {who} ({scope}): {stop.reason or 'no reason given'}"
 
     @staticmethod
     def _blocker_for(outcome: StageOutcome) -> Blocker:
