@@ -339,6 +339,24 @@ class PrincipalDefinition(Strict):
         return self
 
 
+class WorkerDeclaration(Strict):
+    """One machine the factory may dispatch to (FR-8.2).
+
+    `workerHost` names exactly one machine and is enough for a factory with one worker.
+    This is the plural form: several machines that are *not* interchangeable, each declaring
+    the capabilities it has, so work can ask for what it needs rather than for a hostname
+    somebody has to keep correct in three files.
+    """
+
+    name: Name
+    host: str = Field(min_length=1)
+    labels: tuple[str, ...] = ()
+    capacity: int = Field(default=1, ge=1)
+    draining: bool = False
+
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
+
 class FactoryDocument(Strict):
     """``factory.yaml`` -- the root document (FR-2.1)."""
 
@@ -352,6 +370,7 @@ class FactoryDocument(Strict):
     mcp_servers: dict[str, McpServerRef] = Field(default_factory=dict, alias="mcpServers")
     ladder: Ladder | None = None
     agent_defaults: ExecutionDefaults = Field(alias="agentDefaults")
+    workers: tuple[WorkerDeclaration, ...] = ()
     credential_strategy: CredentialStrategy = Field(
         default=CredentialStrategy.EXECUTOR, alias="credentialStrategy"
     )
@@ -365,6 +384,15 @@ class FactoryDocument(Strict):
             raise ValueError(
                 "`agentDefaults` must declare exactly one of `model`, `tier`, or `harness`"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _workers_unique(self) -> Self:
+        names = [worker.name for worker in self.workers]
+        if len(names) != len(set(names)):
+            # Two workers sharing a name share a lease slot, so one silently gets double
+            # the capacity it declared -- and which one depends on document order.
+            raise ValueError("worker names must be unique; leases are keyed by name")
         return self
 
     @model_validator(mode="after")

@@ -175,6 +175,17 @@ class WorkItem:
     know a machine filed it, and read its confidence accordingly (FR-16.5).
     """
 
+    requires: tuple[str, ...] = ()
+    """Worker labels this item needs, e.g. ``("gpu",)`` or ``("staging-network",)``.
+
+    A property of the work rather than of the agent that picks it up. The same builder runs
+    a unit-test fix anywhere and an integration test only where the staging network is
+    reachable, and encoding that on the agent would force one agent per machine shape.
+
+    Empty means "anywhere", which is the honest default: an item nobody has classified must
+    not silently acquire a requirement no worker satisfies and stop being routable.
+    """
+
     user_facing: bool | None = None
     """Whether this change alters what a person sees. ``None`` means nobody has said.
 

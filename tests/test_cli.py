@@ -7,6 +7,7 @@ they are asserted explicitly rather than incidentally.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -1176,3 +1177,37 @@ def test_govern_erase_says_what_it_cannot_erase(scaffold: Path) -> None:
     assert body["erasure"]["examined"] >= 1
     assert body["erasure"]["unerasable"], "the ledger is unerasable by design and must say so"
     assert body["erasure"]["complete"] is False, "a dry run has not completed anything"
+
+
+def test_every_command_group_is_reachable_as_a_module() -> None:
+    """`sf x` and `python -m software_factory.cli x` must offer the same commands.
+
+    They came apart once and the failure was silent in every direction that usually catches
+    things. `sf worker` had tests, had a generated reference page, and answered "no such
+    command" to `python -m` — because the `__main__` guard sat mid-file, so running the
+    module as a script called `app()` and exited before the groups defined below it were
+    registered. The console script imports the module first and never reaches the guard,
+    so the two entry points disagreed about which commands existed.
+
+    Asserted through a real subprocess rather than by inspecting `app`: importing the module
+    is precisely the path that *worked*, and a test that imports proves nothing about the
+    one that did not.
+    """
+    import subprocess
+    import sys
+
+    from software_factory.cli import app
+
+    groups = sorted(group.name for group in app.registered_groups if group.name)
+    assert groups, "no command groups registered at all"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "software_factory.cli", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "COLUMNS": "200", "NO_COLOR": "1"},
+    )
+
+    missing = [name for name in groups if name not in result.stdout]
+    assert missing == [], f"invisible to `python -m`: {missing}"

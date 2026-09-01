@@ -64,6 +64,7 @@ from software_factory.ledger import EntryType, Ledger
 from software_factory.memory.records import utc_now
 from software_factory.memory.store import MemoryStore
 from software_factory.orchestrator.mailbox import Conversation, Mailbox
+from software_factory.orchestrator.workers import Availability, WorkerPool
 from software_factory.orchestrator.workitem import (
     Blocker,
     SourceContext,
@@ -757,6 +758,15 @@ class Coordinator:
         # the bus and the audit log are the same object, which is what makes a message and
         # the run it is about impossible to observe out of order.
         self.mailbox = Mailbox(ledger=ledger, state_dir=ledger.path.parent)
+
+        # Built from the definition rather than passed in, so a factory that declares
+        # workers routes against them without a second wiring step. A factory that declares
+        # none has an empty pool, which refuses every *labelled* item by name and leaves
+        # unlabelled ones alone -- the local case, unchanged.
+        self.workers = WorkerPool.from_dicts(
+            [worker.model_dump(by_alias=False) for worker in definition.factory.workers],
+            state_dir=ledger.path.parent,
+        )
         self.skills = skills or _registry_from(definition)
         self.pack_budget_tokens = pack_budget_tokens
         self.machine = StageMachine()
@@ -809,6 +819,53 @@ class Coordinator:
             # a work item sat in the queue must not be discovered a stage later.
             self._block(item, Blocker.AWAITING_HUMAN, stop)
             return outcome
+
+        # Claimed before a workspace is built and before anything is spent. An item that
+        # needs a machine the fleet does not have must not first clone a repository and
+        # burn a model call to discover it: routing is the cheapest check available, so it
+        # goes first, and its refusal names the label rather than the item.
+        placement = self.workers.place(item.id, requires=frozenset(item.requires))
+        if item.requires and not placement.placed:
+            self.ledger.append(
+                EntryType.WORK_ITEM_TRANSITION,
+                actor="coordinator",
+                subject=item.id,
+                payload={
+                    "from": item.stage.value,
+                    "to": item.stage.value,
+                    "stage": item.stage.value,
+                    "routing": placement.as_dict(),
+                },
+            )
+            # `EXTERNAL_DEPENDENCY` rather than `BUDGET_EXCEEDED` or a gate failure: no
+            # amount of retrying or rewriting clears it, and the action is to add a machine
+            # or stop asking for the label. Saturation blocks the same way but says to wait,
+            # because those are different things to do.
+            self._block(
+                item,
+                Blocker.EXTERNAL_DEPENDENCY,
+                (
+                    f"{placement.reason}. Wait for a worker to free up."
+                    if placement.availability is Availability.SATURATED
+                    else (
+                        f"{placement.reason}. Add a worker with that label to factory.yaml, "
+                        f"or drop it from this item's `requires`."
+                    )
+                ),
+            )
+            return outcome
+        if placement.placed:
+            self.ledger.append(
+                EntryType.WORK_ITEM_TRANSITION,
+                actor="coordinator",
+                subject=item.id,
+                payload={
+                    "from": item.stage.value,
+                    "to": item.stage.value,
+                    "stage": item.stage.value,
+                    "routing": placement.as_dict(),
+                },
+            )
 
         workspace = self.workspaces.create(run_id=item.id, replace=True)
         # The commit this work sits on. `WorkItem.base_commit` was declared and written by
@@ -873,6 +930,12 @@ class Coordinator:
             outcome.diff = workspace.diff()
             outcome.changed_paths = tuple(sorted(workspace.changed_paths()))
         finally:
+            # Released whatever happened, including on the exception path. A lease held by
+            # a run that raised is capacity nobody can account for: it comes back only when
+            # the lease expires, which is an hour by design, so a crash loop can idle the
+            # whole fleet without a single error mentioning workers.
+            self.workers.release(item.id)
+
             # Where the item came to rest. The moves themselves are recorded as they
             # happen, above; this one closes the run out, and is marked so a reader folding
             # transitions does not count the last move twice.

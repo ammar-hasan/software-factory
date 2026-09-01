@@ -3420,10 +3420,6 @@ def main() -> None:
     app()
 
 
-if __name__ == "__main__":  # pragma: no cover
-    main()
-
-
 agent_app = typer.Typer(
     help="Messages between agents, and what each run is doing.", no_args_is_help=True
 )
@@ -3638,3 +3634,202 @@ def agent_lifecycle(
         )
     console.print(table)
     raise typer.Exit(EXIT_OK)
+
+
+worker_app = typer.Typer(
+    help="The machines this factory dispatches to, and who holds each one.",
+    no_args_is_help=True,
+)
+app.add_typer(worker_app, name="worker")
+
+
+def _pool(root: Path, state: Path):  # type: ignore[no-untyped-def]
+    from software_factory.definition import load_strict
+    from software_factory.orchestrator.workers import WorkerPool
+
+    definition = load_strict(root)
+    return WorkerPool.from_dicts(
+        [worker.model_dump(by_alias=False) for worker in definition.factory.workers],
+        state_dir=state,
+    )
+
+
+@worker_app.command("list")
+def worker_list(
+    root: Annotated[Path, typer.Option("--root", help="The factory directory.")] = Path(),
+    state: Annotated[
+        Path, typer.Option("--state", help="Where run state and the ledger live.")
+    ] = Path(".factory"),
+    as_json: JsonOpt = False,
+) -> None:
+    """Every worker, what it can do, and how much of it is in use.
+
+    `free` can be negative, and is reported rather than clamped. It means capacity was
+    lowered while leases were held, and clamping would turn an over-committed machine into
+    a merely full one and hide the edit that caused it.
+    """
+    summary = _pool(root, state).summarise()
+    if as_json:
+        _emit({"ok": True, **summary})
+        raise typer.Exit(EXIT_OK)
+
+    workers = summary["workers"]
+    if not workers:
+        console.print("[dim]no workers are configured[/]")
+        console.print(
+            "[dim]Work with no `requires` still runs locally; work that asks for a label "
+            "will be refused by name.[/]"
+        )
+        raise typer.Exit(EXIT_OK)
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("worker", "host", "labels", "in use", "free", ""):
+        table.add_column(column, overflow="fold")
+    for worker in workers:
+        free = worker["free"]
+        table.add_row(
+            worker["name"],
+            worker["host"],
+            ", ".join(worker["labels"]) or "[dim]none[/]",
+            str(worker["inUse"]),
+            f"[red]{free}[/]" if free < 0 else str(free),
+            "[yellow]draining[/]" if worker["draining"] else "",
+        )
+    console.print(table)
+    raise typer.Exit(EXIT_OK)
+
+
+@worker_app.command("route")
+def worker_route(
+    requires: Annotated[
+        list[str] | None, typer.Option("--requires", help="A label the work needs. Repeatable.")
+    ] = None,
+    root: Annotated[Path, typer.Option("--root", help="The factory directory.")] = Path(),
+    state: Annotated[
+        Path, typer.Option("--state", help="Where run state and the ledger live.")
+    ] = Path(".factory"),
+    as_json: JsonOpt = False,
+) -> None:
+    """Ask where work with these labels *would* run, without claiming anything.
+
+    A dry run, because the alternative is finding out by submitting work: the answer to
+    "will this route" should not itself consume a slot, and an operator checking a label
+    before a big batch must not have to remember to release it.
+    """
+    from software_factory.orchestrator.workers import Availability
+
+    pool = _pool(root, state)
+    needed = frozenset(requires or ())
+    matching = pool.candidates(needed)
+    placement = pool.place("__dry-run__", requires=needed)
+    if placement.placed:
+        pool.release("__dry-run__")
+
+    if as_json:
+        _emit(
+            {
+                "ok": placement.availability is Availability.AVAILABLE,
+                "requires": sorted(needed),
+                "candidates": [worker.name for worker in matching],
+                **placement.as_dict(),
+            }
+        )
+        raise typer.Exit(EXIT_OK if placement.placed else EXIT_UNUSABLE)
+
+    if placement.placed and placement.lease:
+        console.print(f"[green]would run on[/] {placement.lease.worker} ({placement.lease.host})")
+        others = [w.name for w in matching if w.name != placement.lease.worker]
+        if others:
+            console.print(f"[dim]also eligible: {', '.join(sorted(others))}[/]")
+        raise typer.Exit(EXIT_OK)
+
+    colour = "yellow" if placement.availability is Availability.SATURATED else "red"
+    console.print(f"[{colour}]{placement.availability.value}[/] — {placement.reason}")
+    raise typer.Exit(EXIT_UNUSABLE)
+
+
+@worker_app.command("leases")
+def worker_leases(
+    root: Annotated[Path, typer.Option("--root", help="The factory directory.")] = Path(),
+    state: Annotated[
+        Path, typer.Option("--state", help="Where run state and the ledger live.")
+    ] = Path(".factory"),
+    as_json: JsonOpt = False,
+) -> None:
+    """Who holds each worker, and which leases the pool took back.
+
+    Reclaimed leases are shown because an expiry is a guess: the run may still be alive and
+    merely slow. Without the list, a run that was reclaimed and one that finished cleanly
+    leave identical traces, and "did this execute twice" has no answer.
+    """
+    pool = _pool(root, state)
+    held = pool.leases()
+    reclaimed = pool.reclaimed()
+
+    if as_json:
+        _emit(
+            {
+                "ok": True,
+                "leases": [lease.as_dict() for lease in held],
+                "reclaimed": [lease.as_dict() for lease in reclaimed],
+            }
+        )
+        raise typer.Exit(EXIT_OK)
+
+    if not held:
+        console.print("[dim]nothing is leased[/]")
+    else:
+        table = Table(show_header=True, header_style="bold", box=None)
+        for column in ("run", "worker", "held since", "expires"):
+            table.add_column(column, overflow="fold")
+        for lease in held:
+            table.add_row(
+                lease.run, lease.worker, lease.at.isoformat(), lease.expires_at.isoformat()
+            )
+        console.print(table)
+
+    if reclaimed:
+        console.print(
+            f"\n[yellow]{len(reclaimed)} lease(s) were reclaimed after expiring[/] "
+            "[dim]— those runs may still have been alive[/]"
+        )
+        for lease in reclaimed[-5:]:
+            console.print(f"  [dim]{lease.run} on {lease.worker}, held from {lease.at:%H:%M}[/]")
+    raise typer.Exit(EXIT_OK)
+
+
+@worker_app.command("release")
+def worker_release(
+    run: Annotated[str, typer.Argument(help="The run whose lease to give back.")],
+    root: Annotated[Path, typer.Option("--root", help="The factory directory.")] = Path(),
+    state: Annotated[
+        Path, typer.Option("--state", help="Where run state and the ledger live.")
+    ] = Path(".factory"),
+    as_json: JsonOpt = False,
+) -> None:
+    """Hand a worker back by hand, for a run that died without releasing it.
+
+    Reports whether a lease was actually held. Releasing a run that held nothing means the
+    operator has the wrong id, and answering "done" to that sends them away satisfied while
+    the machine stays occupied.
+    """
+    released = _pool(root, state).release(run)
+    if as_json:
+        _emit({"ok": released, "run": run, "released": released})
+        raise typer.Exit(EXIT_OK if released else EXIT_UNUSABLE)
+    if released:
+        console.print(f"[green]released[/] {run}")
+        raise typer.Exit(EXIT_OK)
+    console.print(f"[yellow]{run} held no lease[/]")
+    console.print("[dim]Check `sf worker leases` for the run id.[/]")
+    raise typer.Exit(EXIT_UNUSABLE)
+
+
+# The module-as-script entry point stays at the very bottom, and it matters that it does.
+# Run as `python -m software_factory.cli`, this file executes top to bottom: a guard placed
+# mid-file calls `app()` and exits *before* any command group defined below it is
+# registered. That is how `sf worker` came to exist, pass its tests, appear in the
+# generated reference, and answer "no such command" to the one invocation the CI script
+# uses -- because the `sf` console script imports the module first and never hits the
+# guard, so the two entry points disagreed about which commands existed.
+if __name__ == "__main__":  # pragma: no cover
+    main()
