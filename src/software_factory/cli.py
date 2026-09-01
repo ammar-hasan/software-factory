@@ -16,7 +16,7 @@ import os
 import sys
 from collections import deque
 from contextlib import suppress
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -2509,6 +2509,219 @@ def change_verify(
     else:
         console.print("[green]verified[/] signed by this repository's webhook secret")
     raise typer.Exit(EXIT_OK)
+
+
+schedule_app = typer.Typer(
+    help="Scheduled triggers: what is declared, what is due, and firing them.",
+    no_args_is_help=True,
+)
+app.add_typer(schedule_app, name="schedule")
+
+
+@schedule_app.command("list")
+def schedule_list(root: RootArg = Path(), as_json: JsonOpt = False) -> None:
+    """Every schedule this factory declares, and when each next fires.
+
+    Declared schedules were validated and read by nothing: a factory could describe a
+    nightly sweep, pass `sf validate` and `sf lint` clean, and never run it once. This is
+    the first half of the answer -- what the definition actually asks for.
+    """
+    from software_factory.orchestrator.schedule import Schedule, describe
+
+    try:
+        definition = load_strict(root)
+        schedule = Schedule.from_definition(definition)
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    now = datetime.now(UTC)
+    rows = [
+        {
+            "trigger": trigger.id,
+            "automation": trigger.automation,
+            "event": trigger.event,
+            "cron": trigger.cron.source,
+            "reading": describe(trigger.cron),
+            "nextFire": None if at is None else at.isoformat(),
+        }
+        for trigger, at in schedule.upcoming(now=now)
+    ]
+
+    if as_json:
+        _emit({"ok": True, "schedules": rows})
+        raise typer.Exit(EXIT_OK)
+
+    if not rows:
+        console.print("[dim]no schedules declared[/] — no automation has a `schedule` trigger")
+        raise typer.Exit(EXIT_OK)
+
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("trigger", "cron", "reading", "next fire (UTC)"):
+        table.add_column(column, overflow="fold")
+    for row in rows:
+        table.add_row(
+            str(row["trigger"]),
+            str(row["cron"]),
+            str(row["reading"]),
+            str(row["nextFire"] or "[dim]none within the horizon[/]"),
+        )
+    console.print(table)
+    raise typer.Exit(EXIT_OK)
+
+
+@schedule_app.command("due")
+def schedule_due(
+    root: RootArg = Path(),
+    ledger_path: Annotated[
+        Path, typer.Option("--ledger", help="Where firings are recorded.")
+    ] = Path(".factory/ledger.jsonl"),
+    as_json: JsonOpt = False,
+) -> None:
+    """What would fire right now, without firing it.
+
+    A missed window fires **once**, not once per occurrence: a factory that was off for
+    three days with an hourly sweep does not have seventy-two pieces of work waiting, it
+    has one and seventy-one duplicates. The skipped count is reported rather than
+    discarded, because "we were down and it did not run" is a fact an operator needs.
+    """
+    due = _due_schedules(root, ledger_path, as_json)
+
+    if as_json:
+        _emit({"ok": True, "due": [d.as_payload() for d in due]})
+        raise typer.Exit(EXIT_OK)
+
+    if not due:
+        console.print("[dim]nothing due[/]")
+        raise typer.Exit(EXIT_OK)
+    for item in due:
+        console.print(f"[green]due[/] {item.trigger.id}  [dim]for[/] {item.occurrence.isoformat()}")
+        if item.skipped:
+            console.print(
+                f"  [yellow]{item.skipped} occurrence(s) skipped[/] since "
+                f"{item.last_fired.isoformat() if item.last_fired else 'never'} — "
+                "firing once, not once per occurrence"
+            )
+    raise typer.Exit(EXIT_OK)
+
+
+@schedule_app.command("run")
+def schedule_run(
+    root: RootArg = Path(),
+    ledger_path: Annotated[
+        Path, typer.Option("--ledger", help="Where firings are recorded.")
+    ] = Path(".factory/ledger.jsonl"),
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Report what would fire without recording it.")
+    ] = False,
+    as_json: JsonOpt = False,
+) -> None:
+    """Fire everything due, through the same intake path as any other event.
+
+    Meant to be called by whatever already runs on a timer on the host -- cron, a systemd
+    timer, a CI schedule. This does not hold a process open: a scheduler that must stay
+    running to be correct is a scheduler whose correctness depends on nobody restarting it,
+    and every firing here is derived from the ledger instead.
+    """
+    from software_factory.intake import FactoryEvent, Ignored, Origin, Provider, Started
+    from software_factory.intake import Refused as IntakeRefused
+    from software_factory.intake.events import event_identity
+    from software_factory.intake.loading import pipeline_from
+    from software_factory.ledger import EntryType, Ledger
+
+    due = _due_schedules(root, ledger_path, as_json)
+    try:
+        definition = load_strict(root)
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        return
+
+    pipeline = pipeline_from(definition)
+    ledger = Ledger(ledger_path)
+    fired: list[dict[str, Any]] = []
+
+    for item in due:
+        event = FactoryEvent(
+            # The *occurrence*, not the wall clock: two evaluations seconds apart must not
+            # both produce a distinct event for the same scheduled instant.
+            id=event_identity(
+                Provider.SCHEDULE, item.trigger.id, item.trigger.event, item.occurrence.isoformat()
+            ),
+            provider=Provider.SCHEDULE,
+            event=item.trigger.event,
+            origin=Origin(
+                provider=Provider.SCHEDULE, ref=item.trigger.id, source=item.trigger.automation
+            ),
+            title=f"scheduled: {item.trigger.id}",
+            author="",
+            attributes={
+                "automation": item.trigger.automation,
+                "cron": item.trigger.cron.source,
+                "occurrence": item.occurrence.isoformat(),
+                "skipped": item.skipped,
+            },
+        )
+        outcomes = [] if dry_run else pipeline.receive(event)
+        if not dry_run:
+            # Recorded after the pipeline has seen it, so a crash mid-intake leaves the
+            # trigger still due rather than silently consumed.
+            ledger.append(
+                EntryType.SCHEDULE_FIRED,
+                actor="scheduler",
+                subject=item.trigger.id,
+                payload=item.as_payload(),
+            )
+        fired.append(
+            {
+                **item.as_payload(),
+                "outcomes": [
+                    {
+                        "kind": type(o).__name__.lower(),
+                        "automation": getattr(o, "automation", None),
+                        "agent": getattr(o, "agent", None),
+                        "reason": getattr(o, "reason", None),
+                        "message": getattr(o, "message", None),
+                    }
+                    for o in outcomes
+                ],
+            }
+        )
+
+    if as_json:
+        _emit({"ok": True, "dryRun": dry_run, "fired": fired})
+        raise typer.Exit(EXIT_OK)
+
+    if not fired:
+        console.print("[dim]nothing due[/]")
+        raise typer.Exit(EXIT_OK)
+    for record in fired:
+        mark = "[dim]would fire[/]" if dry_run else "[green]fired[/]"
+        console.print(f"{mark} {record['trigger']}  [dim]for[/] {record['occurrence']}")
+        if record["skipped"]:
+            console.print(f"  [yellow]{record['skipped']} occurrence(s) skipped[/]")
+        for outcome in record["outcomes"]:
+            if outcome["kind"] == "started":
+                console.print(f"  [green]starts[/] {outcome['automation']} → {outcome['agent']}")
+            elif outcome["kind"] == "ignored":
+                console.print(f"  [dim]ignored[/] — {outcome['reason']}")
+            else:
+                console.print(f"  [yellow]refused[/] {outcome['message']}")
+    del Started, Ignored, IntakeRefused
+    raise typer.Exit(EXIT_OK)
+
+
+def _due_schedules(root: Path, ledger_path: Path, as_json: bool) -> list[Any]:
+    from software_factory.ledger import Ledger
+    from software_factory.orchestrator.schedule import Schedule
+
+    try:
+        definition = load_strict(root)
+        schedule = Schedule.from_definition(definition)
+    except FactoryError as exc:
+        _fail(exc, as_json)
+        raise
+    entries = list(Ledger(ledger_path).read()) if ledger_path.exists() else []
+    return schedule.with_history(entries).due(now=datetime.now(UTC))
 
 
 def main() -> None:

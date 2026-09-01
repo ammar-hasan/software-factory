@@ -48,4 +48,7 @@ cannot be scripted, and PR-2 makes the local path the reference one.
 | `sf memory policy` | Run the policy pass: contradiction, expiry, consolidation. |
 | `sf memory stats` | Lane counts, quarantine backlog, and size. The health check for FR-15.3. |
 | `sf memory why` | Print a memory's complete provenance tree. |
+| `sf schedule due` | What would fire right now, without firing it. |
+| `sf schedule list` | Every schedule this factory declares, and when each next fires. |
+| `sf schedule run` | Fire everything due, through the same intake path as any other event. |
 | `sf spec induct` | Propose draft spec units from an existing codebase. |

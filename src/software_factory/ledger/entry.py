@@ -48,6 +48,13 @@ class EntryType(enum.StrEnum):
     BUDGET_EVENT = "budget.event"
     SEGMENT_SEALED = "segment.sealed"
     IMPROVEMENT_PROPOSAL = "improvement.proposal"
+    SCHEDULE_FIRED = "schedule.fired"
+    """A scheduled trigger fired, and which scheduled instant it stood in for.
+
+    In the ledger rather than in memory or a side file: a scheduler that forgets across a
+    restart re-fires everything, and one with its own state file has a second source of
+    truth to reconcile with this one."""
+
     CHANGE_OBSERVED = "change.observed"
     """What the repository says happened to a change after handoff (FR-15.14).
 

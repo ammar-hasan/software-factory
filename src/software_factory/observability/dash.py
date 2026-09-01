@@ -293,6 +293,13 @@ def make_handler(data: DashboardData) -> type[BaseHTTPRequestHandler]:
                     "default-src 'none'; "
                     "connect-src 'self'; "
                     "style-src 'unsafe-inline'; "
+                    # `data:` and nothing else. The page draws its own texture from an
+                    # inline SVG data URI, which loads nothing from anywhere -- but
+                    # `img-src` falls back to `default-src 'none'`, so without naming it
+                    # the browser blocks the page's own paint and logs a violation. `data:`
+                    # admits no host, so this widens the policy by exactly one scheme that
+                    # cannot reach the network.
+                    "img-src data:; "
                     f"script-src 'sha256-{SCRIPT_HASH}'; "
                     "base-uri 'none'; "
                     "form-action 'none'"
@@ -356,343 +363,367 @@ INDEX_HTML = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>software factory</title>
 <style>
+  /* ============================================================ tokens */
   :root {
     color-scheme: dark light;
-    --bg: #08090d; --panel: #0f1118; --panel2: #161926; --raise: #1c2030;
-    --line: #232838; --line2: #2e3446;
-    --txt: #e9ebf3; --dim: #8e94ac; --faint: #5b6178;
-    --cyan: #5ee7ff; --violet: #a78bfa; --green: #4ade80; --amber: #fbbf24; --red: #fb7185;
-    --accent: var(--cyan);
-    --radius: 12px;
-    --shadow: 0 1px 2px rgba(0,0,0,.5), 0 8px 28px -12px rgba(0,0,0,.7);
-    --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --bg: #06070b;
+    --ink: #f2f4fb;
+    --dim: #9aa1bb;
+    --faint: #656c86;
+    --hair: rgba(255,255,255,.075);
+    --hair-2: rgba(255,255,255,.14);
+    --glass: rgba(255,255,255,.032);
+    --glass-2: rgba(255,255,255,.055);
+    --well: rgba(0,0,0,.28);
+    --c1: #22d3ee;   /* cyan   */
+    --c2: #818cf8;   /* indigo */
+    --c3: #e879f9;   /* fuchsia*/
+    --good: #34d399;
+    --warn: #fbbf24;
+    --bad: #fb7185;
+    --r: 18px;
+    --r-sm: 11px;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, monospace;
+    --ease: cubic-bezier(.16,1,.3,1);
+    --spring: linear(0,.286 4.2%,.858 9.6%,1.05 13%,1.11 16.7%,1.06 22%,.99 28.4%,.98 36%,1.01 50%,1 71%,1);
   }
   @media (prefers-color-scheme: light) {
     :root {
-      --bg: #f6f7fb; --panel: #ffffff; --panel2: #f2f4f9; --raise: #eceff6;
-      --line: #e2e6ef; --line2: #d3d9e6;
-      --txt: #10131c; --dim: #5b6178; --faint: #878ea3;
-      --cyan: #0891b2; --violet: #7c3aed; --green: #15803d; --amber: #b45309; --red: #be123c;
-      --shadow: 0 1px 2px rgba(16,19,28,.06), 0 8px 24px -14px rgba(16,19,28,.24);
+      --bg: #f4f5fa; --ink: #0b0d15; --dim: #565d78; --faint: #858ca6;
+      --hair: rgba(11,13,21,.09); --hair-2: rgba(11,13,21,.16);
+      --glass: rgba(255,255,255,.72); --glass-2: rgba(255,255,255,.9);
+      --well: rgba(11,13,21,.035);
+      --c1: #0891b2; --c2: #4f46e5; --c3: #c026d3;
+      --good: #059669; --warn: #b45309; --bad: #e11d48;
     }
   }
   * { box-sizing: border-box; }
-  html, body { height: 100%; }
+  html { -webkit-text-size-adjust: 100%; }
   body {
-    margin: 0; background: var(--bg); color: var(--txt);
-    font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    -webkit-font-smoothing: antialiased;
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--ink);
+    font: 400 14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, sans-serif;
+    font-feature-settings: "cv02","cv03","cv04","ss01";
+    -webkit-font-smoothing: antialiased; letter-spacing: -.008em;
   }
+  /* mesh + grain. The grain is an inline SVG turbulence, not an image: nothing here
+     loads from anywhere, and a "local-first" dashboard that fetches a texture is making
+     the claim it exists to disprove. */
+  body::before, body::after { content: ""; position: fixed; inset: 0; pointer-events: none; }
   body::before {
-    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    z-index: 0;
     background:
-      radial-gradient(900px 480px at 12% -8%, color-mix(in srgb, var(--cyan) 13%, transparent), transparent 70%),
-      radial-gradient(760px 420px at 92% 4%, color-mix(in srgb, var(--violet) 12%, transparent), transparent 72%);
+      radial-gradient(1100px 620px at 8% -12%, color-mix(in oklab, var(--c1) 20%, transparent), transparent 62%),
+      radial-gradient(900px 540px at 96% -4%, color-mix(in oklab, var(--c3) 16%, transparent), transparent 60%),
+      radial-gradient(1000px 700px at 52% 108%, color-mix(in oklab, var(--c2) 15%, transparent), transparent 64%);
+    filter: saturate(1.15);
   }
-  .app { position: relative; z-index: 1; display: grid; grid-template-columns: 236px minmax(0,1fr); min-height: 100vh; }
+  body::after {
+    z-index: 1; opacity: .5; mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.35'/%3E%3C/svg%3E");
+  }
+  #shell { position: relative; z-index: 2; }
 
-  /* ---------------------------------------------------------------- rail */
-  .rail {
-    display: flex; flex-direction: column; gap: 20px; padding: 20px 14px;
-    border-right: 1px solid var(--line);
-    background: color-mix(in srgb, var(--panel) 76%, transparent);
-    backdrop-filter: blur(14px);
-    position: sticky; top: 0; height: 100vh;
+  /* ============================================================ top bar */
+  header.top {
+    position: sticky; top: 0; z-index: 40;
+    display: flex; align-items: center; gap: 14px;
+    padding: 12px 22px;
+    background: color-mix(in oklab, var(--bg) 72%, transparent);
+    backdrop-filter: blur(22px) saturate(1.6);
+    border-bottom: 1px solid var(--hair);
   }
-  .brand { display: flex; align-items: center; gap: 10px; padding: 2px 8px 0; }
-  .mark {
-    width: 26px; height: 26px; border-radius: 8px; flex: none;
-    background: linear-gradient(140deg, var(--cyan), var(--violet));
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--cyan) 32%, transparent), 0 6px 18px -8px var(--violet);
-    position: relative;
+  .logo { display: flex; align-items: center; gap: 10px; flex: none; }
+  .glyph {
+    width: 28px; height: 28px; border-radius: 9px; position: relative; flex: none;
+    background: conic-gradient(from 200deg, var(--c1), var(--c2), var(--c3), var(--c1));
+    box-shadow: 0 0 24px -6px color-mix(in oklab, var(--c2) 80%, transparent);
+    animation: spin 14s linear infinite;
   }
-  .mark::after {
-    content: ""; position: absolute; inset: 7px; border-radius: 3px;
-    background: var(--bg); opacity: .82;
-  }
-  .brandname { font-weight: 650; letter-spacing: -.015em; font-size: 14px; }
-  .brandname em { font-style: normal; color: var(--dim); font-weight: 500; }
+  .glyph::after { content: ""; position: absolute; inset: 6px; border-radius: 4px; background: var(--bg); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .wordmark { font-weight: 620; font-size: 14.5px; letter-spacing: -.02em; white-space: nowrap; }
+  .wordmark span { color: var(--dim); font-weight: 450; }
 
-  nav { display: flex; flex-direction: column; gap: 2px; }
-  nav button {
-    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
-    font: inherit; color: var(--dim); background: none; border: 0; cursor: pointer;
-    padding: 8px 10px; border-radius: 9px; transition: background .16s, color .16s, transform .16s;
+  nav.tabs { display: flex; gap: 2px; margin-left: 8px; overflow-x: auto; scrollbar-width: none; }
+  nav.tabs::-webkit-scrollbar { display: none; }
+  nav.tabs button {
+    position: relative; font: inherit; font-size: 13px; color: var(--dim);
+    background: none; border: 0; cursor: pointer; padding: 7px 13px; border-radius: 10px;
+    white-space: nowrap; transition: color .18s var(--ease), background .18s var(--ease);
   }
-  nav button .g { width: 18px; text-align: center; opacity: .75; font-size: 13px; }
-  nav button .num { margin-left: auto; font: 11px/1 var(--mono); color: var(--faint); opacity: 0; transition: opacity .16s; }
-  nav button:hover { background: var(--panel2); color: var(--txt); }
-  nav button:hover .num { opacity: 1; }
-  nav button[aria-current="true"] {
-    background: linear-gradient(90deg, color-mix(in srgb, var(--cyan) 16%, transparent), transparent 78%);
-    color: var(--txt); font-weight: 600;
-    box-shadow: inset 2px 0 0 var(--accent);
+  nav.tabs button:hover { color: var(--ink); background: var(--glass); }
+  nav.tabs button[aria-current="true"] { color: var(--ink); font-weight: 560; background: var(--glass-2); }
+  nav.tabs button[aria-current="true"]::after {
+    content: ""; position: absolute; left: 13px; right: 13px; bottom: -13px; height: 2px;
+    border-radius: 2px; background: linear-gradient(90deg, var(--c1), var(--c3));
   }
-  .rail-foot { margin-top: auto; display: flex; flex-direction: column; gap: 8px; padding: 0 10px; }
-  .pulse { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--dim); }
-  .dot {
-    width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex: none;
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 70%, transparent);
-    animation: ping 2.4s ease-out infinite;
-  }
-  .dot.stale { background: var(--amber); animation: none; }
-  .dot.down { background: var(--red); animation: none; }
-  @keyframes ping {
-    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 60%, transparent); }
-    70% { box-shadow: 0 0 0 7px transparent; }
-    100% { box-shadow: 0 0 0 0 transparent; }
-  }
-  .hint { font: 11px/1.5 var(--mono); color: var(--faint); }
 
-  /* ---------------------------------------------------------------- header */
-  main { min-width: 0; display: flex; flex-direction: column; }
-  header.bar {
-    display: flex; align-items: flex-end; justify-content: space-between; gap: 20px;
-    padding: 22px 28px 16px; border-bottom: 1px solid var(--line);
-    position: sticky; top: 0; z-index: 5;
-    background: color-mix(in srgb, var(--bg) 84%, transparent); backdrop-filter: blur(14px);
+  .spacer { flex: 1 1 auto; }
+  .kbtn {
+    display: flex; align-items: center; gap: 8px; font: inherit; font-size: 12.5px;
+    color: var(--dim); cursor: pointer; padding: 7px 10px 7px 12px;
+    background: var(--glass); border: 1px solid var(--hair); border-radius: 10px;
+    transition: border-color .18s, color .18s, background .18s;
   }
-  h1 { margin: 0; font-size: 21px; letter-spacing: -.022em; font-weight: 640; }
-  .sub { margin: 3px 0 0; color: var(--dim); font-size: 12.5px; max-width: 68ch; }
-  .controls { display: flex; align-items: center; gap: 8px; flex: none; }
-  input[type="search"] {
-    font: inherit; font-size: 13px; color: var(--txt); width: 148px;
-    background: var(--panel2); border: 1px solid var(--line); border-radius: 9px;
-    padding: 7px 10px; transition: border-color .16s, width .2s, box-shadow .16s;
+  .kbtn:hover { color: var(--ink); border-color: var(--hair-2); background: var(--glass-2); }
+  kbd {
+    font: 11px/1 var(--mono); color: var(--faint); background: var(--well);
+    border: 1px solid var(--hair); border-radius: 5px; padding: 3px 5px;
   }
-  input[type="search"]:focus {
-    outline: none; width: 208px; border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
-  }
-  .seg { display: flex; background: var(--panel2); border: 1px solid var(--line); border-radius: 9px; padding: 2px; }
+  .seg { display: flex; background: var(--glass); border: 1px solid var(--hair); border-radius: 10px; padding: 2px; }
   .seg button {
-    font: 12px/1 var(--mono); color: var(--dim); background: none; border: 0; cursor: pointer;
-    padding: 6px 9px; border-radius: 7px; transition: background .16s, color .16s;
+    font: 12px/1 var(--mono); color: var(--faint); background: none; border: 0; cursor: pointer;
+    padding: 6px 9px; border-radius: 8px; transition: color .16s, background .16s;
   }
-  .seg button:hover { color: var(--txt); }
-  .seg button[aria-pressed="true"] { background: var(--raise); color: var(--txt); }
-  .btn {
-    font: inherit; font-size: 13px; color: var(--dim); cursor: pointer;
-    background: var(--panel2); border: 1px solid var(--line); border-radius: 9px; padding: 7px 12px;
-    transition: background .16s, color .16s, border-color .16s;
+  .seg button:hover { color: var(--ink); }
+  .seg button[aria-pressed="true"] { background: var(--glass-2); color: var(--ink); }
+  .live { display: flex; align-items: center; gap: 7px; font: 11px/1 var(--mono); color: var(--faint); }
+  .beacon { width: 7px; height: 7px; border-radius: 50%; background: var(--good); flex: none; animation: beat 2.6s var(--ease) infinite; }
+  .beacon.stale { background: var(--warn); animation: none; }
+  .beacon.down { background: var(--bad); animation: none; }
+  @keyframes beat {
+    0%,100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--good) 55%, transparent); }
+    60% { box-shadow: 0 0 0 8px transparent; }
   }
-  .btn:hover { color: var(--txt); border-color: var(--line2); }
-  .btn[aria-pressed="true"] { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; }
 
-  /* ---------------------------------------------------------------- content */
-  #content { padding: 24px 28px 56px; min-height: 60vh; }
-  section { animation: rise .3s cubic-bezier(.22,1,.36,1) both; }
-  @keyframes rise { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
-  .stagger > * { animation: rise .34s cubic-bezier(.22,1,.36,1) both; animation-delay: calc(var(--i, 0) * 32ms); }
+  /* ============================================================ page */
+  main { padding: 26px 22px 80px; max-width: 1680px; margin: 0 auto; }
+  .head { margin: 0 2px 20px; }
+  .head h1 { margin: 0; font-size: clamp(24px, 3.2vw, 34px); font-weight: 640; letter-spacing: -.035em; }
+  .head p { margin: 5px 0 0; color: var(--dim); font-size: 13.5px; max-width: 74ch; }
 
-  h2.sec {
-    margin: 28px 0 12px; font-size: 11px; font-weight: 650; letter-spacing: .1em;
-    text-transform: uppercase; color: var(--faint);
-    display: flex; align-items: center; gap: 10px;
+  /* ============================================================ bento */
+  .bento { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 12px; }
+  .tile {
+    position: relative; overflow: hidden; grid-column: span 3;
+    background: var(--glass); border: 1px solid var(--hair); border-radius: var(--r);
+    padding: 16px 18px; backdrop-filter: blur(18px) saturate(1.3);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 18px 40px -28px rgba(0,0,0,.85);
+    transition: border-color .24s var(--ease), transform .24s var(--ease);
+    animation: lift .5s var(--ease) both; animation-delay: calc(var(--i,0) * 45ms);
   }
-  h2.sec::after { content: ""; flex: 1; height: 1px; background: var(--line); }
-  h2.sec:first-child { margin-top: 0; }
+  .tile:hover { border-color: var(--hair-2); transform: translateY(-2px); }
+  .tile.w4 { grid-column: span 4; } .tile.w6 { grid-column: span 6; }
+  .tile.w8 { grid-column: span 8; } .tile.w12 { grid-column: span 12; }
+  .tile { display: flex; flex-direction: column; }
+  .tile > .chart { margin-top: auto; }
+  /* A column flex container stretches its children, which turned every inline pill into a
+     full-width bar. The pills size to their text; only the full-width things stretch. */
+  .tile > .delta, .tile > .gauge, .tile > .chip { align-self: flex-start; }
+  .tile.flush { padding: 0; }
+  @keyframes lift { from { opacity: 0; transform: translateY(12px) scale(.985); } }
+  @media (max-width: 1180px) { .tile { grid-column: span 6; } .tile.w8, .tile.w12 { grid-column: span 12; } }
+  @media (max-width: 720px)  { .tile, .tile.w4, .tile.w6, .tile.w8 { grid-column: span 12; } }
 
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(178px, 1fr)); gap: 12px; }
-  .card {
-    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
-    padding: 14px 16px; box-shadow: var(--shadow); position: relative; overflow: hidden;
-    transition: border-color .18s, transform .18s;
-  }
-  .card::before {
-    content: ""; position: absolute; inset: 0 0 auto; height: 2px;
-    background: linear-gradient(90deg, var(--accent), transparent 60%); opacity: .55;
-  }
-  .card:hover { border-color: var(--line2); transform: translateY(-1px); }
-  .card .k { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); }
-  .card .v { font: 600 27px/1.15 var(--mono); letter-spacing: -.02em; margin-top: 6px; }
-  /* An id is a value too, and a stat card sized for "12" clipped `wi_…:handoff:4` to
-     `wi_…:han`. A truncated identifier is worse than a small one: it cannot be copied. */
-  .card .v.long { font-size: 15px; line-height: 1.35; overflow-wrap: anywhere; }
-  .card .v small { font-size: 13px; color: var(--dim); font-weight: 500; margin-left: 4px; }
-  .card .d { font: 12px/1 var(--mono); margin-top: 7px; color: var(--faint); }
-  .d.up { color: var(--green); } .d.down { color: var(--red); } .d.flat { color: var(--faint); }
+  .label { font: 500 10.5px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--faint); }
+  .figure { font: 620 clamp(30px, 4.4vw, 46px)/1 ui-sans-serif, system-ui, sans-serif;
+            letter-spacing: -.045em; margin-top: 10px; font-variant-numeric: tabular-nums; }
+  .figure.sm { font-size: clamp(22px, 2.6vw, 28px); }
+  .figure .u { font-size: 13px; font-weight: 460; color: var(--dim); letter-spacing: -.01em; margin-left: 6px; }
+  .figure.id { font: 600 15px/1.35 var(--mono); letter-spacing: -.01em; overflow-wrap: anywhere; }
+  .delta { display: inline-flex; align-items: center; gap: 5px; margin-top: 10px;
+           font: 11.5px/1 var(--mono); padding: 4px 8px; border-radius: 999px; }
+  .delta.up { color: var(--good); background: color-mix(in oklab, var(--good) 13%, transparent); }
+  .delta.down { color: var(--bad); background: color-mix(in oklab, var(--bad) 13%, transparent); }
+  .delta.flat { color: var(--faint); background: var(--well); }
+  .sub { margin: 9px 0 0; color: var(--dim); font-size: 12.5px; }
+  .tile h3 { margin: 0 0 2px; font-size: 14px; font-weight: 580; letter-spacing: -.015em; }
 
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(272px, 1fr)); gap: 12px; }
-  .panel {
-    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
-    padding: 14px 16px; box-shadow: var(--shadow);
-  }
-  .panel h3 { margin: 0 0 4px; font-size: 13.5px; font-weight: 620; letter-spacing: -.01em; }
-  .panel .why { font-size: 12px; color: var(--dim); margin: 6px 0 0; }
+  /* chart */
+  .chart { width: 100%; height: 132px; display: block; overflow: visible; }
+  .chart .grid { stroke: var(--hair); stroke-width: 1; }
+  .axis { display: flex; justify-content: space-between; margin-top: 8px;
+          font: 10.5px/1 var(--mono); color: var(--faint); }
+  .spark { width: 100%; height: 34px; display: block; margin-top: 10px; }
 
-  .tblwrap { border: 1px solid var(--line); border-radius: var(--radius); overflow: auto; background: var(--panel); box-shadow: var(--shadow); }
-  table { border-collapse: collapse; width: 100%; font-size: 13px; }
-  thead th {
-    position: sticky; top: 0; background: var(--panel2); z-index: 1;
-    text-align: left; padding: 9px 14px; font-size: 11px; letter-spacing: .07em;
-    text-transform: uppercase; color: var(--faint); font-weight: 600;
-    border-bottom: 1px solid var(--line);
-  }
-  tbody td { padding: 10px 14px; border-bottom: 1px solid color-mix(in srgb, var(--line) 62%, transparent); vertical-align: top; }
-  tbody tr:last-child td { border-bottom: 0; }
-  tbody tr { transition: background .13s; }
-  tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
-  tbody tr.clickable { cursor: pointer; }
-  tbody tr.flag td:first-child { box-shadow: inset 2px 0 0 var(--amber); }
-  td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
-  code, .mono { font-family: var(--mono); font-size: 12.5px; }
-
-  .pill {
-    display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px;
-    font: 11px/1.7 var(--mono); border: 1px solid transparent; white-space: nowrap;
-  }
-  .pill::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
-  .pill.ok { color: var(--green); background: color-mix(in srgb, var(--green) 12%, transparent); border-color: color-mix(in srgb, var(--green) 28%, transparent); }
-  .pill.warn { color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, transparent); border-color: color-mix(in srgb, var(--amber) 28%, transparent); }
-  .pill.bad { color: var(--red); background: color-mix(in srgb, var(--red) 12%, transparent); border-color: color-mix(in srgb, var(--red) 28%, transparent); }
-  .pill.info { color: var(--cyan); background: color-mix(in srgb, var(--cyan) 12%, transparent); border-color: color-mix(in srgb, var(--cyan) 28%, transparent); }
-  .pill.mute { color: var(--faint); background: color-mix(in srgb, var(--faint) 10%, transparent); border-color: var(--line); }
-
-  .meter { height: 5px; border-radius: 999px; background: var(--raise); overflow: hidden; margin-top: 7px; }
-  .meter i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--cyan), var(--violet)); transition: width .5s cubic-bezier(.22,1,.36,1); }
+  /* gauge */
+  .gauge { display: flex; align-items: center; gap: 16px; margin-top: 12px; }
+  .gauge svg { flex: none; }
+  .gauge .num { font: 620 27px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: -.04em;
+                font-variant-numeric: tabular-nums; }
+  .gauge .cap { color: var(--dim); font-size: 12px; margin-top: 3px; }
 
   /* pipeline */
-  /* auto-fit rather than one scrolling row: the stage a reader most wants -- the last
-     one, where finished work lands -- was the one pushed off the right edge, and a board
-     whose answer is off-screen is a board that answers nothing. Wraps on narrow viewports
-     instead of hiding a column. */
-  .pipe { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 10px; align-items: start; }
-  .col { background: var(--panel2); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; min-width: 0; }
-  .col.vacant { opacity: .5; }
-  .col > header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; }
-  .col h4 { margin: 0; font: 600 11px/1 var(--mono); letter-spacing: .07em; text-transform: uppercase; color: var(--dim); }
-  .col .n { font: 11px/1 var(--mono); color: var(--faint); background: var(--raise); border-radius: 999px; padding: 3px 7px; }
-  .item {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 9px 10px;
-    margin-bottom: 7px; cursor: default; transition: border-color .16s, transform .16s;
+  .flow { display: flex; align-items: flex-start; gap: 8px; overflow-x: auto; padding: 2px;
+          scrollbar-width: thin; }
+  /* Each lane needs a visible edge. Without one the count sits at the far right of an
+     invisible column and reads as part of the next stage's title -- "0 TRIAGE". */
+  .lane { flex: 1 1 0; min-width: 140px; background: var(--well); border: 1px solid var(--hair);
+          border-radius: 14px; padding: 11px 10px; align-self: stretch; }
+  .lane header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .lane h4 { margin: 0; font: 600 10.5px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+  .lane .n { font: 11px/1 var(--mono); color: var(--faint); background: var(--glass-2);
+             border-radius: 999px; padding: 3px 7px; }
+  .lane .rail { height: 3px; border-radius: 3px; background: var(--hair); overflow: hidden; margin-bottom: 10px; }
+  .lane .rail i { display: block; height: 100%; background: linear-gradient(90deg, var(--c1), var(--c2)); }
+  .lane.vacant { opacity: .42; }
+  .wi {
+    background: var(--glass-2); border: 1px solid var(--hair); border-radius: var(--r-sm);
+    padding: 10px 11px; margin-bottom: 7px; transition: transform .2s var(--ease), border-color .2s;
   }
-  .item:hover { border-color: var(--line2); transform: translateY(-1px); }
-  .item.flag { border-color: color-mix(in srgb, var(--amber) 46%, var(--line)); background: color-mix(in srgb, var(--amber) 6%, var(--panel)); }
-  .item .t { font-size: 12.5px; font-weight: 550; line-height: 1.4; }
-  /* `anywhere`, not `break-all`: an id with no spaces must wrap, and "chore" must not
-     become "cho re". break-all applies to every word regardless of need. */
-  .item .m { font: 11px/1.5 var(--mono); color: var(--faint); margin-top: 4px; overflow-wrap: anywhere; }
-  .item .w { font-size: 11.5px; color: var(--amber); margin-top: 5px; }
+  .wi:hover { transform: translateY(-1px); border-color: var(--hair-2); }
+  .wi.flag { border-color: color-mix(in oklab, var(--warn) 42%, var(--hair));
+             background: color-mix(in oklab, var(--warn) 7%, var(--glass-2)); }
+  .wi .t { font-size: 12.5px; font-weight: 540; line-height: 1.4; }
+  .wi .m { font: 10.5px/1.5 var(--mono); color: var(--faint); margin-top: 5px; overflow-wrap: anywhere; }
+  .wi .w { font-size: 11.5px; color: var(--warn); margin-top: 6px; }
+  .empty-lane { font: 10.5px/1 var(--mono); color: var(--faint); padding: 8px 2px; }
 
-  /* timeline */
-  .tl { position: relative; margin: 4px 0 0; padding-left: 22px; }
-  .tl::before { content: ""; position: absolute; left: 5px; top: 4px; bottom: 4px; width: 1px; background: var(--line); }
-  .ev { position: relative; padding: 8px 0; }
-  .ev::before {
-    content: ""; position: absolute; left: -21px; top: 14px; width: 9px; height: 9px;
-    border-radius: 50%; background: var(--panel); border: 2px solid var(--faint);
+  /* table */
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  thead th {
+    position: sticky; top: 0; z-index: 1; text-align: left;
+    background: color-mix(in oklab, var(--bg) 88%, transparent); backdrop-filter: blur(8px);
+    padding: 11px 16px; font: 500 10.5px/1 var(--mono); letter-spacing: .11em;
+    text-transform: uppercase; color: var(--faint); border-bottom: 1px solid var(--hair);
   }
-  .ev.ok::before { border-color: var(--green); }
-  .ev.bad::before { border-color: var(--red); }
-  .ev.info::before { border-color: var(--cyan); }
-  .ev .h { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
-  .ev .ty { font: 600 12px/1.5 var(--mono); }
-  .ev .at { font: 11px/1.5 var(--mono); color: var(--faint); }
-  .ev pre {
-    margin: 6px 0 0; padding: 9px 11px; background: var(--panel2); border: 1px solid var(--line);
-    border-radius: 8px; overflow-x: auto; font: 11.5px/1.55 var(--mono); color: var(--dim);
-    max-height: 320px;
+  tbody td { padding: 12px 16px; border-bottom: 1px solid var(--hair); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr { transition: background .14s; }
+  tbody tr:hover { background: var(--glass); }
+  tbody tr.clickable { cursor: pointer; }
+  td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .scroll { overflow: auto; max-height: 68vh; }
+  code, .mono { font-family: var(--mono); font-size: 12.5px; }
+
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px;
+    font: 11px/1.6 var(--mono); border: 1px solid transparent; white-space: nowrap;
   }
-  .ev .sum { font-size: 12.5px; color: var(--dim); margin-top: 2px; }
-  .ev details { margin-top: 5px; }
-  .ev summary { cursor: pointer; font: 11px/1.6 var(--mono); color: var(--faint); width: max-content; }
-  .ev summary:hover { color: var(--accent); }
-  .ev details[open] summary { color: var(--dim); }
+  .chip::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+  .chip.ok   { color: var(--good); background: color-mix(in oklab, var(--good) 12%, transparent); border-color: color-mix(in oklab, var(--good) 26%, transparent); }
+  .chip.warn { color: var(--warn); background: color-mix(in oklab, var(--warn) 12%, transparent); border-color: color-mix(in oklab, var(--warn) 26%, transparent); }
+  .chip.bad  { color: var(--bad);  background: color-mix(in oklab, var(--bad) 12%, transparent);  border-color: color-mix(in oklab, var(--bad) 26%, transparent); }
+  .chip.info { color: var(--c1);   background: color-mix(in oklab, var(--c1) 12%, transparent);   border-color: color-mix(in oklab, var(--c1) 26%, transparent); }
+  .chip.mute { color: var(--faint); background: var(--well); border-color: var(--hair); }
+  .chip.plain::before { display: none; }
 
-  .note { color: var(--dim); font-size: 12.5px; margin: 8px 0 0; }
-  .unavailable { color: var(--faint); font-style: italic; }
-  .estimate::after { content: " est."; color: var(--faint); font-style: italic; font-size: .85em; }
-  .empty { text-align: center; padding: 56px 20px; color: var(--dim); }
-  .empty .big { font-size: 30px; opacity: .35; }
-  .empty h3 { margin: 12px 0 4px; font-size: 15px; color: var(--txt); font-weight: 600; }
+  .meter { height: 5px; border-radius: 999px; background: var(--well); overflow: hidden; margin-top: 8px; }
+  .meter i { display: block; height: 100%; border-radius: 999px;
+             background: linear-gradient(90deg, var(--c1), var(--c2), var(--c3)); }
 
-  .skel { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(178px, 1fr)); }
-  .skel div { height: 88px; border-radius: var(--radius); background: linear-gradient(100deg, var(--panel) 30%, var(--panel2) 50%, var(--panel) 70%); background-size: 220% 100%; animation: shim 1.15s linear infinite; border: 1px solid var(--line); }
+  /* trace */
+  .trace { position: relative; padding-left: 26px; }
+  .trace::before { content: ""; position: absolute; left: 6px; top: 8px; bottom: 8px; width: 1px;
+                   background: linear-gradient(180deg, transparent, var(--hair-2) 12%, var(--hair-2) 88%, transparent); }
+  .ev { position: relative; padding: 10px 0; }
+  .ev::before { content: ""; position: absolute; left: -24px; top: 17px; width: 9px; height: 9px;
+                border-radius: 50%; background: var(--bg); border: 2px solid var(--faint); }
+  .ev.ok::before   { border-color: var(--good); box-shadow: 0 0 12px -2px var(--good); }
+  .ev.bad::before  { border-color: var(--bad);  box-shadow: 0 0 12px -2px var(--bad); }
+  .ev.info::before { border-color: var(--c1);   box-shadow: 0 0 12px -2px var(--c1); }
+  .ev .h { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .ev .ty { font: 600 12.5px/1.5 var(--mono); letter-spacing: -.01em; }
+  .ev .at { font: 10.5px/1.5 var(--mono); color: var(--faint); }
+  .ev .sum { font-size: 12.5px; color: var(--dim); margin-top: 3px; }
+  .ev .sum b { color: var(--ink); font-weight: 560; }
+  .ev details { margin-top: 7px; }
+  .ev summary { cursor: pointer; font: 10.5px/1.6 var(--mono); color: var(--faint); width: max-content; }
+  .ev summary:hover { color: var(--c1); }
+  .ev pre { margin: 7px 0 0; padding: 11px 13px; background: var(--well); border: 1px solid var(--hair);
+            border-radius: 10px; overflow-x: auto; font: 11.5px/1.6 var(--mono); color: var(--dim); max-height: 320px; }
+
+  /* command palette */
+  .veil { position: fixed; inset: 0; z-index: 90; background: rgba(4,5,9,.62);
+          backdrop-filter: blur(8px); display: grid; place-items: start center; padding-top: 12vh;
+          animation: fade .18s var(--ease) both; }
+  @keyframes fade { from { opacity: 0; } }
+  .palette {
+    width: min(680px, 92vw); background: color-mix(in oklab, var(--bg) 84%, transparent);
+    border: 1px solid var(--hair-2); border-radius: 16px; overflow: hidden;
+    backdrop-filter: blur(28px) saturate(1.5);
+    box-shadow: 0 40px 90px -30px rgba(0,0,0,.9), inset 0 1px 0 rgba(255,255,255,.07);
+    animation: pop .26s var(--spring) both;
+  }
+  @keyframes pop { from { opacity: 0; transform: translateY(-10px) scale(.97); } }
+  .palette input {
+    width: 100%; font: inherit; font-size: 16px; color: var(--ink); background: none;
+    border: 0; border-bottom: 1px solid var(--hair); padding: 17px 20px; outline: none;
+  }
+  .palette input::placeholder { color: var(--faint); }
+  .palette ul { list-style: none; margin: 0; padding: 6px; max-height: 46vh; overflow-y: auto; }
+  .palette li { display: flex; align-items: center; gap: 11px; padding: 10px 13px; border-radius: 10px;
+                cursor: pointer; font-size: 13.5px; }
+  .palette li[aria-selected="true"] { background: var(--glass-2); }
+  .palette li .g { width: 17px; text-align: center; color: var(--dim); }
+  .palette li .hint { margin-left: auto; font: 10.5px/1 var(--mono); color: var(--faint); }
+  .palette .none { padding: 26px; text-align: center; color: var(--faint); font-size: 13px; }
+
+  /* misc */
+  .note { color: var(--dim); font-size: 12.5px; margin: 10px 2px 0; }
+  .muted { color: var(--faint); font-style: italic; }
+  .void { text-align: center; padding: 72px 20px; }
+  .void .g { font-size: 34px; opacity: .28; }
+  .void h3 { margin: 14px 0 5px; font-size: 16px; font-weight: 580; }
+  .skel { grid-column: span 3; height: 132px; border-radius: var(--r); border: 1px solid var(--hair);
+          background: linear-gradient(100deg, var(--glass) 30%, var(--glass-2) 50%, var(--glass) 70%);
+          background-size: 220% 100%; animation: shim 1.2s linear infinite; }
   @keyframes shim { to { background-position: -220% 0; } }
-
-  .back { font: inherit; font-size: 12.5px; background: none; border: 0; color: var(--accent); cursor: pointer; padding: 0 0 10px; }
+  .back { font: inherit; font-size: 12.5px; background: none; border: 0; color: var(--c1);
+          cursor: pointer; padding: 0 0 12px; }
   .back:hover { text-decoration: underline; }
-
-  @media (max-width: 880px) {
-    .app { grid-template-columns: 1fr; }
-    .rail { position: static; height: auto; flex-direction: row; align-items: center; gap: 12px; overflow-x: auto; }
-    .rail nav { flex-direction: row; }
-    .rail-foot { display: none; }
-    header.bar { flex-direction: column; align-items: stretch; }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    * { animation-duration: .001ms !important; transition-duration: .001ms !important; }
-  }
+  h2.rule { grid-column: 1 / -1; margin: 16px 2px 0; display: flex; align-items: center; gap: 12px;
+            font: 500 10.5px/1 var(--mono); letter-spacing: .13em; text-transform: uppercase; color: var(--faint); }
+  h2.rule::after { content: ""; flex: 1; height: 1px; background: var(--hair); }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; } }
 </style>
 </head>
 <body>
-<div class="app">
-  <aside class="rail">
-    <div class="brand"><span class="mark"></span><span class="brandname">software<em>&#8202;factory</em></span></div>
-    <nav id="nav"></nav>
-    <div class="rail-foot">
-      <div class="pulse"><span class="dot" id="dot"></span><span id="live">reading ledger</span></div>
-      <div class="hint">1&#8211;6 view &middot; r refresh &middot; / filter</div>
-    </div>
-  </aside>
+<div id="shell">
+  <header class="top">
+    <div class="logo"><span class="glyph"></span>
+      <span class="wordmark">software<span>&#8202;factory</span></span></div>
+    <nav class="tabs" id="tabs"></nav>
+    <span class="spacer"></span>
+    <button class="kbtn" id="palette-btn"><span>Search</span><kbd>&#8984;K</kbd></button>
+    <div class="seg" id="window"></div>
+    <button class="kbtn" id="auto" aria-pressed="false" title="refresh every 5s">auto</button>
+    <div class="live"><span class="beacon" id="beacon"></span><span id="stamp">reading</span></div>
+  </header>
   <main>
-    <header class="bar">
-      <div>
-        <h1 id="title">Overview</h1>
-        <p class="sub" id="subtitle">Metrics and their trend &mdash; the view that must not flatter.</p>
-      </div>
-      <div class="controls">
-        <input id="filter" type="search" placeholder="filter" spellcheck="false" autocomplete="off">
-        <div class="seg" id="window"></div>
-        <button class="btn" id="refresh" title="refresh (r)">refresh</button>
-        <button class="btn" id="auto" aria-pressed="false" title="auto-refresh every 5s">auto</button>
-      </div>
-    </header>
-    <div id="content"><div class="skel"><div></div><div></div><div></div><div></div></div></div>
+    <div class="head">
+      <h1 id="title">Overview</h1>
+      <p id="subtitle">Metrics, their trend, and when the work actually happened.</p>
+    </div>
+    <div id="content"></div>
   </main>
 </div>
 <script>
 const content = document.getElementById('content');
 const titleEl = document.getElementById('title');
 const subEl = document.getElementById('subtitle');
-const filterEl = document.getElementById('filter');
-const dotEl = document.getElementById('dot');
-const liveEl = document.getElementById('live');
+const beacon = document.getElementById('beacon');
+const stamp = document.getElementById('stamp');
 
 // Everything this page renders came from the ledger, and the ledger is full of text from
 // outside the trust boundary: model output, work-item titles written by whoever opened the
 // issue, command stderr. Nothing reaches innerHTML without passing through here.
-function esc(value) {
-  return String(value === null || value === undefined ? '' : value)
+function esc(v) {
+  return String(v === null || v === undefined ? '' : v)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 const VIEWS = [
-  ['overview',   'Overview',   '◔', 'Metrics and their trend — the view that must not flatter.'],
-  ['activity',   'Activity',   '▦', 'Work items by stage. Anything needing a person sorts first.'],
-  ['runs',       'Runs',       '▶', 'Every run this ledger records, newest first. Open one to inspect it.'],
-  ['definition', 'Definition', '⚙', 'What this factory is configured to be, and who may change it.'],
-  ['evaluation', 'Evaluation', '◎', 'Scorers, their outcomes, and every improvement proposal.'],
-  ['registry',   'Registry',   '☷', 'Memory health and skill health — is what this factory learned still worth carrying?'],
+  ['overview',   'Overview',   'Metrics, their trend, and when the work actually happened.'],
+  ['activity',   'Activity',   'Work items by stage. Anything needing a person sorts first.'],
+  ['runs',       'Runs',       'Every run this ledger records. Open one to inspect it.'],
+  ['definition', 'Definition', 'What this factory is configured to be, and who may change it.'],
+  ['evaluation', 'Evaluation', 'Scorers, their outcomes, and every improvement proposal.'],
+  ['registry',   'Registry',   'Memory and skill health — is what this factory learned still worth carrying?'],
 ];
 
-let view = 'overview';
-let days = 7;
-let runId = null;
-let timer = null;
-let lastData = null;
+let view = 'overview', days = 7, runId = null, timer = null, lastData = null;
 
-/* ------------------------------------------------------------------ chrome */
+/* ------------------------------------------------------------------- chrome */
 
-const nav = document.getElementById('nav');
-VIEWS.forEach(([id, label, glyph], i) => {
+const tabs = document.getElementById('tabs');
+VIEWS.forEach(([id, label]) => {
   const b = document.createElement('button');
   b.dataset.view = id;
-  b.innerHTML = `<span class="g">${glyph}</span><span>${esc(label)}</span><span class="num">${i + 1}</span>`;
+  b.textContent = label;
   b.addEventListener('click', () => go(id));
-  nav.appendChild(b);
+  tabs.appendChild(b);
 });
 
 const windowEl = document.getElementById('window');
@@ -708,7 +739,6 @@ function syncWindow() {
     b.setAttribute('aria-pressed', String(b.textContent === days + 'd')));
 }
 
-document.getElementById('refresh').addEventListener('click', () => load());
 const autoBtn = document.getElementById('auto');
 autoBtn.addEventListener('click', () => {
   const on = autoBtn.getAttribute('aria-pressed') !== 'true';
@@ -717,180 +747,374 @@ autoBtn.addEventListener('click', () => {
   if (on) timer = setInterval(() => load({ quiet: true }), 5000);
 });
 
-filterEl.addEventListener('input', () => applyFilter());
-function applyFilter() {
-  const q = filterEl.value.trim().toLowerCase();
-  document.querySelectorAll('[data-row]').forEach(el => {
-    el.hidden = q !== '' && !el.dataset.row.includes(q);
-  });
+function go(next, id) {
+  view = next; runId = id || null;
+  const meta = VIEWS.find(v => v[0] === next);
+  tabs.querySelectorAll('button').forEach(b =>
+    b.setAttribute('aria-current', String(b.dataset.view === next)));
+  titleEl.textContent = next === 'run' ? 'Run' : (meta ? meta[1] : next);
+  subEl.textContent = next === 'run'
+    ? 'Everything the ledger recorded about one run, in the order it happened.'
+    : (meta ? meta[2] : '');
+  load();
 }
 
+function status(kind, text) {
+  beacon.className = 'beacon' + (kind === 'ok' ? '' : ' ' + kind);
+  stamp.textContent = text;
+}
+
+/* ------------------------------------------------------- command palette */
+
+const paletteBtn = document.getElementById('palette-btn');
+let veil = null, choices = [], cursor = 0;
+
+function commands() {
+  const list = VIEWS.map(([id, label, desc]) => ({
+    glyph: '◇', label, hint: 'view', run: () => go(id), text: label + ' ' + desc,
+  }));
+  [1, 7, 30, 90, 365].forEach(d => list.push({
+    glyph: '◷', label: `Window: last ${d} day${d > 1 ? 's' : ''}`, hint: d + 'd',
+    run: () => { days = d; syncWindow(); load(); }, text: 'window days ' + d,
+  }));
+  // Whatever is on screen becomes addressable. A palette that only knows the six views is
+  // a menu; one that knows the runs and work items in front of you is a way to move.
+  if (lastData && Array.isArray(lastData.runs)) {
+    lastData.runs.forEach(r => list.push({
+      glyph: '▸', label: r.id, hint: [r.stage || '', r.status || ''].join(' ').trim(),
+      run: () => go('run', r.id), text: [r.id, r.agent, r.stage, r.status].join(' '),
+    }));
+  }
+  if (lastData && Array.isArray(lastData.workItems)) {
+    lastData.workItems.forEach(w => list.push({
+      glyph: '▤', label: w.title, hint: w.stage,
+      run: () => {}, text: [w.id, w.title, w.stage].join(' '),
+    }));
+  }
+  return list;
+}
+
+function openPalette() {
+  if (veil) return;
+  const all = commands();
+  veil = document.createElement('div');
+  veil.className = 'veil';
+  veil.innerHTML = `<div class="palette" role="dialog" aria-label="Command palette">
+    <input type="text" placeholder="Jump to a view, a run, a window…" autocomplete="off" spellcheck="false">
+    <ul role="listbox"></ul></div>`;
+  document.body.appendChild(veil);
+  const input = veil.querySelector('input');
+  const list = veil.querySelector('ul');
+
+  const paint = () => {
+    const q = input.value.trim().toLowerCase();
+    choices = q ? all.filter(c => c.text.toLowerCase().includes(q)) : all;
+    cursor = 0;
+    list.innerHTML = choices.length
+      ? choices.map((c, i) =>
+          `<li role="option" data-i="${i}" aria-selected="${i === 0}">`
+          + `<span class="g">${c.glyph}</span><span>${esc(c.label)}</span>`
+          + `<span class="hint">${esc(c.hint)}</span></li>`).join('')
+      : `<div class="none">Nothing matches that.</div>`;
+  };
+  const move = step => {
+    if (!choices.length) return;
+    cursor = (cursor + step + choices.length) % choices.length;
+    list.querySelectorAll('li').forEach((li, i) => li.setAttribute('aria-selected', String(i === cursor)));
+    const active = list.querySelector('li[aria-selected="true"]');
+    if (active) active.scrollIntoView({ block: 'nearest' });
+  };
+  const pick = () => { const c = choices[cursor]; closePalette(); if (c) c.run(); };
+
+  input.addEventListener('input', paint);
+  veil.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { closePalette(); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); move(1); }
+    if (e.key === 'ArrowUp') { e.preventDefault(); move(-1); }
+    if (e.key === 'Enter') { e.preventDefault(); pick(); }
+  });
+  list.addEventListener('click', e => {
+    const li = e.target.closest('li');
+    if (li) { cursor = Number(li.dataset.i); pick(); }
+  });
+  veil.addEventListener('click', e => { if (e.target === veil) closePalette(); });
+  paint();
+  input.focus();
+}
+function closePalette() { if (veil) { veil.remove(); veil = null; } }
+
+paletteBtn.addEventListener('click', openPalette);
 document.addEventListener('keydown', e => {
-  if (e.target === filterEl) { if (e.key === 'Escape') { filterEl.value = ''; applyFilter(); filterEl.blur(); } return; }
-  if (e.key === '/') { e.preventDefault(); filterEl.focus(); return; }
+  if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); openPalette(); return; }
+  if (veil) return;
+  if (e.key === '/') { e.preventDefault(); openPalette(); return; }
   if (e.key === 'r') { load(); return; }
   const n = parseInt(e.key, 10);
   if (n >= 1 && n <= VIEWS.length) go(VIEWS[n - 1][0]);
 });
 
-function go(next, id) {
-  view = next; runId = id || null;
-  const meta = VIEWS.find(v => v[0] === next);
-  nav.querySelectorAll('button').forEach(b => b.setAttribute('aria-current', String(b.dataset.view === next)));
-  titleEl.textContent = next === 'run' ? 'Run' : (meta ? meta[1] : next);
-  subEl.textContent = next === 'run' ? 'Everything the ledger recorded about one run.' : (meta ? meta[3] : '');
-  filterEl.value = '';
-  load();
-}
-
-function status(kind, text) {
-  dotEl.className = 'dot' + (kind === 'ok' ? '' : ' ' + kind);
-  liveEl.textContent = text;
-}
-
-/* ------------------------------------------------------------------ render */
+/* -------------------------------------------------------------- drawing */
 
 function fmt(v) {
   if (v === null || v === undefined || v === '') return '—';
-  if (typeof v === 'number') return Number.isInteger(v) ? String(v) : v.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
+  if (typeof v === 'number') {
+    return Number.isInteger(v) ? String(v)
+      : String(Number(v.toFixed(3))).replace(/\.?0+$/, m => m.includes('.') ? '' : m);
+  }
   return String(v);
 }
-
 function pct(v) { return v === null || v === undefined ? '—' : Math.round(v * 100) + '%'; }
 
 function delta(v, unit) {
-  if (v === null || v === undefined) return `<div class="d flat">no comparison — unavailable in one window</div>`;
+  if (v === null || v === undefined) return `<div class="delta flat">no comparison available</div>`;
   const cls = v > 0 ? 'up' : (v < 0 ? 'down' : 'flat');
-  const arrow = v > 0 ? '▲' : (v < 0 ? '▼' : '▬');
-  return `<div class="d ${cls}">${arrow} ${esc(fmt(Math.abs(v)))}${unit ? ' ' + esc(unit) : ''} vs previous window</div>`;
+  const arrow = v > 0 ? '↑' : (v < 0 ? '↓' : '→');
+  return `<div class="delta ${cls}">${arrow} ${esc(fmt(Math.abs(v)))}${unit ? ' ' + esc(unit) : ''}</div>`;
 }
 
-function card(label, value, unit, d, i) {
-  const long = String(value === null || value === undefined ? '' : value).length > 14;
-  return `<div class="card" style="--i:${i}"><div class="k">${esc(label)}</div>`
-       + `<div class="v${long ? ' long' : ''}">${esc(value)}`
-       + `${unit ? `<small>${esc(unit)}</small>` : ''}</div>`
-       + (d === undefined ? '' : d) + `</div>`;
+function tile(inner, opts) {
+  const o = opts || {};
+  return `<div class="tile ${o.cls || ''}" style="--i:${o.i || 0}">${inner}</div>`;
 }
+
+function stat(label, value, unit, d, i, cls) {
+  const long = String(value === null || value === undefined ? '' : value).length > 16;
+  return tile(
+    `<div class="label">${esc(label)}</div>`
+    + `<div class="figure${long ? ' id' : ''}">${esc(value)}`
+    + `${unit ? `<span class="u">${esc(unit)}</span>` : ''}</div>`
+    + (d || ''), { i, cls });
+}
+
+/** An area chart from one series. Drawn as SVG path data rather than by a library: this
+ *  page loads nothing from anywhere, and a chart is arithmetic. */
+function area(values, opts) {
+  const o = opts || {};
+  const w = 1000, h = 132, pad = 4;
+  const n = values.length;
+  if (!n) return '<div class="muted">no activity in this window</div>';
+  const top = Math.max(1, ...values);
+  const x = i => n === 1 ? w / 2 : (i / (n - 1)) * w;
+  const y = v => pad + (1 - v / top) * (h - pad * 2);
+  const line = values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join('');
+  const id = 'g' + (o.key || 'a');
+  const rules = [0.25, 0.5, 0.75].map(f =>
+    `<line class="grid" x1="0" x2="${w}" y1="${(pad + f * (h - pad * 2)).toFixed(1)}" y2="${(pad + f * (h - pad * 2)).toFixed(1)}"/>`).join('');
+  return `<svg class="chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img"
+     aria-label="${esc(o.aria || 'activity over the window')}">
+    <defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="var(--c1)" stop-opacity=".42"/>
+      <stop offset="100%" stop-color="var(--c2)" stop-opacity="0"/>
+    </linearGradient></defs>
+    ${rules}
+    <path d="${line}L${w},${h}L0,${h}Z" fill="url(#${id})"/>
+    <path d="${line}" fill="none" stroke="var(--c1)" stroke-width="2"
+          stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
+  </svg>`;
+}
+
+function sparkline(values, colour) {
+  const w = 300, h = 34;
+  const n = values.length;
+  if (!n) return '';
+  const top = Math.max(1, ...values);
+  const x = i => n === 1 ? w / 2 : (i / (n - 1)) * w;
+  const y = v => 2 + (1 - v / top) * (h - 4);
+  const d = values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join('');
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">
+    <path d="${d}" fill="none" stroke="${colour}" stroke-width="1.6"
+          stroke-linejoin="round" vector-effect="non-scaling-stroke"/></svg>`;
+}
+
+function gauge(share, caption, key) {
+  const size = 78, r = 32, c = 2 * Math.PI * r;
+  const filled = share === null || share === undefined ? 0 : Math.max(0, Math.min(1, share));
+  const id = 'gg' + key;
+  return `<div class="gauge">
+    <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true">
+      <defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="var(--c1)"/><stop offset="100%" stop-color="var(--c3)"/>
+      </linearGradient></defs>
+      <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="var(--well)" stroke-width="7"/>
+      <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="url(#${id})" stroke-width="7"
+        stroke-linecap="round" stroke-dasharray="${(c * filled).toFixed(1)} ${c.toFixed(1)}"
+        transform="rotate(-90 ${size / 2} ${size / 2})"/>
+    </svg>
+    <div><div class="num">${share === null || share === undefined ? '—' : pct(share)}</div>
+    <div class="cap">${esc(caption)}</div></div></div>`;
+}
+
+function bucketLabel(seconds) {
+  if (seconds >= 604800) return `${Math.round(seconds / 604800)}-week buckets`;
+  if (seconds >= 86400) return `${Math.round(seconds / 86400)}-day buckets`;
+  return `${Math.max(1, Math.round(seconds / 3600))}-hour buckets`;
+}
+
+/* ------------------------------------------------------------- renderers */
 
 function renderOverview(d) {
   const r = d.current.runs;
   const t = d.trend || {};
-  const cards = [
-    card('runs in window', fmt(r.total), '', delta(t.runs, ''), 0),
-    card('work runs', fmt(r.work), '', '', 1),
-    card('measurement share', pct(r.measurementShare), '', '', 2),
-    card('improvement runs', fmt(r.improvement), '', '', 3),
-  ].join('');
+  const s = d.series || { runs: [], handoffs: [], gateFailures: [], costUnits: [], bucketSeconds: 3600 };
+  const measures = d.current.measures || [];
+  const available = measures.filter(m => m.availability === 'available');
+  const missing = measures.filter(m => m.availability !== 'available');
+  const named = n => available.find(m => m.name === n);
 
-  const available = d.current.measures.filter(m => m.availability === 'available');
-  const missing = d.current.measures.filter(m => m.availability !== 'available');
+  const spent = (s.costUnits || []).reduce((a, b) => a + b, 0);
 
-  const metricCards = available.map((m, i) => {
-    const cls = m.estimate ? 'estimate' : '';
-    const ex = m.excludes && m.excludes.length ? `<p class="why">excludes ${esc(m.excludes.join(', '))}</p>` : '';
-    return `<div class="panel" style="--i:${i}" data-row="${esc(String(m.name).toLowerCase())}">`
-      + `<h3>${esc(m.name)}</h3>`
-      + `<div class="v mono ${cls}" style="font-size:22px;font-weight:600">${esc(fmt(m.value))} <small style="color:var(--dim);font-size:12px">${esc(m.unit || '')}</small></div>`
-      + delta(t[m.name], m.unit) + ex + `</div>`;
-  }).join('');
+  const hero = tile(
+    `<div class="label">activity — last ${esc(d.days || days)} days</div>`
+    + `<div class="figure">${esc(r.total)}<span class="u">runs</span></div>`
+    + delta(t.runs, 'vs previous')
+    + area(s.runs, { key: 'runs', aria: 'runs per bucket over the window' })
+    + `<div class="axis"><span>${esc(String(s.start || '').slice(0, 10))}</span>`
+    + `<span>${esc(bucketLabel(s.bucketSeconds || 3600))}</span>`
+    + `<span>${esc(String(s.end || '').slice(0, 10))}</span></div>`,
+    { cls: 'w6', i: 0 });
+
+  const gates = named('gate_pass_rate');
+  const gateTile = tile(
+    `<h3>Gate pass rate</h3><div class="label">first attempts only</div>`
+    + gauge(gates ? gates.value : null, gates ? `${gates.sample} evaluated` : 'not measured', 'gate')
+    + sparkline(s.gateFailures, 'var(--bad)')
+    + `<p class="sub">the line is gate <em>failures</em> per bucket</p>`,
+    { cls: 'w3', i: 1 });
+
+  const autonomy = measures.find(m => m.name === 'autonomy');
+  const autoTile = tile(
+    `<h3>Autonomy</h3><div class="label">merged with no human commits</div>`
+    + (autonomy && autonomy.availability === 'available'
+        ? gauge(autonomy.value, `${autonomy.sample} merged changes`, 'auto')
+        : `<div class="gauge">${gauge(null, 'not observable', 'auto')}</div>`
+          + `<p class="sub muted">${esc(autonomy ? autonomy.reason : 'no measurement')}</p>`),
+    { cls: 'w3', i: 2 });
+
+  const handoffTile = tile(
+    `<div class="label">reached handoff</div>`
+    + `<div class="figure sm">${esc((s.handoffs || []).reduce((a, b) => a + b, 0))}`
+    + `<span class="u">changes</span></div>`
+    + sparkline(s.handoffs, 'var(--good)'),
+    { cls: 'w3', i: 3 });
+
+  const costTile = tile(
+    `<div class="label">spend, estimated</div>`
+    + `<div class="figure sm">${esc(spent.toFixed(2))}<span class="u">units</span></div>`
+    + sparkline(s.costUnits, 'var(--c3)')
+    + `<p class="sub muted">from recorded usage and declared prices, not billing</p>`,
+    { cls: 'w3', i: 4 });
+
+  const mixTile = tile(
+    `<h3>Run mix</h3>`
+    + [['work', r.work], ['evaluation', r.evaluation], ['benchmark', r.benchmark],
+       ['improvement', r.improvement]].map(([name, n]) =>
+      `<div style="margin-top:10px"><div style="display:flex;justify-content:space-between;font-size:12.5px">`
+      + `<span>${esc(name)}</span><span class="mono">${esc(n)}</span></div>`
+      + `<div class="meter"><i style="width:${r.total ? Math.round((n / r.total) * 100) : 0}%"></i></div></div>`).join('')
+    + `<p class="sub">${esc(r.note)}</p>`,
+    { cls: 'w6', i: 5 });
+
+  const metricTiles = available
+    .filter(m => m.name !== 'gate_pass_rate')
+    .map((m, i) => tile(
+      `<h3>${esc(m.name)}</h3>`
+      + `<div class="figure sm">${esc(fmt(m.value))}<span class="u">${esc(m.unit || '')}</span></div>`
+      + delta(t[m.name], m.unit)
+      + (m.excludes && m.excludes.length
+          ? `<p class="sub muted">excludes ${esc(m.excludes.join(', '))}</p>` : ''),
+      { cls: 'w3', i: 6 + i })).join('');
 
   const missingRows = missing.map(m =>
-    `<tr data-row="${esc(String(m.name).toLowerCase())}"><td><code>${esc(m.name)}</code></td>`
-    + `<td><span class="pill mute">${esc(String(m.availability).replace(/_/g, ' '))}</span></td>`
-    + `<td class="note">${esc(m.reason)}</td></tr>`).join('');
+    `<tr><td><code>${esc(m.name)}</code></td>`
+    + `<td><span class="chip mute">${esc(String(m.availability).replace(/_/g, ' '))}</span></td>`
+    + `<td class="note" style="margin:0">${esc(m.reason)}</td></tr>`).join('');
 
-  return `<section>`
-    + `<h2 class="sec">this window &mdash; ${esc(d.days || days)} days</h2>`
-    + `<div class="cards stagger">${cards}</div>`
-    + `<p class="note">${esc(r.note)}</p>`
-    + (available.length ? `<h2 class="sec">measured</h2><div class="grid stagger">${metricCards}</div>` : '')
+  return `<div class="bento">${hero}${gateTile}${autoTile}${handoffTile}${costTile}${mixTile}`
+    + (metricTiles ? `<h2 class="rule">measured</h2>${metricTiles}` : '')
     + (missing.length
-        ? `<h2 class="sec">not measured, and why</h2><div class="tblwrap"><table><thead><tr>`
-          + `<th>metric</th><th>state</th><th>reason</th></tr></thead><tbody>${missingRows}</tbody></table></div>`
-          + `<p class="note">A metric with no data reports its absence. "No change" and "we could not look" are different things, and the second must never render as the first.</p>`
+        ? `<h2 class="rule">not measured, and why</h2>`
+          + tile(`<div class="scroll"><table><thead><tr><th>metric</th><th>state</th><th>reason</th>`
+            + `</tr></thead><tbody>${missingRows}</tbody></table></div>`
+            + `<p class="note">A metric with no data reports its absence. "No change" and "we could `
+            + `not look" are different things, and the second must never render as the first.</p>`,
+            { cls: 'w12 ', i: 0 })
         : '')
-    + `</section>`;
+    + `</div>`;
 }
 
 const STAGES = ['intake', 'triage', 'design', 'build', 'review', 'verify', 'handoff'];
 
 function renderActivity(d) {
   if (!d.workItems || !d.workItems.length) {
-    return empty('▦', 'No work items yet', esc(d.note || 'Run `sf work` and this board fills from the ledger.'));
+    return void_('▤', 'No work items yet', d.note || 'Run `sf work` and this board fills from the ledger.');
   }
   const byStage = new Map(STAGES.map(s => [s, []]));
   d.workItems.forEach(w => {
-    const key = String(w.stage || '').toLowerCase();
-    if (!byStage.has(key)) byStage.set(key, []);
-    byStage.get(key).push(w);
+    const k = String(w.stage || '').toLowerCase();
+    if (!byStage.has(k)) byStage.set(k, []);
+    byStage.get(k).push(w);
   });
+  const most = Math.max(1, ...[...byStage.values()].map(v => v.length));
 
-  const cols = [...byStage.entries()].map(([stage, items]) =>
-    `<div class="col ${items.length ? '' : 'vacant'}"><header><h4>${esc(stage)}</h4>`
-    + `<span class="n">${items.length}</span></header>`
+  const lanes = [...byStage.entries()].map(([stage, items]) =>
+    `<div class="lane ${items.length ? '' : 'vacant'}">`
+    + `<header><h4>${esc(stage)}</h4><span class="n">${items.length}</span></header>`
+    + `<div class="rail"><i style="width:${Math.round((items.length / most) * 100)}%"></i></div>`
     + (items.length ? items.map(w =>
-        `<div class="item ${w.needsAttention ? 'flag' : ''}" data-row="${esc((w.id + ' ' + w.title + ' ' + stage).toLowerCase())}">`
+        `<div class="wi ${w.needsAttention ? 'flag' : ''}">`
         + `<div class="t">${esc(w.title)}</div>`
-        + `<div class="m">${esc(w.id)} &middot; ${esc(w.workClass || '')}${w.rework ? ' &middot; rework &times;' + esc(w.rework) : ''}</div>`
-        + (w.why ? `<div class="w">${esc(w.why)}</div>` : '')
-        + `</div>`).join('')
-      : `<div class="note" style="font-size:11.5px;color:var(--faint)">empty</div>`)
+        + `<div class="m">${esc(w.id)} &middot; ${esc(w.workClass || '')}`
+        + `${w.rework ? ' &middot; rework &times;' + esc(w.rework) : ''}</div>`
+        + (w.why ? `<div class="w">${esc(w.why)}</div>` : '') + `</div>`).join('')
+      : `<div class="empty-lane">—</div>`)
     + `</div>`).join('');
 
   const flagged = d.needingAttention || 0;
-  return `<section>`
-    + `<div class="cards stagger" style="margin-bottom:20px">`
-    + card('work items', d.workItems.length, '', '', 0)
-    + card('needing a person', flagged, '', flagged
-        ? `<div class="d down">▲ sorted first on this board</div>`
-        : `<div class="d up">▬ nothing is waiting on you</div>`, 1)
-    + `</div>`
-    + `<h2 class="sec">pipeline</h2><div class="pipe">${cols}</div>`
-    + `<p class="note">${esc(d.note || '')}</p></section>`;
+  return `<div class="bento">`
+    + stat('work items', d.workItems.length, '', '', 0)
+    + stat('needing a person', flagged, '',
+        flagged ? `<div class="delta down">↑ sorted first below</div>`
+                : `<div class="delta up">→ nothing is waiting on you</div>`, 1)
+    + tile(`<h3>Pipeline</h3><div class="flow" style="margin-top:12px">${lanes}</div>`
+        + `<p class="note">${esc(d.note || '')}</p>`, { cls: 'w12', i: 2 })
+    + `</div>`;
 }
 
-function statusPill(s) {
+function statusChip(s) {
   const v = String(s || '').toLowerCase();
-  const cls = /^(ok|passed|pass|succeeded|complete|completed|handoff)$/.test(v) ? 'ok'
-    : /^(blocked|failed|fail|refused|violation)$/.test(v) ? 'bad'
-    : /^(running|open)$/.test(v) ? 'info' : 'warn';
-  return `<span class="pill ${cls}">${esc(v || 'unknown')}</span>`;
+  const cls = /^(ok|pass|passed|succeeded|complete|completed|handoff|merged)$/.test(v) ? 'ok'
+    : /^(blocked|failed|fail|refused|violation|closed)$/.test(v) ? 'bad'
+    : /^(running|open|opened)$/.test(v) ? 'info' : 'warn';
+  return `<span class="chip ${cls}">${esc(v || 'unknown')}</span>`;
 }
 
 function renderRuns(d) {
   if (!d.runs || !d.runs.length) {
-    return empty('▶', 'No runs recorded', 'A run appears here the moment `sf work` writes its first ledger entry.');
+    return void_('▸', 'No runs recorded', 'A run appears the moment `sf work` writes its first ledger entry.');
   }
-  const rows = d.runs.map(r =>
-    `<tr class="clickable ${r.violations || r.gatesFailed ? 'flag' : ''}" data-run="${esc(r.id)}" `
-    + `data-row="${esc((r.id + ' ' + r.agent + ' ' + r.stage + ' ' + r.status + ' ' + r.workItem).toLowerCase())}">`
-    + `<td><code>${esc(r.id)}</code></td>`
-    + `<td>${esc(r.agent || '—')}</td>`
-    + `<td><span class="pill mute">${esc(r.stage || '?')}</span></td>`
-    + `<td>${statusPill(r.status)}</td>`
-    + `<td class="num">${esc(r.modelCalls)}</td>`
-    + `<td class="num">${esc(r.toolCalls)}</td>`
-    + `<td class="num">${r.gatesFailed ? `<span class="pill bad">${esc(r.gatesFailed)}</span>` : '0'}</td>`
-    + `<td class="num">${esc(r.costUnits)}</td>`
-    + `</tr>`).join('');
-
   const spent = d.runs.reduce((a, r) => a + (r.costUnits || 0), 0);
-  return `<section>`
-    + `<div class="cards stagger" style="margin-bottom:20px">`
-    + card('runs recorded', d.total, '', '', 0)
-    + card('cost units', spent.toFixed(3), '', `<div class="d flat">estimated from declared prices</div>`, 1)
-    + card('shown', d.shown, d.truncated ? 'of ' + d.total : '', '', 2)
-    + `</div>`
-    + `<h2 class="sec">runs</h2>`
-    + `<div class="tblwrap"><table><thead><tr><th>run</th><th>agent</th><th>stage</th><th>status</th>`
-    + `<th class="num">model</th><th class="num">tools</th><th class="num">gates failed</th><th class="num">cost</th>`
-    + `</tr></thead><tbody>${rows}</tbody></table></div>`
-    + `<p class="note">${esc(d.costNote || '')} Click a row to inspect the run.</p></section>`;
+  const rows = d.runs.map(r =>
+    `<tr class="clickable" data-run="${esc(r.id)}">`
+    + `<td><code>${esc(r.id)}</code></td><td>${esc(r.agent || '—')}</td>`
+    + `<td><span class="chip mute plain">${esc(r.stage || '?')}</span></td>`
+    + `<td>${statusChip(r.status)}</td>`
+    + `<td class="num">${esc(r.modelCalls)}</td><td class="num">${esc(r.toolCalls)}</td>`
+    + `<td class="num">${r.gatesFailed ? `<span class="chip bad">${esc(r.gatesFailed)}</span>` : '0'}</td>`
+    + `<td class="num">${esc(r.costUnits)}</td></tr>`).join('');
+
+  return `<div class="bento">`
+    + stat('runs recorded', d.total, '', '', 0)
+    + stat('spend', spent.toFixed(3), 'units', `<div class="delta flat">estimated</div>`, 1)
+    + stat('shown', d.shown, d.truncated ? 'of ' + d.total : '', '', 2)
+    + stat('gates failed', d.runs.reduce((a, r) => a + (r.gatesFailed || 0), 0), '', '', 3)
+    + tile(`<div class="scroll"><table><thead><tr><th>run</th><th>agent</th><th>stage</th>`
+      + `<th>status</th><th class="num">model</th><th class="num">tools</th>`
+      + `<th class="num">gates failed</th><th class="num">cost</th></tr></thead>`
+      + `<tbody>${rows}</tbody></table></div>`, { cls: 'w12 flush', i: 4 })
+    + `<p class="note" style="grid-column:1/-1">${esc(d.costNote || '')} `
+    + `Click a row, or press ⌘K and type a run id.</p></div>`;
 }
 
-//: The payload fields worth putting on the timeline without opening anything, in the order
-//: a reader looks for them: what happened, then how it went, then what it cost.
 const SUMMARY_KEYS = ['stage', 'agent', 'tier', 'gate', 'outcome', 'status', 'tool',
                       'verdict', 'costUnits', 'reason', 'blocker', 'action'];
 
@@ -912,7 +1136,7 @@ function evClass(type) {
 function renderRun(d) {
   const gates = (d.gates || []).map(g => {
     const ok = /^(pass|passed|true)$/i.test(String(g.outcome));
-    return `<span class="pill ${ok ? 'ok' : 'bad'}">${esc(g.gate)}</span>`;
+    return `<span class="chip ${ok ? 'ok' : 'bad'}">${esc(g.gate)}</span>`;
   }).join(' ');
 
   const events = (d.entries || []).map(e => {
@@ -921,184 +1145,172 @@ function renderRun(d) {
     // `</pre><img src=x onerror=...>` in model output closed the element and ran.
     const pre = document.createElement('pre');
     pre.textContent = JSON.stringify(e.payload, null, 2);
-    // Collapsed by default. Every payload expanded made one run a page nobody scrolls to
-    // the end of, which hides the escalation three screens down as effectively as not
-    // rendering it. The summary carries the fields a reader scans for; the disclosure
-    // keeps the whole record one click away, because a timeline that summarises and
-    // cannot be checked is worse than one that dumps.
-    return `<div class="ev ${evClass(e.type)}" data-row="${esc(String(e.type).toLowerCase())}">`
-      + `<div class="h"><span class="ty">${esc(e.type)}</span><span class="at">${esc(e.at)}</span>`
-      + `<span class="at">#${esc(e.seq)}</span></div>`
+    return `<div class="ev ${evClass(e.type)}">`
+      + `<div class="h"><span class="ty">${esc(e.type)}</span>`
+      + `<span class="at">${esc(e.at)}</span><span class="at">#${esc(e.seq)}</span></div>`
       + summarise(e.payload)
       + `<details><summary>payload</summary>${pre.outerHTML}</details></div>`;
   }).join('');
 
   const trouble = [...(d.escalations || []), ...(d.violations || [])];
-  return `<section>`
-    + `<button class="back" data-back="runs">&larr; all runs</button>`
-    + `<div class="cards stagger" style="margin-bottom:20px">`
-    + card('run', d.run, '', '', 0)
-    + card('tool calls', d.toolCalls, '', '', 1)
-    + card('cost units', d.costUnits, '', `<div class="d flat">estimate, not billing</div>`, 2)
-    + card('ledger entries', (d.entries || []).length, '', '', 3)
-    + `</div>`
-    + (gates ? `<h2 class="sec">gates</h2><div>${gates}</div>` : '')
+  return `<button class="back" data-back="runs">← all runs</button><div class="bento">`
+    + stat('run', d.run, '', '', 0)
+    + stat('tool calls', d.toolCalls, '', '', 1)
+    + stat('spend', d.costUnits, 'units', `<div class="delta flat">estimate, not billing</div>`, 2)
+    + stat('ledger entries', (d.entries || []).length, '', '', 3)
+    + (gates ? tile(`<h3>Gates</h3><div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px">${gates}</div>`, { cls: 'w6', i: 4 }) : '')
     + (trouble.length
-        ? `<h2 class="sec">escalations and violations</h2><div class="grid stagger">`
-          + trouble.map((t, i) => `<div class="panel" style="--i:${i}"><h3>${esc(t.kind || t.gate || 'event')}</h3>`
-            + `<p class="why">${esc(t.reason || t.message || JSON.stringify(t))}</p></div>`).join('')
-          + `</div>`
+        ? tile(`<h3>Escalations and violations</h3>`
+            + trouble.map(t => `<p class="sub"><b>${esc(t.kind || t.gate || 'event')}</b> — `
+              + `${esc(t.reason || t.message || JSON.stringify(t))}</p>`).join(''), { cls: 'w6', i: 5 })
         : '')
-    + `<h2 class="sec">timeline</h2><div class="tl">${events}</div>`
-    + `<p class="note">${esc(d.costNote || '')}</p></section>`;
+    + tile(`<h3>Trace</h3><div class="trace" style="margin-top:12px">${events}</div>`
+        + `<p class="note">${esc(d.costNote || '')}</p>`, { cls: 'w12', i: 6 })
+    + `</div>`;
 }
 
-function chips(label, values) {
-  if (!values || !values.length) return `<div class="panel"><h3>${esc(label)}</h3><p class="why unavailable">none declared</p></div>`;
-  return `<div class="panel" data-row="${esc((label + ' ' + values.join(' ')).toLowerCase())}"><h3>${esc(label)} <span class="pill mute">${values.length}</span></h3>`
-    + `<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:5px">`
-    + values.map(v => `<span class="pill info">${esc(v)}</span>`).join('') + `</div></div>`;
+function chipTile(label, values, i) {
+  if (!values || !values.length) {
+    return tile(`<h3>${esc(label)}</h3><p class="sub muted">none declared</p>`, { cls: 'w4', i });
+  }
+  return tile(`<h3>${esc(label)} <span class="chip mute plain">${values.length}</span></h3>`
+    + `<div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px">`
+    + values.map(v => `<span class="chip info">${esc(v)}</span>`).join('') + `</div>`,
+    { cls: 'w4', i });
 }
 
 function renderDefinition(d) {
-  if (d.available === false) return unavailablePanel('Definition', d.reason);
-  return `<section>`
-    + `<div class="cards stagger" style="margin-bottom:20px">`
-    + card('factory', d.factory, '', '', 0)
-    + card('agents', (d.agents || []).length, '', '', 1)
-    + card('skills', (d.skills || []).length, '', '', 2)
-    + card('repositories', (d.repositories || []).length, '', '', 3)
-    + `</div>`
-    + `<h2 class="sec">components</h2><div class="grid stagger">`
-    + chips('agents', d.agents) + chips('automations', d.automations) + chips('runners', d.runners)
-    + chips('scorers', d.scorers) + chips('skills', d.skills) + chips('principals', d.principals)
-    + ((d.unloaded || []).length ? chips('failed to load', d.unloaded) : '')
-    + `</div>`
-    + `<h2 class="sec">repositories</h2><div class="grid stagger">`
-    + ((d.repositories || []).length
-        ? d.repositories.map((r, i) => `<div class="panel" style="--i:${i}"><h3><code>${esc(r)}</code></h3></div>`).join('')
-        : `<div class="panel"><p class="why unavailable">none declared</p></div>`)
-    + `</div><p class="note">${esc(d.note || '')}</p></section>`;
+  if (d.available === false) return unavailableTile('Definition', d.reason);
+  return `<div class="bento">`
+    + stat('factory', d.factory, '', '', 0)
+    + stat('agents', (d.agents || []).length, '', '', 1)
+    + stat('skills', (d.skills || []).length, '', '', 2)
+    + stat('repositories', (d.repositories || []).length, '', '', 3)
+    + `<h2 class="rule">components</h2>`
+    + chipTile('agents', d.agents, 0) + chipTile('automations', d.automations, 1)
+    + chipTile('runners', d.runners, 2) + chipTile('scorers', d.scorers, 3)
+    + chipTile('skills', d.skills, 4) + chipTile('principals', d.principals, 5)
+    + ((d.unloaded || []).length ? chipTile('failed to load', d.unloaded, 6) : '')
+    + chipTile('repositories', d.repositories, 7)
+    + `<p class="note" style="grid-column:1/-1">${esc(d.note || '')}</p></div>`;
 }
 
 function renderEvaluation(d) {
   const names = Object.keys(d.scorers || {});
-  const scorerPanels = names.map((name, i) => {
+  if (!names.length && !(d.proposals || []).length) {
+    return void_('◎', 'Nothing evaluated yet',
+      'Scorers record here once runs are sampled, and proposals once the improvement loop opens one.');
+  }
+  const scorerTiles = names.map((name, i) => {
     const s = d.scorers[name];
     const outcomes = Object.entries(s.outcomes || {});
     const passed = outcomes.filter(([k]) => /pass|ok/i.test(k)).reduce((a, [, v]) => a + v, 0);
     const rate = s.sampled ? passed / s.sampled : null;
-    return `<div class="panel" style="--i:${i}" data-row="${esc(name.toLowerCase())}"><h3>${esc(name)}</h3>`
-      + `<div style="font:600 20px/1.2 var(--mono);margin-top:4px">${rate === null ? '—' : pct(rate)}`
-      + `<small style="font-size:12px;color:var(--dim);font-weight:500"> of ${esc(s.sampled)} sampled</small></div>`
-      + `<div class="meter"><i style="width:${rate === null ? 0 : Math.round(rate * 100)}%"></i></div>`
-      + `<div style="margin-top:9px;display:flex;flex-wrap:wrap;gap:5px">`
-      + outcomes.map(([k, v]) => `<span class="pill ${/pass|ok/i.test(k) ? 'ok' : 'bad'}">${esc(k)} ${esc(v)}</span>`).join('')
-      + `</div></div>`;
+    return tile(`<h3>${esc(name)}</h3>` + gauge(rate, `${s.sampled} sampled`, 'sc' + i)
+      + `<div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px">`
+      + outcomes.map(([k, v]) => `<span class="chip ${/pass|ok/i.test(k) ? 'ok' : 'bad'}">`
+        + `${esc(k)} ${esc(v)}</span>`).join('') + `</div>`, { cls: 'w4', i });
   }).join('');
 
   const props = (d.proposals || []).map(p =>
-    `<tr data-row="${esc((p.id + ' ' + p.target + ' ' + p.status).toLowerCase())}">`
-    + `<td><code>${esc(p.id)}</code></td><td>${esc(p.target)}</td><td>${statusPill(p.status)}</td>`
-    + `<td class="note">${esc((p.evidence || []).join('; ') || 'no evidence recorded')}</td></tr>`).join('');
+    `<tr><td><code>${esc(p.id)}</code></td><td>${esc(p.target)}</td>`
+    + `<td>${statusChip(p.status)}</td>`
+    + `<td>${esc((p.evidence || []).join('; ') || 'no evidence recorded')}</td></tr>`).join('');
 
-  if (!names.length && !(d.proposals || []).length) {
-    return empty('◎', 'Nothing evaluated yet', 'Scorers record here once runs are sampled, and proposals once the improvement loop opens one.');
-  }
-  return `<section>`
-    + (names.length ? `<h2 class="sec">scorers</h2><div class="grid stagger">${scorerPanels}</div>` : '')
-    + `<h2 class="sec">improvement proposals</h2>`
-    + (props
-        ? `<div class="tblwrap"><table><thead><tr><th>proposal</th><th>target</th><th>status</th><th>evidence</th>`
-          + `</tr></thead><tbody>${props}</tbody></table></div>`
-        : `<p class="note unavailable">No proposal has been opened. The loop proposes; it never applies.</p>`)
-    + `</section>`;
+  return `<div class="bento">`
+    + (scorerTiles ? `<h2 class="rule">scorers</h2>${scorerTiles}` : '')
+    + `<h2 class="rule">improvement proposals</h2>`
+    + tile(props
+        ? `<div class="scroll"><table><thead><tr><th>proposal</th><th>target</th><th>status</th>`
+          + `<th>evidence</th></tr></thead><tbody>${props}</tbody></table></div>`
+        : `<p class="sub muted">No proposal has been opened. The loop proposes; it never applies.</p>`,
+        { cls: props ? 'w12 flush' : 'w12', i: 0 })
+    + `</div>`;
 }
 
 function renderRegistry(d) {
   const m = d.memory || {};
-  const memCards = m.available === false
-    ? `<div class="panel"><h3>memory</h3><p class="why unavailable">${esc(m.reason)}</p></div>`
-    : `<div class="cards stagger">`
-      + card('memories', fmt(m.total), '', '', 0)
-      + card('quarantined', fmt(m.quarantined), '', m.quarantined
-          ? `<div class="d down">▲ held out of retrieval</div>` : `<div class="d up">▬ clean</div>`, 1)
-      + card('size', fmt(Math.round((m.bytes || 0) / 1024)), 'KiB', '', 2)
-      + `</div>`;
-
   const lanes = Object.entries(m).filter(([k]) =>
     !['available', 'reason', 'total', 'quarantined', 'bytes'].includes(k));
-  const laneRows = lanes.map(([lane, n]) =>
-    `<tr data-row="${esc(lane.toLowerCase())}"><td><code>${esc(lane)}</code></td><td class="num">${esc(n)}</td>`
-    + `<td style="width:50%"><div class="meter"><i style="width:${m.total ? Math.round((n / m.total) * 100) : 0}%"></i></div></td></tr>`).join('');
+
+  const memTiles = m.available === false
+    ? tile(`<h3>Memory</h3><p class="sub muted">${esc(m.reason)}</p>`, { cls: 'w6', i: 0 })
+    : stat('memories', fmt(m.total), '', '', 0)
+      + stat('quarantined', fmt(m.quarantined), '',
+          m.quarantined ? `<div class="delta down">↑ held out of retrieval</div>`
+                        : `<div class="delta up">→ clean</div>`, 1)
+      + stat('size', fmt(Math.round((m.bytes || 0) / 1024)), 'KiB', '', 2)
+      + (lanes.length ? tile(`<h3>Lanes</h3>`
+          + lanes.map(([lane, n]) =>
+            `<div style="margin-top:10px"><div style="display:flex;justify-content:space-between;font-size:12.5px">`
+            + `<span>${esc(lane)}</span><span class="mono">${esc(n)}</span></div>`
+            + `<div class="meter"><i style="width:${m.total ? Math.round((n / m.total) * 100) : 0}%"></i></div></div>`
+          ).join(''), { cls: 'w3', i: 3 }) : '');
 
   const skills = (d.skills || []).map(s =>
-    `<tr data-row="${esc((s.name + ' ' + s.status).toLowerCase())}"><td><code>${esc(s.name)}</code></td>`
-    + `<td>${statusPill(s.status)}</td>`
+    `<tr><td><code>${esc(s.name)}</code></td><td>${statusChip(s.status)}</td>`
     + `<td class="num">${esc(pct(s.precision))}</td><td class="num">${esc(pct(s.recall))}</td>`
     + `<td class="num">${esc(s.offered)}</td><td class="num">${esc(s.helped)}</td></tr>`).join('');
 
-  return `<section>`
-    + `<h2 class="sec">memory fabric</h2>${memCards}`
-    + (laneRows ? `<div class="tblwrap" style="margin-top:12px"><table><thead><tr><th>lane</th>`
-        + `<th class="num">memories</th><th>share</th></tr></thead><tbody>${laneRows}</tbody></table></div>` : '')
-    + `<h2 class="sec">skills</h2>`
-    + (skills
-        ? `<div class="tblwrap"><table><thead><tr><th>skill</th><th>status</th><th class="num">precision</th>`
-          + `<th class="num">recall</th><th class="num">offered</th><th class="num">helped</th>`
-          + `</tr></thead><tbody>${skills}</tbody></table></div>`
-          + `<p class="note">Precision is of the times it was loaded, how often it helped. `
-          + `Recall counts retrospectively-detected misses and is an estimate with a stated derivation, not a measurement.</p>`
-        : `<p class="note unavailable">No skills are declared in this factory.</p>`)
-    + `</section>`;
+  return `<div class="bento"><h2 class="rule">memory fabric</h2>${memTiles}`
+    + `<h2 class="rule">skills</h2>`
+    + tile(skills
+        ? `<div class="scroll"><table><thead><tr><th>skill</th><th>status</th>`
+          + `<th class="num">precision</th><th class="num">recall</th><th class="num">offered</th>`
+          + `<th class="num">helped</th></tr></thead><tbody>${skills}</tbody></table></div>`
+        : `<p class="sub muted">No skills are declared in this factory.</p>`,
+        { cls: skills ? 'w12 flush' : 'w12', i: 0 })
+    + `<p class="note" style="grid-column:1/-1">Precision is, of the times a skill was loaded, `
+    + `how often it helped. Recall counts retrospectively-detected misses and is an estimate `
+    + `with a stated derivation, not a measurement.</p></div>`;
 }
 
-function unavailablePanel(what, reason) {
-  return `<section><div class="panel"><h3>${esc(what)} is not available</h3>`
-    + `<p class="why">${esc(reason)}</p>`
-    + `<p class="why">The factory is fine and the page is fine — this one panel has nothing behind it, `
-    + `and an operator needs to know which and why.</p></div></section>`;
+function unavailableTile(what, reason) {
+  return `<div class="bento">` + tile(`<h3>${esc(what)} is not available</h3>`
+    + `<p class="sub">${esc(reason)}</p>`
+    + `<p class="sub muted">The factory is fine and the page is fine — this one panel has `
+    + `nothing behind it, and an operator needs to know which and why.</p>`, { cls: 'w6', i: 0 })
+    + `</div>`;
 }
 
-function empty(glyph, head, body) {
-  return `<section><div class="empty"><div class="big">${glyph}</div><h3>${esc(head)}</h3>`
-    + `<p class="note">${esc(body)}</p></div></section>`;
+function void_(glyph, head, body) {
+  return `<div class="void"><div class="g">${glyph}</div><h3>${esc(head)}</h3>`
+    + `<p class="note">${esc(body)}</p></div>`;
 }
 
 function renderError(d) {
-  return `<section><div class="panel"><h3>${esc(d.error)}</h3><p class="why">${esc(d.message)}</p></div></section>`;
+  return unavailableTile(String(d.error), String(d.message));
 }
 
-/* -------------------------------------------------------------------- load */
+/* ------------------------------------------------------------------ load */
 
 const RENDER = {
-  overview: renderOverview, activity: renderActivity, runs: renderRuns,
-  run: renderRun, definition: renderDefinition, evaluation: renderEvaluation,
-  registry: renderRegistry,
+  overview: renderOverview, activity: renderActivity, runs: renderRuns, run: renderRun,
+  definition: renderDefinition, evaluation: renderEvaluation, registry: renderRegistry,
 };
 
 async function load(opts) {
   const quiet = opts && opts.quiet;
-  if (!quiet) { status('ok', 'reading ledger'); content.setAttribute('aria-busy', 'true'); }
+  if (!quiet) {
+    status('ok', 'reading');
+    content.innerHTML = `<div class="bento"><div class="skel"></div><div class="skel"></div>`
+      + `<div class="skel"></div><div class="skel"></div></div>`;
+  }
   const q = new URLSearchParams({ days: String(days) });
   if (view === 'run' && runId) q.set('run', runId);
   let data;
   try {
-    const res = await fetch(`/api/${view}?${q}`);
-    data = await res.json();
+    data = await (await fetch(`/api/${view}?${q}`)).json();
   } catch (err) {
     status('down', 'unreachable');
-    content.innerHTML = `<section><div class="panel"><h3>Could not reach the factory</h3>`
-      + `<p class="why">${esc(err)}</p></div></section>`;
+    content.innerHTML = unavailableTile('Could not reach the factory', String(err));
     return;
   }
-  content.removeAttribute('aria-busy');
   lastData = data;
-  if (data && data.error) { content.innerHTML = renderError(data); status('stale', esc(data.error)); return; }
+  if (data && data.error) { content.innerHTML = renderError(data); status('stale', String(data.error)); return; }
   const render = RENDER[view];
   content.innerHTML = render ? render(data) : renderError({ error: 'view.unknown', message: view });
   status('ok', new Date().toLocaleTimeString());
-  applyFilter();
 }
 
 content.addEventListener('click', e => {

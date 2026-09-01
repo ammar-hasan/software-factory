@@ -251,7 +251,7 @@ def capture_dashboard(factory: Path, ledger: Path, out: Path) -> None:
 
                 for view in VIEWS:
                     page.click(f'nav button[data-view="{view}"]')
-                    page.wait_for_selector("#content section", timeout=10_000)
+                    page.wait_for_selector("#content .bento, #content .void", timeout=10_000)
                     page.wait_for_timeout(320)  # let the entry animation settle
                     page.screenshot(
                         path=out / f"dashboard-{view}{suffix}.png",
@@ -266,7 +266,7 @@ def capture_dashboard(factory: Path, ledger: Path, out: Path) -> None:
                     page.click('nav button[data-view="runs"]')
                     page.wait_for_selector("tr[data-run]", timeout=10_000)
                     page.click("tr[data-run]")
-                    page.wait_for_selector(".tl .ev details", timeout=10_000)
+                    page.wait_for_selector(".trace .ev details", timeout=10_000)
                     page.wait_for_timeout(320)
                     page.screenshot(
                         path=out / "dashboard-run.png",

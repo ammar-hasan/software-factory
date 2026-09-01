@@ -97,6 +97,7 @@ def overview(
         "current": current.as_dict(),
         "previous": previous.as_dict(),
         "trend": _trend(current, previous),
+        "series": daily_series(entries, current.window),
     }
 
 
@@ -340,6 +341,71 @@ def registry_view(
             for s in sorted(skills, key=lambda s: s.name)
         ],
     }
+
+
+#: The most buckets a series carries. Beyond this the buckets widen rather than multiply:
+#: a year rendered as 365 points is a chart three pixels wide per point, which is noise
+#: drawn precisely.
+MAX_BUCKETS = 60
+
+
+def daily_series(entries: Iterable[LedgerEntry], window: Window) -> dict[str, Any]:
+    """Activity over the window, bucketed, for a chart rather than a single number.
+
+    A metric is a number and a trend is two numbers; neither answers "when did that
+    happen". A factory whose gate failures all landed on one afternoon and one whose
+    failures are spread evenly have the same pass rate and are not the same factory, and
+    only a series can tell them apart.
+
+    Bucket width is derived from the window so a 1-day view is hourly and a year is
+    weekly. The width is *returned*, because a chart whose x-axis meaning is implicit is a
+    chart a reader will misread once and stop trusting.
+    """
+    entries = list(entries)
+    span = window.end - window.start
+    total_seconds = max(span.total_seconds(), 1.0)
+    buckets = min(MAX_BUCKETS, max(1, int(total_seconds // 3600)))
+    width = total_seconds / buckets
+
+    runs = [0] * buckets
+    handoffs = [0] * buckets
+    failures = [0] * buckets
+    cost = [0.0] * buckets
+
+    for entry in entries:
+        at = _ts(entry)
+        if not window.contains(at):
+            continue
+        index = min(buckets - 1, int((at - window.start).total_seconds() // width))
+        if entry.type is EntryType.RUN_STARTED:
+            runs[index] += 1
+        elif entry.type is EntryType.MODEL_CALLED:
+            cost[index] += float(entry.payload.get("costUnits", 0.0) or 0)
+        elif entry.type is EntryType.WORK_ITEM_TRANSITION:
+            handoffs[index] += entry.payload.get("to") == "HANDOFF"
+        elif entry.type is EntryType.GATE_EVALUATED:
+            # Anything that is not a pass is a failure. Counting only a literal "fail"
+            # would let "refused" and "error" render as a clean bar.
+            failures[index] += str(entry.payload.get("outcome", "")).lower() not in (
+                "pass",
+                "passed",
+                "true",
+            )
+
+    return {
+        "buckets": buckets,
+        "bucketSeconds": int(width),
+        "start": window.start.isoformat(),
+        "end": window.end.isoformat(),
+        "runs": runs,
+        "handoffs": handoffs,
+        "gateFailures": failures,
+        "costUnits": [round(value, 4) for value in cost],
+    }
+
+
+def _ts(entry: LedgerEntry) -> datetime:
+    return datetime.fromisoformat(str(entry.ts).replace("Z", "+00:00"))
 
 
 def _preceding(window: Window) -> Window:

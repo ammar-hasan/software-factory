@@ -8,6 +8,7 @@ and nothing here is a decision channel.
 from __future__ import annotations
 
 import json
+import re
 import threading
 from datetime import timedelta
 from pathlib import Path
@@ -250,14 +251,48 @@ def test_the_dashboard_can_reach_its_own_api(dashboard: str) -> None:
 
 def test_the_dashboard_serves_a_page_with_no_external_resources(dashboard: str) -> None:
     """No framework, no CDN, no build step. A dashboard needing `npm install` to look at a
-    factory running offline on a laptop fails PR-2 on the first day somebody tries it."""
+    factory running offline on a laptop fails PR-2 on the first day somebody tries it.
+
+    Asserted against what actually loads something rather than against the substring
+    "http". The blunt version failed on the XML namespace inside an inline SVG -- a string
+    that fetches nothing and is required for the SVG to parse -- which pushes an author
+    away from inline graphics and towards the external file this rule exists to forbid. A
+    test that punishes the compliant approach eventually gets the rule deleted.
+    """
     with urlopen(f"{dashboard}/") as response:
         body = response.read().decode("utf-8")
 
     assert "<title>software factory</title>" in body
-    assert "http://" not in body.replace("http://127.0.0.1", "")
     assert "cdn" not in body.lower()
-    assert "<script src" not in body
+
+    # Only the markup outside the inline script can *be* a loading element. Inside it, the
+    # same characters are a string in a comment -- this file documents the injected
+    # `<img src=x onerror=...>` it defends against, and a check that cannot tell the
+    # warning from the attack forbids writing the warning down.
+    markup = body[: body.index("<script>")] + body[body.index("</script>") :]
+    for loader in ("<script src", "<link ", "<img ", "@import", "<iframe", "<object", "<embed"):
+        assert loader not in markup.lower(), loader
+    # A CSS `url()` may reference a data URI, which loads nothing; it may not name a host.
+    for scheme in ("url(http", "url('http", 'url("http', "url(//"):
+        assert scheme not in body, scheme
+    # The only permitted occurrences of a URL scheme are XML namespaces, which the parser
+    # reads and never fetches.
+    for match in re.findall(r"https?://[^\s\"')]+", body):
+        assert match.startswith("http://www.w3.org/"), match
+
+
+def test_the_pages_own_policy_admits_no_remote_image(dashboard: str) -> None:
+    """`img-src data:` is named so the inline texture paints. It must stay `data:` only.
+
+    Widening it to `*`, or to a host, would let a single crafted style reference pull a
+    request out of a dashboard whose whole claim is that it reaches nothing.
+    """
+    with urlopen(f"{dashboard}/") as response:
+        policy = response.headers["Content-Security-Policy"]
+
+    assert "img-src data:;" in policy
+    assert "default-src 'none'" in policy
+    assert "img-src *" not in policy
 
 
 def test_the_dashboard_serves_the_overview_as_json(dashboard: str) -> None:
