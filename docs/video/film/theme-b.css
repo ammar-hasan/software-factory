@@ -1,0 +1,78 @@
+/* PROOF-B — "Ledger". Light graphite field, type as material, accumulation.
+   Colours are the subject's own light-mode tokens (dash.py, the
+   prefers-color-scheme: light block), so the direction is a real alternative
+   rather than an invented palette. */
+
+:root {
+  --bline: #e8e9ef;
+  --bline2: #d6d8e2;
+  --bdim: #5b6072;
+  --bfaint: #8b90a0;
+  --bmono: ui-monospace, monospace;
+  --bsans: system-ui, sans-serif;
+}
+
+.lf {
+  position: absolute;
+  inset: 0;
+  padding: 62px 78px 132px;
+  font-family: var(--bsans);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+}
+
+.ledger {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-family: var(--bmono);
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  color: var(--bfaint);
+  border-bottom: 1px solid var(--bline);
+  padding-bottom: 16px;
+}
+
+.row {
+  display: flex;
+  gap: 14px;
+}
+
+.row i {
+  font-style: normal;
+  color: var(--bline2);
+  min-width: 2.4em;
+}
+
+.kin {
+  font-size: 66px;
+  font-weight: 800;
+  line-height: 1.02;
+  letter-spacing: -0.03em;
+  color: var(--ink);
+  margin: 0;
+  max-width: 15em;
+}
+
+.kin em {
+  font-style: normal;
+  position: relative;
+  color: var(--accent);
+}
+
+.uline {
+  display: block;
+  margin-top: 8px;
+  width: 100%;
+  max-width: 640px;
+}
+
+.tag {
+  font-family: var(--bmono);
+  font-size: 14px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--bfaint);
+}

@@ -1,0 +1,345 @@
+/* ---------------------------------------------------------------------------
+   Theme derived from the subject's own product tokens.
+   Source of every colour below: src/software_factory/observability/dash.py
+   (the dashboard's :root block). Palette from evidence, not from taste.
+
+   Font stacks are generic-only on purpose: naming a family would opt the
+   renderer into fetching it, and this film is about a system that runs offline.
+   --------------------------------------------------------------------------- */
+
+:root {
+  --sfline: #1e212b;
+  --sfline2: #2a2e3b;
+  --sfcard: #14161e;
+  --sfraise: #101218;
+  --sfdim: #9096a8;
+  --sffaint: #61667a;
+  --sfgood: #4ec9a0;
+  --sfwarn: #e8b458;
+  --sfbad: #f2748c;
+  --sfmono: ui-monospace, monospace;
+  --sfsans: system-ui, sans-serif;
+}
+
+/* ----------------------------------------------------------------- geometry */
+
+.f {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: 186px 1fr;
+  column-gap: 40px;
+  padding: 52px 68px 128px 44px;
+  font-family: var(--sfsans);
+  box-sizing: border-box;
+}
+
+.col {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 22px;
+}
+
+/* --------------------------------------------------------- the stage rail --
+   The film's own progress marker is the factory's stage machine, printed
+   verbatim from `sf stages`. */
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  font-family: var(--sfmono);
+  font-size: 13px;
+  letter-spacing: 0.13em;
+  padding-top: 4px;
+  border-right: 1px solid var(--sfline);
+  margin-right: -20px;
+}
+
+.rail .lab {
+  color: var(--sffaint);
+  font-size: 10px;
+  letter-spacing: 0.24em;
+  margin-bottom: 7px;
+}
+
+.sg {
+  color: #4a4f61;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sg::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #2a2e3b;
+  flex: 0 0 auto;
+}
+
+.sg.done {
+  color: var(--sffaint);
+}
+
+.sg.done::before {
+  background: #3a3f4f;
+}
+
+.sg.on {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.sg.on::before {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgba(124, 140, 255, 0.16);
+}
+
+/* ---------------------------------------------------------------- typography */
+
+.eyebrow {
+  font-family: var(--sfmono);
+  font-size: 13px;
+  letter-spacing: 0.22em;
+  color: var(--sffaint);
+  text-transform: uppercase;
+}
+
+.stmt {
+  font-size: 52px;
+  font-weight: 760;
+  line-height: 1.08;
+  letter-spacing: -0.018em;
+  color: var(--ink);
+  margin: 0;
+  max-width: 17.5em;
+}
+
+.stmt.sm {
+  font-size: 40px;
+  max-width: 20em;
+}
+
+.sub {
+  font-size: 21px;
+  line-height: 1.45;
+  color: var(--sfdim);
+  margin: 0;
+  max-width: 30em;
+}
+
+.accentword {
+  color: var(--accent);
+}
+
+.hair {
+  height: 1px;
+  background: var(--sfline);
+  width: 100%;
+}
+
+/* ------------------------------------------------------------------ evidence
+   One standing rule for this film: if the machine said it, it is monospace
+   inside a bordered plate. Nothing authored is ever set that way. */
+
+.term {
+  border: 1px solid var(--sfline2);
+  border-radius: 11px;
+  background: var(--sfraise);
+  padding: 17px 20px 18px;
+  font-family: var(--sfmono);
+  font-size: 16px;
+  line-height: 1.6;
+  color: #c9cdda;
+  white-space: pre;
+  overflow: hidden;
+}
+
+.term.sm {
+  font-size: 14px;
+  line-height: 1.68;
+  padding: 15px 18px 16px;
+}
+
+.term .cmd2 {
+  color: var(--accent-2, #58e6d0);
+}
+
+.term .cmd {
+  color: var(--accent-2, #58e6d0);
+}
+
+.term .cmd::before {
+  content: "$ ";
+  color: var(--sffaint);
+}
+
+.term .ok {
+  color: var(--sfgood);
+}
+
+.term .no {
+  color: var(--sfbad);
+}
+
+.term .hold {
+  color: var(--sfwarn);
+}
+
+.term .mut {
+  color: var(--sffaint);
+}
+
+.plate-cap {
+  font-family: var(--sfmono);
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  color: var(--sffaint);
+  text-transform: uppercase;
+}
+
+/* ------------------------------------------------------------------- lists */
+
+.mechs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px 26px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mech {
+  border-left: 2px solid var(--sfline2);
+  padding: 2px 0 2px 15px;
+}
+
+.mech b {
+  display: block;
+  font-size: 21px;
+  font-weight: 700;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+}
+
+.mech span {
+  display: block;
+  font-size: 15.5px;
+  line-height: 1.42;
+  color: var(--sfdim);
+  margin-top: 3px;
+}
+
+/* -------------------------------------------------------------- the queue */
+
+.queue {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  max-width: 27em;
+}
+
+.tik {
+  font-size: 15px;
+  color: var(--sfdim);
+  border: 1px solid var(--sfline2);
+  border-radius: 7px;
+  padding: 6px 11px;
+  background: #101218;
+}
+
+.tik.hot {
+  color: var(--sfbad);
+  border-color: #43303a;
+}
+
+/* ------------------------------------------------- captured product surface
+
+   `.card` is an unretouched crop of a real dashboard capture
+   (docs/images/dashboard-overview.png). It is never recoloured or restyled —
+   the point is that this is the product's own surface, not a mock of it. */
+
+.two {
+  display: grid;
+  grid-template-columns: 268px 1fr;
+  gap: 30px;
+  align-items: start;
+}
+
+.card {
+  display: block;
+  width: 268px;
+  height: auto;
+  border: 1px solid var(--sfline2);
+  border-radius: 12px;
+}
+
+.side {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* ------------------------------------------------------------------ closing */
+
+.mark {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+}
+
+.mark .dot {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: linear-gradient(140deg, var(--accent), #58e6d0);
+}
+
+.mark .wm {
+  font-size: 31px;
+  font-weight: 300;
+  color: var(--sfdim);
+  letter-spacing: -0.01em;
+}
+
+.mark .wm b {
+  font-weight: 760;
+  color: var(--ink);
+}
+
+.foot {
+  font-family: var(--sfmono);
+  font-size: 15px;
+  color: var(--sffaint);
+  letter-spacing: 0.05em;
+}
+
+/* -------------------------------------------------------------- quotation --
+   The central claim is quoted, never asserted by the film. It gets a rule, a
+   mark, and an attribution that says plainly that it is untested. */
+
+.quote {
+  border-left: 3px solid var(--accent);
+  padding-left: 26px;
+  position: relative;
+}
+
+.attrib {
+  font-size: 16px;
+  color: var(--sfdim);
+  font-family: var(--sfsans);
+}
+
+.attrib b {
+  color: var(--ink);
+  font-weight: 640;
+}
+
+/* Note: HyperFrames gives its background element `class="stage"` for
+   backwards compatibility, so no rule in this file may target `.stage`.
+   The rail uses `.sg`. */

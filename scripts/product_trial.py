@@ -259,6 +259,13 @@ class Result:
     stages_run: list[str] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
+    turns: dict[str, int] = field(default_factory=dict)
+    """Turns per stage. The diagnostic the token total cannot give.
+
+    A run costing half a million tokens says nothing about *why*. Turns separate the two
+    causes that look identical from outside: a large context sent a few times, and a small
+    one sent many. The first is an awareness problem and the second is a stopping problem,
+    and they have nothing to do with each other."""
     seconds: float = 0.0
     changed: list[str] = field(default_factory=list)
     tests_pass: bool | None = None
@@ -330,6 +337,10 @@ def run_step(step: Step, *, repo: Path, factory: Path, state: Path, provider: An
         if entry.type is EntryType.MODEL_CALLED:
             result.input_tokens += int(entry.payload.get("inputTokens", 0) or 0)
             result.output_tokens += int(entry.payload.get("outputTokens", 0) or 0)
+            stage = str(entry.payload.get("stage", "?"))
+            result.turns[stage] = result.turns.get(stage, 0) + int(
+                entry.payload.get("turns", 0) or 0
+            )
 
     # The product's own tests, run against the tree the factory left behind. A factory that
     # reaches handoff on a repository whose tests fail has reached handoff on nothing, and
@@ -382,8 +393,8 @@ def render(results: list[Result], *, provider: str, model: str) -> str:
         handoffs=f"{handoffs} of {len(results)}",
         tokens=f"{tokens:,}",
     )
-    body += "| Step | Probes | Reached | Tests | Tokens | Seconds |\n"
-    body += "| --- | --- | --- | --- | --- | --- |\n"
+    body += "| Step | Probes | Reached | Tests | Turns | Tokens | Seconds |\n"
+    body += "| --- | --- | --- | --- | --- | --- | --- |\n"
     for r in results:
         tests = {True: "pass", False: "**FAIL**", None: "—"}[r.tests_pass]
         reached = r.stage or "crashed"
@@ -391,7 +402,8 @@ def render(results: list[Result], *, provider: str, model: str) -> str:
             reached = f"{reached} ({r.blocker})"
         body += (
             f"| {r.step.name} | {r.step.tests} | {reached} | {tests} | "
-            f"{r.input_tokens + r.output_tokens:,} | {r.seconds:.0f} |\n"
+            f"{sum(r.turns.values())} | {r.input_tokens + r.output_tokens:,} | "
+            f"{r.seconds:.0f} |\n"
         )
     body += "\n"
 
@@ -416,6 +428,11 @@ def render(results: list[Result], *, provider: str, model: str) -> str:
             body += "| Blocking gate | Outcome |\n| --- | --- |\n"
             for gate in blocking:
                 body += f"| {gate['gate']} | {gate['outcome']} |\n"
+            body += "\n"
+        if r.turns:
+            body += "| Stage | Turns |\n| --- | --- |\n"
+            for stage, count in r.turns.items():
+                body += f"| {stage} | {count} |\n"
             body += "\n"
         body += f"Spend: {r.input_tokens:,} in, {r.output_tokens:,} out, {r.seconds:.0f}s.\n\n"
     return body
