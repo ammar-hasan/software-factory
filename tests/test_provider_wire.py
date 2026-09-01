@@ -986,3 +986,109 @@ def test_an_endpoint_that_is_down_still_ends_the_run() -> None:
     from tests.test_loop import loop as build_loop
 
     assert build_loop(Down()).run().status is RunStatus.PROVIDER_FAILED
+
+
+# --------------------------------- what the fourth live run found: thoroughness punished
+
+
+def _results(*rows):
+    """Build a TestRun from (id, outcome, message) triples."""
+    from software_factory.evals.results import Outcome, TestResult, TestRun
+
+    return TestRun(
+        command="pytest",
+        commit="c",
+        exit_code=0,
+        results=[TestResult(test_id=i, outcome=Outcome(o), message=m) for i, o, m in rows],
+    )
+
+
+def test_one_genuine_regression_test_is_enough() -> None:
+    """FR-13.3 asks for *a* test that fails at the parent, not every one of them.
+
+    A real model wrote four genuine regression tests and one invariant — a test asserting
+    `strip_bom('abc') == 'abc'`, which passes before and after the fix because that is what
+    makes it an invariant. The gate blocked the work and told it the tests proved nothing.
+    Reading the requirement universally punishes exactly the practice it exists to
+    encourage.
+    """
+    from software_factory.evals.gates import GateContext, GateOutcome, regression_proven
+
+    result = regression_proven(
+        GateContext(
+            stage="VERIFY",
+            work_class="defect",
+            new_test_ids=("t::regression", "t::invariant"),
+            tests_at_tip=_results(("t::regression", "passed", ""), ("t::invariant", "passed", "")),
+            tests_at_parent=_results(
+                ("t::regression", "failed", "E AssertionError: assert 'x' == 'y'"),
+                ("t::invariant", "passed", ""),
+            ),
+        )
+    )
+
+    assert result.outcome is GateOutcome.PASS, [f.observed for f in result.findings]
+
+
+def test_a_change_whose_only_new_test_passes_at_the_parent_is_still_refused() -> None:
+    """The bypass this gate exists to prevent, unaffected."""
+    from software_factory.evals.gates import GateContext, GateOutcome, regression_proven
+
+    result = regression_proven(
+        GateContext(
+            stage="VERIFY",
+            work_class="defect",
+            new_test_ids=("t::invariant",),
+            tests_at_tip=_results(("t::invariant", "passed", "")),
+            tests_at_parent=_results(("t::invariant", "passed", "")),
+        )
+    )
+
+    assert result.outcome is GateOutcome.FAIL
+    assert "proves nothing" in result.findings[0].remediation
+
+
+def test_a_new_test_the_change_does_not_make_pass_still_blocks() -> None:
+    """Separate from the requirement above: a change that does not satisfy its own test is
+    a change that does not work, however many other tests prove the regression."""
+    from software_factory.evals.gates import GateContext, GateOutcome, regression_proven
+
+    result = regression_proven(
+        GateContext(
+            stage="VERIFY",
+            work_class="defect",
+            new_test_ids=("t::regression", "t::broken"),
+            tests_at_tip=_results(
+                ("t::regression", "passed", ""), ("t::broken", "failed", "E AssertionError")
+            ),
+            tests_at_parent=_results(
+                ("t::regression", "failed", "E AssertionError: assert 'x' == 'y'"),
+                ("t::broken", "failed", "E AssertionError"),
+            ),
+        )
+    )
+
+    assert result.outcome is GateOutcome.FAIL
+    assert any("does not make the test pass" in f.remediation for f in result.findings)
+
+
+def test_an_existence_only_test_does_not_count_as_proof() -> None:
+    """A test that fails at the parent because the name did not exist proves the code was
+    absent, not that the behaviour was wrong — the bypass one keystroke from an import
+    error."""
+    from software_factory.evals.gates import GateContext, GateOutcome, regression_proven
+
+    result = regression_proven(
+        GateContext(
+            stage="VERIFY",
+            work_class="defect",
+            new_test_ids=("t::imports",),
+            tests_at_tip=_results(("t::imports", "passed", "")),
+            tests_at_parent=_results(
+                ("t::imports", "failed", "E ImportError: cannot import name 'strip_bom'")
+            ),
+        )
+    )
+
+    assert result.outcome is GateOutcome.FAIL
+    assert any("before its body ran" in f.remediation for f in result.findings)

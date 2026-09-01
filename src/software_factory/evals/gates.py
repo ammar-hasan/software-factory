@@ -353,12 +353,27 @@ def regression_proven(ctx: GateContext) -> GateResult:
             detail="the suite was not run at both the parent commit and the tip",
         )
 
+    # FR-13.3 asks that a fix come with *a* test that fails at the parent commit for the
+    # right reason. This used to read it as *every* new test, which punishes the practice it
+    # is trying to encourage: a careful author writes the regression test and then invariant
+    # tests around it, and an invariant test passes before and after by definition -- that
+    # is what makes it an invariant. A real model wrote four genuine regression tests and
+    # one invariant, and was told its work proved nothing.
+    #
+    # The bypass this gate exists to prevent is unaffected. Requiring at least one genuine
+    # behavioural failure at the parent still refuses a change whose only "regression test"
+    # passes with and without it.
     findings: list[Finding] = []
+    proven: list[str] = []
+    unproven: list[Finding] = []
+
     for test_id in ctx.new_test_ids:
         parent = ctx.tests_at_parent.by_id(test_id)
         tip = ctx.tests_at_tip.by_id(test_id)
 
         if tip is None or tip.outcome.value != "passed":
+            # Blocking on its own, and separately from the requirement above: a new test the
+            # change does not make pass is a change that does not work.
             findings.append(
                 Finding(
                     criterion="the new test passes at the tip",
@@ -371,7 +386,7 @@ def regression_proven(ctx: GateContext) -> GateResult:
             continue
 
         if parent is None:
-            findings.append(
+            unproven.append(
                 Finding(
                     criterion="the new test was run at the parent commit",
                     observed="not present in the parent run",
@@ -383,14 +398,15 @@ def regression_proven(ctx: GateContext) -> GateResult:
             continue
 
         if parent.outcome.value == "passed":
-            findings.append(
+            unproven.append(
                 Finding(
                     criterion="the new test fails without the change",
                     observed="passed at the parent commit",
                     expected="failed at the parent commit",
                     remediation=(
-                        "This test passes with and without the change, so it proves nothing. "
-                        "Write one that exercises the behaviour you fixed."
+                        "This test passes with and without the change, so it proves nothing "
+                        "on its own. That is fine for an invariant, but at least one new "
+                        "test must exercise the behaviour you fixed."
                     ),
                     locator=test_id,
                 )
@@ -399,7 +415,7 @@ def regression_proven(ctx: GateContext) -> GateResult:
 
         if not parent.is_behavioural_failure:
             failure_class = parent.classified()
-            findings.append(
+            unproven.append(
                 Finding(
                     criterion="the parent-commit failure is about behaviour",
                     observed=f"{failure_class.value if failure_class else 'unknown'} failure",
@@ -412,6 +428,24 @@ def regression_proven(ctx: GateContext) -> GateResult:
                     locator=test_id,
                 )
             )
+            continue
+
+        proven.append(test_id)
+
+    if not proven:
+        # Nothing demonstrated the regression. Report why each candidate did not, because
+        # "no test proves this" with no reason is a refusal nobody can act on.
+        findings.extend(
+            unproven
+            or [
+                Finding(
+                    criterion="a new test proves the regression",
+                    observed="no new test",
+                    expected="a test that fails at the parent commit and passes at the tip",
+                    remediation="Write the test first, and watch it fail before you fix anything.",
+                )
+            ]
+        )
 
     if findings:
         return GateResult("regression-proven", GateOutcome.FAIL, findings=tuple(findings))
