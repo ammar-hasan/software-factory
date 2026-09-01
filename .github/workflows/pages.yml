@@ -1,0 +1,51 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege, and `id-token` only because the deploy action needs it to prove which
+# workflow run it is. `contents: read` rather than write: this workflow publishes a site
+# and never pushes to the repository.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and never cancelled mid-flight. `cancel-in-progress: true`
+# would be right for CI, where a superseded run tells you nothing; here it can leave the
+# published site half-written.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: python -m pip install -e ".[dev]"
+      - name: Build the site from the repository's own documents
+        # Generated rather than hand-written, for the same reason `docs/reference/` is:
+        # a page describing a renamed command reads perfectly and sends every reader to
+        # something that does not exist.
+        run: python scripts/build_site.py --out _site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
