@@ -90,7 +90,11 @@ from software_factory.orchestrator.workitem import (
     new_id,
 )
 from software_factory.providers.base import Provider
-from software_factory.runtime.executor import LocalExecutor, SandboxPolicy
+from software_factory.runtime.executor import (
+    LocalExecutor,
+    SandboxPolicy,
+    detect_sandbox_level,
+)
 from software_factory.runtime.tools import build_registry
 from software_factory.runtime.workspace import Workspace, WorkspaceFactory
 from software_factory.skills.registry import SkillRegistry
@@ -1033,21 +1037,8 @@ class Coordinator:
     # ----------------------------------------------------------------------- stages
 
     def _default_path(self, item: WorkItem) -> list[Stage]:
-        """The shortest path that still meets the quality policy.
-
-        Triage is skipped when the request already explains what is wrong and what to
-        change; review never is (FR-3.3a).
-        """
-        # Every path ends at HANDOFF. It did not, and the consequence was quiet: a factory
-        # that never reaches handoff opens no changes, so `changes_opened` and
-        # `cost_per_change` folded on a key nobody wrote and reported "no work item both
-        # incurred cost and reached handoff" -- which reads as an observation about
-        # throughput when it was a statement about a stage the path never included.
-        if item.work_class is WorkClass.DEFECT and len(item.request) > 200:
-            return [Stage.TRIAGE, Stage.BUILD, Stage.REVIEW, Stage.HANDOFF]
-        if item.work_class in (WorkClass.FEATURE, WorkClass.REFACTOR):
-            return [Stage.TRIAGE, Stage.DESIGN, Stage.BUILD, Stage.REVIEW, Stage.HANDOFF]
-        return [Stage.TRIAGE, Stage.BUILD, Stage.REVIEW, Stage.HANDOFF]
+        """The shortest path that still meets the quality policy."""
+        return list(planned_path(item).stages)
 
     def _run_stage(self, item: WorkItem, stage: Stage, workspace: Workspace) -> StageOutcome:
         # A run is one agent working one stage of one work item, and it needs its own id.
@@ -1089,20 +1080,31 @@ class Coordinator:
             checkpoints=True,
         )
 
-        pack = self._assemble(item, stage, role, workspace, registry, grants)
-        self.ledger.append(
-            EntryType.PACK_ASSEMBLED,
-            actor=agent_name,
-            subject=item.id,
-            payload={"stage": stage.value, "digest": pack.digest(), "tokens": pack.tokens()},
-        )
-
+        # Resolved before the pack, because the tier decides how large the pack may be.
         ladder = self.definition.factory.ladder
         tier = execution.tier or (starting_tier(ladder) if ladder else "local-small")
         routing = (
             RoutingState(ladder=ladder, current=tier)
             if ladder
             else RoutingState(ladder=self._synthetic_ladder(), current="local-small")
+        )
+
+        pack = self._assemble(
+            item, stage, role, workspace, registry, grants, budget_tokens=self._pack_budget(routing)
+        )
+        self.ledger.append(
+            EntryType.PACK_ASSEMBLED,
+            actor=agent_name,
+            subject=item.id,
+            payload={
+                "stage": stage.value,
+                "digest": pack.digest(),
+                "tokens": pack.tokens(),
+                # What the pack was allowed, beside what it used. Without the bound, a pack
+                # that was truncated and one that had nothing more to say read identically.
+                "budgetTokens": pack.budget_tokens,
+                "tier": routing.current,
+            },
         )
 
         # `agent` and `purpose` are what `observability.metrics` folds on. Without them the
@@ -1272,6 +1274,26 @@ class Coordinator:
 
     # ------------------------------------------------------------------------- pack
 
+    def _pack_budget(self, routing: RoutingState) -> int:
+        """How many tokens of awareness this tier may be given.
+
+        `workingSetCeiling` is declared on every tier of every ladder this project ships and
+        was read by nothing, so the pack was a flat 6,000 tokens whether the run was on a
+        32k local model or a 200k hosted one. Today the configured budget is under every
+        declared ceiling, so this changes no run -- and that is the point: a bound that only
+        starts mattering the day somebody raises the budget has to be in place *before* that
+        day, or the raise silently overflows the smallest tier's window and the factory
+        reports a model that suddenly got worse.
+
+        A bound, not a target. A tier with a large window does not need a larger pack; the
+        pack is as big as the evidence is, and the ceiling only says how big it may get.
+        """
+        try:
+            ceiling = routing.tier.working_set_ceiling
+        except (KeyError, IndexError, AttributeError):
+            return self.pack_budget_tokens
+        return min(self.pack_budget_tokens, ceiling) if ceiling else self.pack_budget_tokens
+
     def _assemble(
         self,
         item: WorkItem,
@@ -1280,6 +1302,7 @@ class Coordinator:
         workspace: Workspace,
         registry: Any,
         grants: Grants,
+        budget_tokens: int | None = None,
     ) -> AwarenessPack:
         """Assemble the pack from deterministic sources.
 
@@ -1288,7 +1311,7 @@ class Coordinator:
         inspection. Only `conventions` may carry model-derived content, and every item
         there cites the memory it came from.
         """
-        assembler = PackAssembler(role=role, budget_tokens=self.pack_budget_tokens)
+        assembler = PackAssembler(role=role, budget_tokens=budget_tokens or self.pack_budget_tokens)
         surface = workspace.changed_paths() or set(self._top_level(workspace))
         scope_ref = self._repository_scope()
 
@@ -1634,6 +1657,7 @@ class Coordinator:
             bundle=bundle,
             has_test_command=validation.has_test_command,
             has_build_command=validation.has_test_command,
+            filesystem_confined=detect_sandbox_level().confines_filesystem,
             tests_at_tip=validation.at_tip,
             tests_at_parent=validation.at_parent,
             new_test_ids=validation.new_test_ids,
@@ -1924,6 +1948,58 @@ class Coordinator:
         return outcome.run.reason or "investigate the run"
 
 
+@dataclass(frozen=True, slots=True)
+class PlannedPath:
+    """The stages a work item would take, and the sentence explaining why."""
+
+    stages: tuple[Stage, ...]
+    reason: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"stages": [s.value for s in self.stages], "reason": self.reason}
+
+
+def planned_path(item: WorkItem) -> PlannedPath:
+    """The shortest path that still meets the quality policy, and why it is that one.
+
+    A module-level function because it is a pure function of the work item and nothing
+    else. It was a method, so `sf work --dry-run` -- whose whole job is to answer this
+    without running anything -- had to build a `Coordinator` through `__new__` to reach it,
+    dodging the constructor of a class that owns a ledger, a workspace factory and a
+    provider. A planning question answered by an uninitialised object is one edit away from
+    a planning question that needs a provider.
+
+    The reason travels with the path. `--dry-run` told a reader which stages would run and
+    not why that path and not another, so the one thing a dry run exists to explain -- that
+    the work class chose this shape -- was the thing it left out.
+
+    REVIEW is in every path (FR-3.3a). So is TRIAGE: the docstring this replaces said it
+    was skipped when a request already explains what to change, and no branch here has ever
+    skipped it. A comment describing a policy the code does not implement is worse than
+    none, because it is the one a reader trusts.
+    """
+    # Every path ends at HANDOFF. It did not, and the consequence was quiet: a factory that
+    # never reaches handoff opens no changes, so `changes_opened` and `cost_per_change`
+    # folded on a key nobody wrote and reported "no work item both incurred cost and reached
+    # handoff" -- which reads as an observation about throughput when it was a statement
+    # about a stage the path never included.
+    tail = (Stage.BUILD, Stage.REVIEW, Stage.HANDOFF)
+    if item.work_class is WorkClass.DEFECT and len(item.request) > 200:
+        return PlannedPath(
+            (Stage.TRIAGE, *tail),
+            "a defect this fully described needs no design stage; the report is the design",
+        )
+    if item.work_class in (WorkClass.FEATURE, WorkClass.REFACTOR):
+        return PlannedPath(
+            (Stage.TRIAGE, Stage.DESIGN, *tail),
+            f"{item.work_class.value} work changes the shape of the code, so DESIGN is planned",
+        )
+    return PlannedPath(
+        (Stage.TRIAGE, *tail),
+        f"{item.work_class.value} work is scoped by its own report, so DESIGN is skipped",
+    )
+
+
 def _registry_from(definition: Definition) -> SkillRegistry:
     """Build a skill registry from the definition's skill files.
 
@@ -1965,6 +2041,7 @@ def local_coordinator(
     provider: Provider,
     allow_unsandboxed: bool = False,
     spend_cap: SpendCap | None = None,
+    pack_budget_tokens: int = 6000,
 ) -> Coordinator:
     """Assemble a coordinator for a single-machine run. The reference topology."""
     return Coordinator(
@@ -1974,6 +2051,7 @@ def local_coordinator(
         ledger=Ledger(state_dir / "ledger.jsonl"),
         allow_unsandboxed=allow_unsandboxed,
         spend_cap=spend_cap,
+        pack_budget_tokens=pack_budget_tokens,
     )
 
 

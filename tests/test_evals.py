@@ -92,6 +92,37 @@ def test_an_import_error_mentioning_assert_is_still_an_import_error() -> None:
     assert classify_failure(message) is FailureClass.IMPORT
 
 
+def test_blast_radius_is_unenforceable_when_nothing_was_confining_the_run() -> None:
+    """Zero violations because nothing was watching is not zero violations.
+
+    Every trial in this repository ran with `--allow-unsandboxed` on a machine with no
+    sandbox helper, and this gate reported `pass` -- "no attempt to reach outside the
+    declared grants" -- on every stage of every run. Meanwhile an agent's `pip install -e .`
+    had written an editable-install `.pth` into the system `dist-packages` and a console
+    script onto `PATH`, where they stayed and shadowed later runs. A later agent found the
+    contamination itself and filed it as a work item; that is the only reason anybody knew.
+    """
+    outcome = blast_radius_clean(context(filesystem_confined=False))
+
+    assert outcome.outcome is GateOutcome.UNENFORCEABLE
+    assert not outcome.blocks, "a run the operator chose to allow must still be able to run"
+    assert "checked nothing" in outcome.detail
+
+
+def test_blast_radius_still_passes_when_something_was_watching() -> None:
+    assert blast_radius_clean(context(filesystem_confined=True)).outcome is GateOutcome.PASS
+
+
+def test_an_escalating_violation_is_not_excused_by_the_confinement_level() -> None:
+    """A recorded violation is evidence something *did* watch, whatever the level says."""
+    outcome = blast_radius_clean(
+        context(filesystem_confined=True, violations={ViolationClass.ESCALATING: 1})
+    )
+
+    assert outcome.outcome is GateOutcome.FAIL
+    assert outcome.blocks
+
+
 # --------------------------------------------------------------- regression-proven
 
 

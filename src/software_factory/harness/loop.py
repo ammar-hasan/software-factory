@@ -22,8 +22,10 @@ from software_factory.harness.awareness import AwarenessPack, estimate_tokens
 from software_factory.harness.routing import (
     Escalation,
     RoutingState,
+    Scaffold,
     Trigger,
     may_escalate,
+    scaffolds_for,
 )
 from software_factory.harness.tools import (
     BlastRadius,
@@ -173,6 +175,13 @@ class RunResult:
     repair_attempts: int = 0
     escalations: list[str] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
+    scaffolds: list[str] = field(default_factory=list)
+    """Which small-tier scaffolds were in force (HARNESS.md R-5).
+
+    Recorded, not inferred. R-5 asks that each scaffold be individually measurable, and a
+    factory cannot compare a scaffolded run against an unscaffolded one if the runs do not
+    say which they were.
+    """
     budget_overrun: str | None = None
     """Set when the final call crossed a bound. The result is kept; the overrun is recorded."""
 
@@ -202,6 +211,7 @@ class RunResult:
             "repairAttempts": self.repair_attempts,
             "escalations": self.escalations,
             "violations": self.violations,
+            "scaffolds": self.scaffolds,
         }
 
 
@@ -248,7 +258,13 @@ class TurnLoop:
 
     def run(self) -> RunResult:
         messages = self._compose()
-        result = RunResult(status=RunStatus.COMPLETED, transcript=messages)
+        result = RunResult(
+            status=RunStatus.COMPLETED,
+            transcript=messages,
+            scaffolds=sorted(
+                s.value for s in scaffolds_for(self.routing.ladder, self.routing.current)
+            ),
+        )
         warned = False
         started = time.monotonic()
         # Registries are shared between runs and their violation list is cumulative, so
@@ -454,7 +470,7 @@ class TurnLoop:
 
     def _compose(self) -> list[Message]:
         """Fixed, delimited order. Later sections never silently override earlier ones."""
-        return [
+        messages = [
             Message(role=Role.SYSTEM, content=f"<harness>{_INVARIANTS}</harness>"),
             Message(
                 role=Role.SYSTEM,
@@ -472,6 +488,25 @@ class TurnLoop:
                 content=(f'<task untrusted="true">{escape_delimiters(self.task)}</task>'),
             ),
         ]
+
+        # Small-tier scaffolding (HARNESS.md §8.4), applied here rather than by the caller.
+        #
+        # `scaffolds_for` existed, was correct, was tested, and was called by nothing. So the
+        # mechanism this whole project rests on -- a modest model does well because the
+        # harness supplies the practice it would otherwise have to remember -- had never once
+        # been applied to a run, on any tier, in any factory. The reference definition sets
+        # `scaffoldAtOrBelow: local-small` and starts every run there, so every default run
+        # should have been scaffolded and none was.
+        #
+        # Composed in the loop, from `routing`, which the loop already holds. A caller that
+        # has to remember to pass this is a caller that will not, which is how it came to be
+        # unwired in the first place.
+        applied = scaffolds_for(self.routing.ladder, self.routing.current)
+        if applied:
+            # Before the task and after the role: it modifies how the work is done, not what
+            # the work is, and the untrusted task must stay last.
+            messages.insert(-1, Message(role=Role.SYSTEM, content=_scaffolding(applied)))
+        return messages
 
     def _tool_schemas(self) -> list[dict[str, Any]]:
         return [
@@ -639,6 +674,50 @@ _INVARIANTS = (
     "State confidence only where you can cite the evidence for it; uncited confidence is "
     "treated as zero. Say what you did not check."
 )
+
+
+#: What each scaffold asks of the run, in the second person, because the model is the one
+#: doing it. Prose rather than a flag: five of the six are practices, and a practice reaches
+#: a model as an instruction or it does not reach it at all.
+_SCAFFOLD_TEXT: dict[Scaffold, str] = {
+    Scaffold.DECOMPOSE: (
+        "Split the task into numbered steps before you start work, and give each step a "
+        "check that a tool can settle. A step whose check is your own opinion is not a step."
+    ),
+    Scaffold.VERIFY_THEN_ADVANCE: (
+        "Run a step's check before starting the next one. When a check fails, retry that "
+        "step -- not the task."
+    ),
+    Scaffold.CHECKPOINT_PER_STEP: (
+        "Checkpoint at every step boundary, so a step that goes wrong costs one step."
+    ),
+    Scaffold.NARROW_WORKING_SET: (
+        "Work on one step's files at a time. Read what the current step needs rather than "
+        "everything you might need later."
+    ),
+    Scaffold.PRE_RESOLVE: (
+        "Resolve the symbols, paths and test targets a step mentions with a tool before "
+        "running it. A reference you could not resolve stops the step -- do not guess it."
+    ),
+    Scaffold.ONE_QUESTION_AT_A_TIME: (
+        "Ask one question per turn and act on the answer before asking the next."
+    ),
+}
+
+
+def _scaffolding(applied: frozenset[Scaffold]) -> str:
+    """The scaffolding section, in a fixed order so two runs at one tier compose alike."""
+    lines = [
+        "You are running at a tier this factory scaffolds. These are not suggestions about "
+        "style; they are how work is done here, and they are why a smaller model does well "
+        "in this harness."
+    ]
+    lines += [
+        f"- {scaffold.value}: {_SCAFFOLD_TEXT[scaffold]}"
+        for scaffold in Scaffold
+        if scaffold in applied
+    ]
+    return f"<harness>{chr(10).join(lines)}</harness>"
 
 
 def _parse_output(text: str, schema: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:

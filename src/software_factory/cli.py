@@ -24,6 +24,7 @@ import typer
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
+from typer.core import TyperGroup
 
 from software_factory import SCHEMA_VERSIONS, __version__
 from software_factory.definition import load, load_strict, resolve_for_agent
@@ -38,8 +39,35 @@ from software_factory.ledger import EntryType, Ledger
 from software_factory.providers.base import Provider
 from software_factory.runtime.tools import BUILTIN_TOOL_EFFECTS
 
+
+class _Group(TyperGroup):
+    """Turns any `FactoryError` that escapes a command into the message it already carries.
+
+    `_fail` below says "never a traceback: the user did nothing wrong", and fifty-one call
+    sites keep that promise by catching individually. `sf worker route` did not, so pointing
+    it at a directory with no `factory.yaml` — which is what the README's own example does,
+    since it is the one worker command written without `--root` — answered a typo with
+    twenty lines of Python internals.
+
+    Caught here rather than audited into the remaining call sites: a promise kept by
+    everybody remembering is a promise that lapses on the next command somebody adds. The
+    per-command `except` blocks stay, because several of them do more than report.
+
+    `ctx` is typed `Any` rather than `click.Context`: click is Typer's dependency and not
+    this project's, and importing it directly would make the CLI stop starting the day Typer
+    vendors it — which is not a hypothetical, since `import click` does not resolve here.
+    """
+
+    def invoke(self, ctx: Any) -> Any:
+        try:
+            return super().invoke(ctx)
+        except FactoryError as exc:
+            _fail(exc, bool(ctx.params.get("as_json")))
+
+
 app = typer.Typer(
     name="sf",
+    cls=_Group,
     help="Run a software factory: agents that carry work from intake to a reviewable change.",
     no_args_is_help=True,
     add_completion=False,
@@ -63,6 +91,48 @@ JsonOpt = Annotated[bool, typer.Option("--json", help="Emit machine-readable JSO
 
 def _emit(payload: dict[str, Any]) -> None:
     console.print_json(json.dumps(payload, default=str))
+
+
+def _container_runtime() -> dict[str, Any]:
+    """Whether a container executor would actually run, not whether a binary is on PATH.
+
+    `sf doctor` exists to say what this machine can and cannot do *before* a run finds out
+    the expensive way, and it answered this one with `shutil.which`. On this very machine
+    that printed `ok  container-runtime  docker` while `docker info` fails and the parity
+    suite skipped itself with "a binary with no daemon does not count" — the project's own
+    test naming the mistake its own doctor was making.
+
+    The executor already probes properly. Two reports of one capability that disagree is
+    worse than either alone: the one an operator reads is the one that was wrong.
+    """
+    import shutil
+
+    from software_factory.runtime.executors import _daemon_reachable
+
+    found = next((c for c in ("docker", "podman") if shutil.which(c)), "")
+    if not found:
+        return {
+            "check": "container-runtime",
+            "ok": False,
+            "detail": "not found",
+            "remediation": "Optional. Needed only for the container executor.",
+        }
+    if not _daemon_reachable(shutil.which(found) or found):
+        return {
+            "check": "container-runtime",
+            "ok": False,
+            "detail": f"{found} found, daemon not reachable",
+            "remediation": (
+                f"Start the {found} daemon, or use the local executor. The binary alone "
+                "cannot run anything."
+            ),
+        }
+    return {
+        "check": "container-runtime",
+        "ok": True,
+        "detail": found,
+        "remediation": "Optional. Needed only for the container executor.",
+    }
 
 
 def _fail(exc: FactoryError, as_json: bool) -> None:
@@ -508,7 +578,7 @@ def work(
     so, not produce unverified output (PR-9).
     """
     from software_factory.orchestrator import SourceContext, WorkClass, WorkItem, new_id
-    from software_factory.orchestrator.coordinator import Coordinator
+    from software_factory.orchestrator.coordinator import planned_path
     from software_factory.orchestrator.workitem import classify_request
 
     try:
@@ -528,24 +598,23 @@ def work(
     )
 
     if dry_run:
-        coordinator = Coordinator.__new__(Coordinator)  # planning needs no runtime
-        planned = [
-            stage.value
-            # Planning is a pure function of the work item, so it needs no runtime.
-            for stage in Coordinator._default_path(coordinator, item)
-        ]
+        path = planned_path(item)
+        planned = [stage.value for stage in path.stages]
         if as_json:
             _emit(
                 {
                     "ok": True,
                     "workItem": item.as_dict(),
                     "plannedStages": planned,
+                    "reason": path.reason,
                     "note": "dry run: nothing was executed",
                 }
             )
             raise typer.Exit(EXIT_OK)
         console.print(f"[bold]{item.title}[/] [dim]({resolved_class.value})[/]")
         console.print(f"  planned stages: {' → '.join(planned)}")
+        # The README promises this prints the stages "and why", and it printed the stages.
+        console.print(f"  [dim]{escape(path.reason)}[/]")
         console.print("\n[dim]dry run: nothing was executed[/]")
         raise typer.Exit(EXIT_OK)
 
@@ -2062,12 +2131,7 @@ def doctor(as_json: JsonOpt = False) -> None:
             "detail": shutil.which("git") or "not found",
             "remediation": "Install git; the factory works in git worktrees.",
         },
-        {
-            "check": "container-runtime",
-            "ok": any(shutil.which(c) for c in ("docker", "podman")),
-            "detail": next((c for c in ("docker", "podman") if shutil.which(c)), "not found"),
-            "remediation": "Optional. Needed only for the container executor.",
-        },
+        _container_runtime(),
         {
             "check": "schema-versions",
             "ok": True,
@@ -2076,17 +2140,28 @@ def doctor(as_json: JsonOpt = False) -> None:
         },
     ]
     required = {"python", "git"}
-    ok = all(c["ok"] for c in checks if c["check"] in required)
+    for check in checks:
+        check["required"] = check["check"] in required
+    ok = all(c["ok"] for c in checks if c["required"])
 
     if as_json:
         _emit({"ok": ok, "checks": checks})
         raise typer.Exit(EXIT_OK if ok else EXIT_FAILED)
 
     for check in checks:
-        mark = "[green]ok  [/]" if check["ok"] else "[red]fail[/]"
-        console.print(f"  {mark} {check['check']:<20} {check['detail']}")
+        # Three states, not two. An optional capability this machine does not have is not a
+        # failure -- `fail` in red beside an entry whose own remediation begins "Optional"
+        # tells an operator their machine is broken when it is merely smaller. The same
+        # three-way vocabulary the metrics use, for the same reason.
+        if check["ok"]:
+            mark = "[green]ok    [/]"
+        elif check["required"]:
+            mark = "[red]fail  [/]"
+        else:
+            mark = "[yellow]absent[/]"
+        console.print(f"  {mark} {check['check']:<19} {check['detail']}")
         if not check["ok"] and check["remediation"]:
-            console.print(f"       [dim]{check['remediation']}[/]")
+            console.print(f"        [dim]{check['remediation']}[/]")
     raise typer.Exit(EXIT_OK if ok else EXIT_FAILED)
 
 

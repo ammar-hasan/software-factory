@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -296,6 +297,21 @@ class Result:
         return self.stage == "HANDOFF" and not self.blocker
 
 
+#: A URL in a provider's error message, which the report does not need.
+_URL = re.compile(r"https?://[^\s]+")
+
+
+def _without_endpoint(action: str) -> str:
+    """The provider's error, minus the endpoint it came from.
+
+    The message is useful and the host is not: this report is committed and published, and
+    an operator reading it wants "the endpoint returned 500", not somebody's deployment
+    address. The full text stays in the ledger and in `sf work`'s own output, where the
+    person reading it is the person who configured the endpoint.
+    """
+    return _URL.sub("the endpoint", action or "").strip()
+
+
 def run_step(step: Step, *, repo: Path, factory: Path, state: Path, provider: Any) -> Result:
     from software_factory.definition import load_strict
     from software_factory.ledger import EntryType, Ledger
@@ -340,7 +356,7 @@ def run_step(step: Step, *, repo: Path, factory: Path, state: Path, provider: An
     result.stage = item.stage.value
     result.blocker = item.blocker.value if item.blocker else ""
     result.infrastructure = result.blocker == "external_dependency"
-    result.action = item.blocker_action
+    result.action = _without_endpoint(item.blocker_action)
     result.stages_run = [s.stage.value for s in outcome.stages]
     result.changed = list(outcome.changed_paths)
 

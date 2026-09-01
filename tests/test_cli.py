@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from software_factory.cli import app
+from software_factory.cli import EXIT_OK, EXIT_UNUSABLE, app
 from software_factory.ledger import EntryType, Ledger
 
 runner = CliRunner()
@@ -238,6 +238,49 @@ def test_doctor_reports_environment_checks() -> None:
         assert check["detail"], f"{check['check']} reports no detail"
         if not check["ok"]:
             assert check["remediation"], f"{check['check']} fails with no remediation"
+
+
+def test_doctor_does_not_call_a_binary_a_capability(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`sf doctor` exists to say what this machine can do *before* a run finds out the
+    expensive way, and it answered the container question with `shutil.which`.
+
+    On the machine this was written on it printed `ok  container-runtime  docker` while
+    `docker info` failed and the parity suite skipped itself with "a binary with no daemon
+    does not count" — the project's own test naming the mistake its own doctor was making.
+    The executor had probed properly all along, so two reports of one capability disagreed,
+    and the one an operator reads was the wrong one.
+    """
+    import software_factory.runtime.executors as executors
+
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(executors, "_daemon_reachable", lambda _runtime: False)
+
+    checks = payload(runner.invoke(app, ["doctor", "--json"]).output)["checks"]
+    runtime = next(c for c in checks if c["check"] == "container-runtime")
+
+    assert runtime["ok"] is False, "a binary with no reachable daemon was called a capability"
+    assert "not reachable" in runtime["detail"]
+    assert runtime["remediation"]
+
+
+def test_doctor_survives_an_optional_capability_being_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An optional capability this machine lacks is not a broken machine.
+
+    Reported as `absent`, not `fail`: red beside an entry whose own remediation begins
+    "Optional" tells an operator their environment is broken when it is merely smaller, and
+    the exit code has always agreed with that — only the word did not.
+    """
+    import software_factory.runtime.executors as executors
+
+    monkeypatch.setattr(executors, "_daemon_reachable", lambda _runtime: False)
+    result = runner.invoke(app, ["doctor"])
+
+    assert result.exit_code == EXIT_OK, "an optional capability failed the whole check"
+    assert "fail" not in result.output
+    if "container-runtime" in result.output:
+        assert "absent" in result.output
 
 
 def test_doctor_fails_and_says_why_when_a_required_tool_is_missing(
@@ -471,6 +514,64 @@ def test_work_dry_run_plans_stages_without_executing(scaffold: Path) -> None:
     assert body["plannedStages"][0] == "TRIAGE"
     assert "REVIEW" in body["plannedStages"]
     assert "nothing was executed" in body["note"]
+
+
+def test_work_dry_run_says_why_the_path_is_that_one(scaffold: Path) -> None:
+    """The README promises this prints the stages "and why", and it printed the stages.
+
+    Why is the one thing a dry run exists to explain: the work class chose the shape, and a
+    reader looking at `TRIAGE → BUILD → REVIEW → HANDOFF` cannot tell whether DESIGN was
+    skipped by policy or lost by a bug.
+    """
+    for request, expect in (
+        ("Add semicolon delimiter support", "DESIGN is planned"),
+        ("The importer crashes on BOM headers", "DESIGN is skipped"),
+    ):
+        result = runner.invoke(
+            app,
+            ["work", request, "--factory", str(scaffold), "--dry-run", "--json"],
+        )
+
+        assert result.exit_code == 0
+        reason = payload(result.output)["reason"]
+        assert expect in reason, reason
+
+
+def test_planning_a_path_needs_no_runtime(scaffold: Path) -> None:
+    """A pure function of the work item, reachable as one.
+
+    It was a method, so the dry run — whose whole job is to answer this without running
+    anything — built a `Coordinator` through `__new__` to reach it, dodging the constructor
+    of a class that owns a ledger, a workspace factory and a provider. A planning question
+    answered by an uninitialised object is one edit away from one that needs a provider.
+    """
+    from software_factory.orchestrator import SourceContext, WorkClass, WorkItem, new_id
+    from software_factory.orchestrator.coordinator import planned_path
+
+    def plan(work_class: WorkClass, request: str):
+        return planned_path(
+            WorkItem(
+                id=new_id(),
+                factory="f",
+                title="t",
+                request=request,
+                source=SourceContext(provider="cli", kind="test", ref="t"),
+                work_class=work_class,
+            )
+        )
+
+    feature = plan(WorkClass.FEATURE, "add a thing")
+    defect = plan(WorkClass.DEFECT, "it crashes")
+
+    assert "DESIGN" in [s.value for s in feature.stages]
+    assert "DESIGN" not in [s.value for s in defect.stages]
+    # REVIEW is in every path (FR-3.3a), and so is TRIAGE — the docstring this replaced
+    # claimed TRIAGE was skipped for a well-described request, and no branch ever did.
+    for path in (feature, defect, plan(WorkClass.DEFECT, "it crashes. " + "detail. " * 60)):
+        stages = [s.value for s in path.stages]
+        assert stages[0] == "TRIAGE" and stages[-1] == "HANDOFF"
+        assert "REVIEW" in stages
+        assert path.reason, "a planned path with no reason is the defect this fixed"
 
 
 def test_work_dry_run_classifies_the_request(scaffold: Path) -> None:
@@ -1233,3 +1334,89 @@ def test_no_command_name_is_claimed_twice() -> None:
     for names, kind in ((groups, "group"), (commands, "command")):
         duplicates = sorted({n for n in names if names.count(n) > 1})
         assert duplicates == [], f"duplicate {kind} name(s): {duplicates}"
+
+
+def test_no_command_answers_a_missing_factory_with_a_traceback(tmp_path: Path) -> None:
+    """`_fail` says "never a traceback: the user did nothing wrong", and one command did.
+
+    `sf worker route` pointed at a directory with no `factory.yaml` — which is what the
+    README's own example did, since it was the one worker command written without `--root`
+    — answered a typo with twenty lines of Python internals. Fifty-one call sites kept the
+    promise by catching individually, which is a promise that lapses on the next command
+    somebody adds, so it is now kept by the group.
+
+    Swept rather than spot-checked, for the same reason.
+    """
+    empty = tmp_path / "nowhere"
+    empty.mkdir()
+    commands = [
+        ["worker", "route", "--root", str(empty), "--requires", "gpu"],
+        ["worker", "list", "--root", str(empty)],
+        ["plan", "--root", str(empty)],
+        ["validate", "--root", str(empty)],
+        ["audit", "--root", str(empty)],
+        ["providers", "--root", str(empty)],
+    ]
+
+    leaked = []
+    for argv in commands:
+        result = runner.invoke(app, argv)
+        if result.exception is not None and not isinstance(result.exception, SystemExit):
+            leaked.append(f"{' '.join(argv)}: {type(result.exception).__name__}")
+        if "Traceback" in result.output:
+            leaked.append(f"{' '.join(argv)}: printed a traceback")
+
+    assert leaked == [], leaked
+
+
+def test_the_message_survives_the_group_handler(tmp_path: Path) -> None:
+    """Caught is not the same as reported: the error's own remediation has to come out."""
+    empty = tmp_path / "nowhere"
+    empty.mkdir()
+
+    result = runner.invoke(app, ["worker", "route", "--root", str(empty), "--requires", "gpu"])
+
+    assert result.exit_code == EXIT_UNUSABLE
+    assert "no factory.yaml" in result.output
+    assert "Run `sf init` here" in result.output
+
+
+def test_every_command_can_explain_itself() -> None:
+    """`--help` is the first thing anybody runs, and nothing checked all of it.
+
+    Swept across every command and subcommand rather than spot-checked. Help is built from
+    decorators and docstrings, so a command whose help crashes is a command nobody can
+    discover — and it crashes for everyone, on the first thing they try, before they have
+    any reason to believe the tool works.
+    """
+    import re
+
+    def commands(prefix: list[str]) -> list[str]:
+        output = runner.invoke(app, [*prefix, "--help"]).output
+        names, inside = [], False
+        for line in output.splitlines():
+            if "Commands" in line:
+                inside = True
+                continue
+            if inside and line.startswith("╰"):
+                break
+            if inside:
+                # The name sits at the start of its row; a wrapped description does not.
+                match = re.match(r"^│ ([a-z][a-z0-9-]*)\s{2,}", line)
+                if match:
+                    names.append(match.group(1))
+        return names
+
+    top = commands([])
+    assert len(top) > 30, f"only {len(top)} commands found; the help parser missed the panel"
+
+    checked, broken = 0, []
+    for name in top:
+        for argv in [[name, sub] for sub in commands([name])] or [[name]]:
+            checked += 1
+            result = runner.invoke(app, [*argv, "--help"])
+            if result.exit_code != 0 or "Traceback" in result.output:
+                broken.append(f"sf {' '.join(argv)} --help -> {result.exit_code}")
+
+    assert checked > 60, f"only {checked} commands swept"
+    assert broken == [], broken

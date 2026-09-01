@@ -348,6 +348,13 @@ reverts). Per-agent calibration error is a first-class metric and a valid improv
 
 ## 8. Routing ladder
 
+[![A run starts at the lowest tier that covers the stage and has to earn every rung above it](../diagrams/routing-ladder.workflow.png)](../diagrams/routing-ladder.workflow.html)
+
+<sub>**Start low, and earn the rung.** Budget and ceiling are checked before any trigger is
+examined; a trigger that fires must still pass its own test; a refusal carries a code. The
+five triggers are the complete set — a value outside them is refused, never granted for want
+of a rule. [Open the interactive version ↗](../diagrams/routing-ladder.workflow.html)</sub>
+
 ### 8.1 Tiers
 
 ```

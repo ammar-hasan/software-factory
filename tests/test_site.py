@@ -164,6 +164,37 @@ def test_every_page_has_a_source_or_is_a_generated_report(tmp_path: Path) -> Non
     assert missing == [], f"these pages have no source: {missing}"
 
 
+def test_a_diagram_claiming_a_complete_set_names_the_whole_set() -> None:
+    """ "The five triggers are the complete set" and "six behaviours" are checkable claims.
+
+    I have twice doubted a diagram's claim about this codebase and been wrong both times,
+    and once asserted two things a diagram could not support -- a scaffold nothing applied
+    and a delta nothing measured. A picture reads as authoritative because it was generated,
+    so the enumerations in it are pinned to the enums rather than to my memory of them.
+    """
+    import json
+
+    from software_factory.harness.routing import Scaffold, Trigger
+
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "docs"
+        / "diagrams"
+        / "spec"
+        / "routing-ladder.workflow.json"
+    )
+    if not source.is_file():
+        pytest.skip("the routing-ladder diagram is not in this checkout")
+    text = json.dumps(json.loads(source.read_text(encoding="utf-8")))
+
+    for trigger in Trigger:
+        assert trigger.value in text, f"the diagram omits the trigger {trigger.value}"
+    for scaffold in Scaffold:
+        assert scaffold.value in text, f"the diagram omits the scaffold {scaffold.value}"
+    assert f"one of {len(list(Trigger))}" in text or "five" in text
+    assert "six behaviours" in text
+
+
 @pytest.mark.integration
 def test_the_site_builds(tmp_path: Path) -> None:
     """End to end, through the same entry point CI uses."""

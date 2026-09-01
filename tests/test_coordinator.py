@@ -295,6 +295,35 @@ def test_every_stage_is_recorded_in_the_ledger(definition, repo: Path, tmp_path:
     assert EntryType.GATE_EVALUATED in types
 
 
+def test_the_ledger_records_what_confinement_the_run_actually_had(
+    definition, repo: Path, tmp_path: Path
+) -> None:
+    """The gate knowing is worth nothing if the coordinator does not tell it.
+
+    Which is the shape this codebase keeps finding, so it is checked end to end rather than
+    on the gate alone: with no sandbox helper on the machine, `blast-radius-clean` must
+    reach the ledger as `unenforceable`. It reported `pass` on every stage of every trial
+    run in this repository while an agent's `pip install -e .` sat in the system
+    `dist-packages`, shadowing later runs.
+    """
+    from software_factory.runtime.executor import detect_sandbox_level
+
+    provider = StubProvider([says(triage_output()), says(build_output()), says(review_output())])
+    coordinator(definition, repo, tmp_path, provider).run(item())
+
+    entries = [
+        entry
+        for entry in Ledger(tmp_path / "state" / "ledger.jsonl").read()
+        if entry.type is EntryType.GATE_EVALUATED and entry.payload["gate"] == "blast-radius-clean"
+    ]
+    assert entries, "the gate did not run"
+
+    expected = "pass" if detect_sandbox_level().confines_filesystem else "unenforceable"
+    assert {e.payload["outcome"] for e in entries} == {expected}
+    # Either way it must not stop work the operator chose to allow.
+    assert not any(e.payload["blocks"] for e in entries)
+
+
 def test_the_ledger_chain_verifies_after_a_run(definition, repo: Path, tmp_path: Path) -> None:
     provider = StubProvider([says(triage_output()), says(build_output()), says(review_output())])
 
@@ -978,3 +1007,74 @@ def test_a_failed_tool_call_is_recorded_as_failed(definition, repo: Path, tmp_pa
     )
     assert payload["ok"] is False
     assert payload["failure"], "a failure with no class cannot be grouped or explained"
+
+
+def test_the_pack_is_bounded_by_the_tier_that_will_read_it(
+    definition, repo: Path, tmp_path: Path
+) -> None:
+    """Asserted where the bound actually binds.
+
+    With the shipped ladder it does not: the configured 6,000 tokens is under every declared
+    `workingSetCeiling`, so a test against the default cannot tell a real bound from no bound
+    — it passed with the bound deleted. A bound that only starts mattering the day somebody
+    raises the budget has to be verified *as* a bound, or the raise silently overflows the
+    smallest tier's window and the factory reports a model that suddenly got worse.
+    """
+    provider = StubProvider([says(triage_output()), says(build_output()), says(review_output())])
+    ladder = definition.factory.ladder
+    smallest = min(t.working_set_ceiling for t in ladder.tiers)
+
+    local_coordinator(
+        definition,
+        repo=repo,
+        state_dir=tmp_path / "state",
+        provider=provider,
+        allow_unsandboxed=True,
+        pack_budget_tokens=smallest * 10,
+    ).run(item())
+
+    assembled = [
+        e
+        for e in Ledger(tmp_path / "state" / "ledger.jsonl").read()
+        if e.type is EntryType.PACK_ASSEMBLED
+    ]
+    assert assembled, "no pack was recorded"
+    for entry in assembled:
+        tier = ladder.tiers[ladder.index_of(entry.payload["tier"])]
+        assert entry.payload["budgetTokens"] == tier.working_set_ceiling, (
+            "the pack was allowed more than the tier's window"
+        )
+
+
+def test_the_reference_factory_actually_scaffolds_its_default_runs(
+    definition, repo: Path, tmp_path: Path
+) -> None:
+    """The gap that made this worth finding: correct code nothing called.
+
+    The scaffold sets `scaffoldAtOrBelow: local-small` and starts every run there, so every
+    default run should be scaffolded. `scaffolds_for` was correct and tested and had no
+    caller, so none was — the mechanism the whole premise rests on had never once reached a
+    model. Asserted through a real coordinator rather than on the loop alone, because the
+    loop being right is exactly what was true the whole time.
+    """
+    provider = StubProvider([says(triage_output()), says(build_output()), says(review_output())])
+
+    coordinator(definition, repo, tmp_path, provider).run(item())
+
+    first = "\n".join(m.content for m in provider.calls[0])
+    assert "how work is done here" in first, "the reference factory ran unscaffolded"
+    assert "checkpoint-per-step" in first
+    # And the pack is bounded by the tier that will read it.
+    assembled = [
+        e
+        for e in Ledger(tmp_path / "state" / "ledger.jsonl").read()
+        if e.type is EntryType.PACK_ASSEMBLED
+    ]
+    assert assembled, "no pack was recorded"
+    ladder = definition.factory.ladder
+    for entry in assembled:
+        tier = ladder.tiers[ladder.index_of(entry.payload["tier"])]
+        # The bound is the tier's, not a constant. `workingSetCeiling` is declared on every
+        # tier of every ladder this project ships and was read by nothing.
+        assert entry.payload["budgetTokens"] == min(6000, tier.working_set_ceiling)
+        assert entry.payload["tokens"] <= entry.payload["budgetTokens"]

@@ -80,7 +80,7 @@ Finding    { criterion, observed, expected, locator, remediation, severity }
 | Gate | Stage | Check | Det.? |
 | --- | --- | --- | --- |
 | `calibration-present` | all | Calibration statement present and schema-valid | yes |
-| `blast-radius-clean` | all | Zero contract violations recorded | yes |
+| `blast-radius-clean` | all | Zero contract violations recorded, *and* something was recording them | yes |
 | `secret-clean` | Build, Review | No secret-shaped material in diff, logs, or evidence | yes |
 | `build-green` | Build | Project build succeeds | yes |
 | `tests-pass` | Build, Review | Repository validation passes, structured results attached | yes |
@@ -122,6 +122,13 @@ if still failing:
 ```
 
 **E-12 — There is no pass-by-timeout.** A gate that cannot run is `error`, which is not `pass`.
+**E-12.1 — And no pass-by-absence.** A gate whose evidence is a count of observed events is
+`unenforceable` when nothing was observing, never `pass`. Zero violations because nothing was
+watching is not zero violations, and the difference is the whole claim. `blast-radius-clean`
+read `pass` across every run of a factory whose executor had no filesystem confinement, while an
+agent's `pip install -e .` sat in the system site-packages; the counter was honest and the
+conclusion drawn from it was not. `unenforceable` does not block — a run the operator chose to
+allow still runs — it records that the control was not in effect.
 **E-13 — Findings go to the agent verbatim.** Paraphrasing a failure loses the detail that fixes it.
 
 ---

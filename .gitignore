@@ -60,3 +60,7 @@ audit-requirements.txt
 
 # Site build output (python scripts/build_site.py --out _site)
 _site/
+
+# Written by the security job to audit the pinned dependency set. Never committed:
+# it describes one runner, not the project.
+audit-requirements.txt
