@@ -126,6 +126,77 @@ def test_a_collection_error_at_the_parent_does_not_prove_a_regression() -> None:
     assert regression_proven(ctx).outcome is GateOutcome.FAIL
 
 
+def test_a_module_that_did_not_import_at_the_parent_is_named_as_that() -> None:
+    """The trial's own case, and the most ordinary shape a test file has.
+
+    A correct fix and five real regression tests, opened with
+    `from jsonlint.core import DuplicateKeyError, _reject_dups, validate`. Those two names
+    do not exist at the parent, so the module does not import, pytest reports one collection
+    error and *zero* tests, and every test in the file is absent from the parent run --
+    including the one calling `validate` that the parent runs and gets wrong.
+
+    Blocking is right: nothing in the file ran, so nothing in it proved behaviour. But the
+    gate said "Run the new test against the parent commit", which the harness had already
+    done -- so the keystone gate's one instruction was the one thing its author could not
+    act on. The failure is `EXISTENCE`, and the remediation is a line the author can move.
+    """
+    ctx = context(
+        work_class="defect",
+        new_test_ids=(
+            "tests/test_core.py::test_rejects_duplicate_keys_at_top_level",
+            "tests/test_core.py::test_accepts_distinct_keys",
+        ),
+        # What pytest reports for a module that does not import: the file, not its tests.
+        tests_at_parent=run(
+            "parent",
+            result(
+                test_id="tests/test_core.py",
+                outcome=Outcome.ERROR,
+                message="ImportError: cannot import name 'DuplicateKeyError'",
+            ),
+        ),
+        tests_at_tip=run(
+            "tip",
+            result(test_id="tests/test_core.py::test_rejects_duplicate_keys_at_top_level"),
+            result(test_id="tests/test_core.py::test_accepts_distinct_keys"),
+        ),
+    )
+
+    outcome = regression_proven(ctx)
+
+    assert outcome.outcome is GateOutcome.FAIL
+    finding = outcome.findings[0]
+    assert "did not import at the parent commit" in finding.observed
+    assert "import" in finding.observed
+    # The sentence is the product of a gate, and this one has to be actionable.
+    assert "Run the new test against the parent commit" not in finding.remediation
+    assert "inside the tests that need them" in finding.remediation
+
+
+def test_a_genuinely_absent_test_still_says_so() -> None:
+    """The other side of the same branch: no module error, so the test really is missing."""
+    ctx = context(
+        work_class="defect",
+        new_test_ids=("tests/test_core.py::test_bom",),
+        tests_at_parent=run(
+            "parent",
+            result(test_id="tests/test_other.py::test_x"),
+            # A *different* file failed to import. Matching the absent test to its own
+            # module is what keeps that from being read as this test's excuse.
+            result(
+                test_id="tests/test_unrelated.py",
+                outcome=Outcome.ERROR,
+                message="ImportError: cannot import name 'whatever'",
+            ),
+        ),
+        tests_at_tip=run("tip", result(test_id="tests/test_core.py::test_bom")),
+    )
+
+    finding = regression_proven(ctx).findings[0]
+
+    assert finding.observed == "not present in the parent run"
+
+
 def test_an_assertion_failure_at_the_parent_proves_a_regression() -> None:
     ctx = context(
         work_class="defect",

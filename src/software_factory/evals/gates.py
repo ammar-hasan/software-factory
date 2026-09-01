@@ -16,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from software_factory.evals.evidence import EvidenceBundle
-from software_factory.evals.results import TestRun
+from software_factory.evals.results import FailureClass, TestRun
 from software_factory.memory.admission import is_secret_shaped
 from software_factory.spec.units import AgreementResult
 
@@ -386,6 +386,44 @@ def regression_proven(ctx: GateContext) -> GateResult:
             continue
 
         if parent is None:
+            # Absent because its *module* never imported, or genuinely absent? The two look
+            # identical through `by_id` and have opposite remediations, and the gate used to
+            # report both as "run the new test against the parent commit" -- which the
+            # harness had already done, so the one instruction the keystone gate gave was
+            # the one thing the author could not act on.
+            #
+            # A live trial found it on the most ordinary shape there is. The agent wrote a
+            # correct fix and five real regression tests, then opened the file with
+            # `from jsonlint.core import DuplicateKeyError, _reject_dups, validate`. At the
+            # parent those two names do not exist, the module fails to import, pytest
+            # reports one collection error and zero tests, and every test in the file --
+            # including `validate('{"a": 1, "a": 2}')`, which the parent runs and gets
+            # wrong -- became "not present in the parent run".
+            #
+            # The refusal is right: an import error proves the code did not exist, which is
+            # what `FailureClass.EXISTENCE` is carved out of `ASSERTION` to say. Only the
+            # sentence was wrong, and the sentence is the whole product of a gate.
+            module = ctx.tests_at_parent.by_id(test_id.split("::", 1)[0])
+            if module is not None and module.outcome.value in ("error", "failed"):
+                unproven.append(
+                    Finding(
+                        criterion="the parent-commit failure is about behaviour",
+                        observed=(
+                            f"the test module did not import at the parent commit "
+                            f"({(module.classified() or FailureClass.IMPORT).value})"
+                        ),
+                        expected="an assertion failure",
+                        remediation=(
+                            "Nothing in this file ran at the parent commit, so none of it "
+                            "proves the behaviour was wrong -- only that a name did not "
+                            "exist. Import the names your fix adds inside the tests that "
+                            "need them, so the tests that call existing code still run "
+                            "there and fail on what it gets wrong."
+                        ),
+                        locator=test_id,
+                    )
+                )
+                continue
             unproven.append(
                 Finding(
                     criterion="the new test was run at the parent commit",
