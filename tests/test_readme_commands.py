@@ -12,6 +12,7 @@ promise made in a different file from the one that keeps it.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -73,22 +74,32 @@ def factory(tmp_path_factory: pytest.TempPathFactory) -> Path:
     for args in (("init", "--quiet", "-b", "main"), ("add", "-A"), ("commit", "-qm", "x")):
         subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, env=env)
 
-    result = runner.invoke(
-        app,
-        [
-            "init",
-            "myfactory",
-            "--name",
-            "payments",
-            "--owner",
-            "acme",
-            "--repo",
-            "payments-service",
-        ],
-        catch_exceptions=False,
-    )
+    # `sf init myfactory` writes to the *current* directory. The version of this fixture
+    # that did not move first created `myfactory/` in the repository root, and a `git add
+    # -A` committed it -- a test writing into the tree it is testing, which is the shape
+    # this project keeps finding elsewhere.
+    here = Path.cwd()
+    os.chdir(root)
+    try:
+        result = runner.invoke(
+            app,
+            [
+                "init",
+                "myfactory",
+                "--name",
+                "payments",
+                "--owner",
+                "acme",
+                "--repo",
+                "payments-service",
+            ],
+            catch_exceptions=False,
+        )
+    finally:
+        os.chdir(here)
     # `sf init` is the README's first command and everything below depends on it.
     assert result.exit_code == 0, result.output
+    assert not (ROOT / "myfactory").exists(), "the fixture wrote into the repository"
     return root
 
 
