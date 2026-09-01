@@ -45,11 +45,20 @@ def stage_output(**fields: object) -> str:
 
 
 def scripted(*, writes: bool = True) -> StubProvider:
+    """A model that writes one file and then satisfies every stage.
+
+    Five stage outputs, not four: `STEPS[0]` is feature-class, so the path is TRIAGE,
+    DESIGN, BUILD, REVIEW, HANDOFF. With four the run stalled in DESIGN and never handed
+    off — and because the first version of the trial landed a change regardless of the
+    outcome, the tests still passed. They were asserting that a *blocked* step's work
+    reached the product, which is the bug, not the behaviour.
+    """
     script = []
     if writes:
         script.append(calls("file.write", {"path": "jsonlint/__main__.py", "content": ENTRY_POINT}))
     script += [
         says(stage_output(findings="ok", scope="one function")),
+        says(stage_output(plan="add a flag", acceptance=["--version prints and exits 0"])),
         says(stage_output(summary="added an entry point", claims=["it exists"])),
         says(stage_output(verdict="accept", findings=[])),
         says(stage_output(summary="handed off")),
@@ -143,3 +152,28 @@ def test_every_step_declares_what_would_make_it_wrong() -> None:
         assert step.expectation.strip(), step.name
         assert step.failure.strip(), step.name
         assert step.tests.strip(), step.name
+
+
+def test_a_blocked_steps_work_does_not_land(tmp_path: Path) -> None:
+    """A blocked step is the factory refusing to hand its work over.
+
+    Landing it anyway overrides that refusal with the trial's own optimism — which is
+    exactly what happened on a real run: step 3 blocked, its rejected work landed, and step
+    4 started from a tree with ten failing tests. Every measurement after that point was
+    against a product the factory had declined to produce.
+    """
+    repo, factory = prepared(tmp_path)
+
+    # A model that writes a file and then never emits a valid stage output: the run cannot
+    # advance, so the item blocks with the partial work sitting in the workspace.
+    provider = StubProvider(
+        [calls("file.write", {"path": "jsonlint/__main__.py", "content": ENTRY_POINT})]
+        + [says("not valid stage output") for _ in range(8)]
+    )
+    result = trial.run_step(
+        trial.STEPS[0], repo=repo, factory=factory, state=tmp_path / "state", provider=provider
+    )
+
+    assert not result.reached_handoff, "the fixture was meant to block"
+    assert result.landed is not True
+    assert not (repo / "jsonlint" / "__main__.py").exists(), "rejected work reached the product"

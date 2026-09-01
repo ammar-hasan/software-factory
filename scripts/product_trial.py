@@ -275,7 +275,9 @@ class Result:
     landed: bool | None = None
     """Whether the workspace's change was carried back into the product.
 
-    `None` when the step produced nothing to carry. The factory works in a clone and never
+    `None` when the step produced nothing to carry, or when it was blocked -- a blocked
+    step's work is the factory declining to hand it over, and the trial does not get to
+    overrule that. The factory works in a clone and never
     touches the source, which is correct isolation -- and it means a trial that wants each
     step to build on the last has to do the carrying itself. The first version of this did
     not, so every step re-solved the same seed, `git log` showed only pytest's bytecode
@@ -356,7 +358,11 @@ def run_step(step: Step, *, repo: Path, factory: Path, state: Path, provider: An
     # Carry the change out of the workspace and into the product, so the next step starts
     # from this one's result. Without it each step re-solves the same seed, and a sequence
     # designed to test evolution tests six independent first attempts.
-    if (outcome.diff or "").strip():
+    # Only a step that handed off gets to change the product. A blocked step is the
+    # factory refusing to hand its work over, and landing it anyway overrides that refusal
+    # with the trial's own optimism -- which is exactly what happened: step 3 blocked, its
+    # rejected work landed, and the next step started from a tree with ten failing tests.
+    if result.reached_handoff and (outcome.diff or "").strip():
         applied = subprocess.run(
             ["git", "apply", "--whitespace=nowarn", "-"],
             cwd=repo,

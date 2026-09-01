@@ -306,7 +306,16 @@ def build_registry(
     # ------------------------------------------------------------------ exec tools
 
     def test_run(args: dict[str, Any]) -> ToolResult:
-        command = test_command or ["python", "-m", "pytest", "-q"]
+        # `-v`, not `-q`. The parser reads per-test lines (`path::test PASSED`), and `-q`
+        # never emits them -- it prints dots. So this tool reported `total: 0,
+        # passed: false` for every suite that passed, and only ever saw failures, which
+        # `-q` does print in its short summary.
+        #
+        # Eight agents across three work items and five stages filed that as a defect
+        # during one product trial: "test.run returns total:0 / passed:false with exit 0
+        # even when direct `python -m pytest -q` passes the suite." They were right, and
+        # they kept filing it because nobody acted.
+        command = test_command or ["python", "-m", "pytest", "-v"]
         selector = args.get("selector")
         if selector:
             command = [*command, str(selector)]
@@ -314,6 +323,25 @@ def build_registry(
         run = parse_pytest(result.stdout + "\n" + result.stderr, command, workspace.head)
         run.exit_code = result.exit_code
         run.truncated = result.truncated
+
+        if not run.results and not result.truncated:
+            # `exit 0, total 0, passed false` is an incoherent triple, and returning it
+            # silently is worse than failing: an agent reads `passed: false` and concludes
+            # its tests fail, then spends its turns fixing code that was already correct.
+            # Either the suite really is empty or this tool cannot read the runner's output,
+            # and both need a person rather than another turn.
+            return ToolFailure(
+                FailureKind.INVALID_INPUT,
+                (
+                    f"`{' '.join(command)}` exited {result.exit_code} and produced no "
+                    "readable test results"
+                ),
+                remediation=(
+                    "Either the suite collected nothing, or the runner's output format is "
+                    "one this adapter cannot parse. Check the command by hand; do not treat "
+                    "this as a failing test suite."
+                ),
+            )
         return ToolSuccess(value=run.as_dict(), truncated=result.truncated)
 
     registry.register(

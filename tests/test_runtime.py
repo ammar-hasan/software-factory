@@ -444,3 +444,92 @@ def test_a_real_change_is_still_seen(tmp_path: Path) -> None:
     (workspace.root / "b.py").write_text("y = 3\n", encoding="utf-8")
 
     assert workspace.changed_paths() == {"a.py", "b.py"}
+
+
+def test_test_run_reports_a_passing_suite_as_passing(tmp_path: Path) -> None:
+    """The default command must emit output the parser can read.
+
+    It ran `pytest -q`, and the parser reads per-test lines (`path::test PASSED`) that `-q`
+    never emits — it prints dots. So every passing suite came back `total: 0,
+    passed: false`, and only failures were ever seen, because `-q` does print those in its
+    short summary.
+
+    Eight agents across three work items and five stages filed this as a defect during one
+    product trial, and kept filing it because nobody acted. An agent reading `passed: false`
+    concludes its tests fail and spends its turns fixing code that was already correct.
+    """
+    import subprocess
+
+    from software_factory.runtime.executor import LocalExecutor, SandboxPolicy
+    from software_factory.runtime.tools import build_registry
+    from software_factory.runtime.workspace import WorkspaceFactory
+
+    source = tmp_path / "repo"
+    (source / "tests").mkdir(parents=True)
+    (source / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    (source / "tests" / "test_mod.py").write_text(
+        "from mod import f\n\n\ndef test_f():\n    assert f() == 1\n", encoding="utf-8"
+    )
+    for command in (
+        ["init", "-q", "-b", "main"],
+        ["config", "user.email", "t@example.test"],
+        ["config", "user.name", "t"],
+        ["add", "-A"],
+        ["commit", "-qm", "initial"],
+    ):
+        subprocess.run(["git", *command], cwd=source, check=True, capture_output=True)
+
+    workspace = WorkspaceFactory(source=source, state_dir=tmp_path / "state").create()
+    registry = build_registry(
+        workspace,
+        LocalExecutor(SandboxPolicy(workspace=workspace.root), allow_unsandboxed=True),
+    )
+
+    tool = registry.get("test.run")
+    assert tool is not None
+    outcome = tool.handler({})
+
+    value = getattr(outcome, "value", None)
+    assert value is not None, f"test.run refused a healthy suite: {outcome}"
+    assert value["passed"] is True
+    assert value["total"] == 1
+    assert value["results"][0]["outcome"] == "passed"
+
+
+def test_test_run_refuses_to_report_an_unreadable_run_as_a_failure(tmp_path: Path) -> None:
+    """`exit 0, total 0, passed false` is an incoherent triple.
+
+    Returning it silently is worse than failing: an agent reads `passed: false` and starts
+    fixing code that was already correct. Either the suite is genuinely empty or the tool
+    cannot read the runner's output, and both need a person rather than another turn.
+    """
+    import subprocess
+
+    from software_factory.runtime.executor import LocalExecutor, SandboxPolicy
+    from software_factory.runtime.tools import build_registry
+    from software_factory.runtime.workspace import WorkspaceFactory
+
+    source = tmp_path / "repo"
+    source.mkdir()
+    (source / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    for command in (
+        ["init", "-q", "-b", "main"],
+        ["config", "user.email", "t@example.test"],
+        ["config", "user.name", "t"],
+        ["add", "-A"],
+        ["commit", "-qm", "initial"],
+    ):
+        subprocess.run(["git", *command], cwd=source, check=True, capture_output=True)
+
+    workspace = WorkspaceFactory(source=source, state_dir=tmp_path / "state").create()
+    registry = build_registry(
+        workspace,
+        LocalExecutor(SandboxPolicy(workspace=workspace.root), allow_unsandboxed=True),
+    )
+
+    tool = registry.get("test.run")
+    assert tool is not None
+    outcome = tool.handler({})
+
+    assert getattr(outcome, "value", None) is None, "an unreadable run came back as data"
+    assert "no readable test results" in str(getattr(outcome, "message", outcome))
