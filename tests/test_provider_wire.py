@@ -819,3 +819,86 @@ def test_input_and_output_tokens_are_recorded_apart(wire, tmp_path) -> None:
     assert first["inputTokens"] == 700, "the total is still being recorded as the input half"
     assert first["outputTokens"] == 200
     assert first["totalTokens"] == 900
+
+
+# ------------------------------------------- what the second live run found
+
+
+PYTEST_WIDTH_TRUNCATED = """\
+============================= test session starts ==============================
+collected 3 items
+
+test_importer.py::test_short PASSED                                      [ 33%]
+test_importer.py::test_bom_prefixed_headers FAILED                       [ 66%]
+test_importer.py::test_strip_bom_leaves_interior_and_subsequent_marks FAILED [100%]
+
+=================================== FAILURES ===================================
+___________________________ test_bom_prefixed_headers ___________________________
+
+    def test_bom_prefixed_headers():
+>       assert read_headers('\\ufeffa,b,c') == ['a', 'b', 'c']
+E       AssertionError: assert ['\\ufeffa', 'b', 'c'] == ['a', 'b', 'c']
+
+test_importer.py:9: AssertionError
+______________ test_strip_bom_leaves_interior_and_subsequent_marks ______________
+
+    def test_strip_bom_leaves_interior_and_subsequent_marks():
+>       assert strip_bom('\\ufeff\\ufeffa') == '\\ufeffa'
+E       AssertionError: assert '\\ufeff\\ufeffa' == '\\ufeffa'
+
+test_importer.py:17: AssertionError
+=========================== short test summary info ============================
+FAILED test_importer.py::test_bom_prefixed_headers - AssertionError: assert [...
+FAILED test_importer.py::test_strip_bom_leaves_interior_and_subsequent_marks - As...
+========================= 2 failed, 1 passed in 0.03s ==========================
+"""
+
+
+def test_a_failure_class_does_not_depend_on_the_length_of_the_test_name() -> None:
+    """The second live run found this, and it is the subtlest defect here so far.
+
+    pytest truncates its one-line summary to the terminal width. The same `AssertionError`
+    therefore arrives as ``AssertionError: assert [...`` for a short test name and
+    ``As...`` for a long one — and the classifier read that line. So the *length of a
+    test's name* decided whether `regression-proven` accepted it: a model writing
+    descriptive names had its regression tests rejected as "the test failed before its body
+    ran", and one writing `test_a` sailed through.
+
+    A real model wrote five correct tests with long descriptive names. Three were rejected
+    and two were not, on identical assertion failures.
+    """
+    from software_factory.runtime.tools import parse_pytest
+
+    run = parse_pytest(PYTEST_WIDTH_TRUNCATED, ["pytest"], "abc")
+    failed = {r.test_id.rsplit("::", 1)[-1]: r for r in run.results if r.outcome.value == "failed"}
+
+    assert len(failed) == 2
+    for name, result in failed.items():
+        assert result.is_behavioural_failure, (
+            f"{name} classified as {result.classified()}; its summary line was truncated"
+        )
+
+
+def test_a_genuinely_structural_failure_is_still_caught() -> None:
+    """The fix must not make everything behavioural.
+
+    `regression-proven` rests entirely on this distinction: a test that fails at the parent
+    because the name did not exist proves the code was absent, not that the behaviour was
+    wrong, and that is the bypass a small model produces by default.
+    """
+    from software_factory.runtime.tools import parse_pytest
+
+    collection_error = """\
+=================================== ERRORS ====================================
+_______________ ERROR collecting test_importer.py _______________
+test_importer.py:1: in <module>
+    from importer import strip_bom
+E   ImportError: cannot import name 'strip_bom' from 'importer'
+=========================== short test summary info ============================
+ERROR test_importer.py::test_new_behaviour - ImportError: cannot import name...
+"""
+    run = parse_pytest(collection_error, ["pytest"], "abc")
+    result = next(r for r in run.results if r.test_id.endswith("test_new_behaviour"))
+
+    assert not result.is_behavioural_failure
+    assert result.classified().value in ("import", "collection")

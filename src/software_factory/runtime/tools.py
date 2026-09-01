@@ -422,6 +422,48 @@ _PYTEST_RESULT = re.compile(r"^(?P<id>\S+::\S+)\s+(?P<outcome>PASSED|FAILED|ERRO
 _PYTEST_FAILURE = re.compile(r"^(?:FAILED|ERROR)\s+(?P<id>\S+)(?:\s+-\s+(?P<message>.*))?$")
 
 
+#: The header pytest writes above each failing test's traceback, e.g.
+#: ``_______ test_bom_prefixed_headers _______``.
+_PYTEST_BLOCK = re.compile(r"^_{2,}\s+(?P<name>[^\s_][^\n]*?)\s+_{2,}$")
+
+
+def _failure_blocks(output: str) -> dict[str, str]:
+    """Each failing test's full traceback, keyed by the name in its header.
+
+    The reason this exists is a real defect the short summary caused. pytest truncates the
+    one-line summary to the terminal width, so the same `AssertionError` arrives as
+    ``AssertionError: assert [...`` for a short test name and ``Assertion...`` for a long
+    one. Classifying from that line made the *length of a test's name* decide whether
+    `regression-proven` accepted it: a model writing descriptive names was rejected, and one
+    writing `test_a` was not.
+
+    The FAILURES section is not width-truncated and carries the exception verbatim, so it
+    is what the classification reads.
+    """
+    blocks: dict[str, str] = {}
+    name: str | None = None
+    lines: list[str] = []
+    for line in output.splitlines():
+        header = _PYTEST_BLOCK.match(line.strip())
+        if header:
+            if name is not None:
+                blocks[name] = "\n".join(lines)
+            name = header.group("name").strip()
+            lines = []
+            continue
+        if name is not None:
+            # The short-summary banner ends the last block; anything after it is a
+            # different section and must not be attributed to the test above it.
+            if line.startswith("=") and "short test summary" in line:
+                blocks[name] = "\n".join(lines)
+                name = None
+                continue
+            lines.append(line)
+    if name is not None:
+        blocks[name] = "\n".join(lines)
+    return blocks
+
+
 def parse_pytest(output: str, command: list[str], commit: str) -> TestRun:
     """Parse pytest output into structured per-test results.
 
@@ -430,6 +472,7 @@ def parse_pytest(output: str, command: list[str], commit: str) -> TestRun:
     human's impression of it.
     """
     results: dict[str, TestResult] = {}
+    blocks = _failure_blocks(output)
 
     for line in output.splitlines():
         verbose = _PYTEST_RESULT.match(line.strip())
@@ -444,11 +487,14 @@ def parse_pytest(output: str, command: list[str], commit: str) -> TestRun:
         if failure:
             test_id = failure.group("id")
             message = failure.group("message") or ""
+            # Classify from the untruncated traceback where there is one. The summary
+            # line stays as the human-readable message; it is just not evidence.
+            detail = blocks.get(test_id.rsplit("::", 1)[-1], "")
             results[test_id] = TestResult(
                 test_id=test_id,
                 outcome=Outcome.FAILED if line.startswith("FAILED") else Outcome.ERROR,
                 message=message,
-                failure_class=classify_failure(message or output),
+                failure_class=classify_failure(detail or message or output),
             )
 
     return TestRun(
