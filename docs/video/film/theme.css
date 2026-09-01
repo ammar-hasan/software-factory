@@ -13,7 +13,13 @@
   --sfcard: #14161e;
   --sfraise: #101218;
   --sfdim: #9096a8;
-  --sffaint: #61667a;
+  /* The product's own --faint is #61667a. On a screen you can lean into, that
+     reads fine; measured against this film's background it is 3.3:1, below AA.
+     Video is a different medium — often watched small, compressed, at a
+     distance — so the faint role is lifted to the darkest neutral that clears
+     4.5:1 on #0b0c10. A deliberate, recorded departure from the source token,
+     not a new palette. */
+  --sffaint: #868ca0;
   --sfgood: #4ec9a0;
   --sfwarn: #e8b458;
   --sfbad: #f2748c;
@@ -66,7 +72,7 @@
 }
 
 .sg {
-  color: #4a4f61;
+  color: #777c8d; /* 4.5:1 on #0b0c10 — upcoming stages stay quiet but legible */
   display: flex;
   align-items: center;
   gap: 10px;
@@ -77,16 +83,16 @@
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: #2a2e3b;
+  background: #3b4050;
   flex: 0 0 auto;
 }
 
 .sg.done {
-  color: var(--sffaint);
+  color: var(--sfdim);
 }
 
 .sg.done::before {
-  background: #3a3f4f;
+  background: #5b6274;
 }
 
 .sg.on {
@@ -191,7 +197,7 @@
 }
 
 .term .mut {
-  color: var(--sffaint);
+  color: #8d94a6;
 }
 
 .plate-cap {

@@ -25,6 +25,14 @@ Typography is generic-only (`system-ui`, `ui-monospace`) so the film composes
 and renders with no network font fetch, which is the same property the subject
 claims for its own dashboard.
 
+**One recorded departure.** The product's `--faint` (`#61667a`) measures 3.3:1
+against this film's background — fine on a screen you can lean into, below AA
+for text in a video that is often watched small and compressed. The faint role
+is lifted to `#868ca0`, and the rail's upcoming stages to `#777c8d`, the
+darkest neutrals that clear 4.5:1 on `#0b0c10`. Everything else is the source
+token unchanged. `hyperframes check` reported 45 contrast warnings before this
+change and none after; 0 errors and 0 layout issues in both runs.
+
 ## Graphics / layout — provenance: source
 
 Left rail plus a single content column, hairline-ruled. Two rules do all the
