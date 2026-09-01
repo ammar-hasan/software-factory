@@ -1,12 +1,94 @@
 # Software Factory
 
-> A software factory takes in requests — bugs, feature asks, support escalations, alerts —
-> and a coordinated fleet of specialist agents works them into a stream of reviewable,
-> mergeable changes instead of a growing backlog.
+**Hand it a bug report. Get back a branch with the fix, a test that proves the fix, and a
+record of every decision — or a refusal that tells you exactly what is missing.**
 
-**Software Factory** is an open, **local-first** implementation of that idea. It runs the
-same way on a laptop, on a self-hosted box, or in the cloud, with the same definition
-files, the same agent harness, and the same guarantees. No control plane you don't own.
+The refusal is the point. Anything can produce a diff. This is built to know when its own
+work is not good enough to hand you, and to say so.
+
+<!-- DIAGRAM:stage-machine -->
+
+## What that looks like
+
+A real work item, run against a small hosted model on a real repository. This is `sf work`'s
+own output, not a mock-up:
+
+```console
+$ sf work "Add a --version flag that prints the package version and exits 0" \
+    --factory ./myfactory --repo ~/code/jsonlint
+
+  ok   TRIAGE   scout
+  ok   DESIGN   architect
+  ok   BUILD    builder
+  ok   REVIEW   critic
+  ok   HANDOFF  handoff
+
+HANDOFF — 4 file(s) changed
+```
+
+**Twenty-four gate evaluations** ran across those five stages, across eleven distinct gates
+— `calibration-present`, `blast-radius-clean`, `secret-clean`, `spec-agreement`,
+`delta-present`, `build-green`, `tests-pass`, `independent-review`,
+`no-unreviewed-external`, `evidence-complete`. Twenty-three passed. `regression-proven`
+reported `skip`, correctly: this is a feature, not a defect fix, so there is no bug to
+demonstrate.
+
+What landed: `jsonlint/__main__.py`, a `[project.scripts]` entry point, a spec delta
+recording the behaviour change, and **a test file the factory wrote itself** — including one case asserting the version is read from the
+attribute at runtime rather than hard-coded, and one for precedence against a positional
+argument. Nobody asked for either. `python -m jsonlint --version` prints `0.1.0` and exits 0.
+
+Now the other half. Ask it to fix a defect without demonstrating the bug:
+
+```console
+  stop BUILD    builder
+       · the parent-commit failure is about behaviour at tests/test_importer.py::test_bom:
+         observed import_error failure; expected an assertion failure
+
+blocked (gate_failed_terminal): The test failed before its body ran, so it proves the code
+did not exist, not that the behaviour was wrong. Assert on behaviour that the parent commit
+gets wrong.
+```
+
+It has the fix. It will not hand it over.
+
+And read what it refused on. The test *did* fail before the change and *did* pass after —
+the one-line check most people would write. It failed with an `ImportError`, which proves
+the module was missing, not that the bug was real. **The gate reads the failure's class,
+not its existence.** That distinction is the product.
+
+<!-- DIAGRAM:regression-proven -->
+
+## Is this for you?
+
+**Probably yes, if** you have more incoming work than people to do it, you want the work
+done on your own hardware or your own cloud account, and you would rather have a machine
+refuse than hand you a plausible diff you have to check by hand.
+
+**Probably not, if** you want one agent you chat with interactively. This is a fleet that
+runs work items to completion and reports; it is closer to CI than to a pair programmer.
+Use a coding agent for that, and point this at the backlog behind it.
+
+## How is this different from just running a coding agent?
+
+A coding agent is a model with tools. This is the machinery you would have to build around
+one before you could leave it alone with your backlog:
+
+| | A coding agent | This |
+| --- | --- | --- |
+| **Knows when it is wrong** | you review the diff | gates block the handoff, and name what would clear them |
+| **Proof a fix works** | it says so | a test that failed at the parent commit, for the right reason |
+| **What it was told** | whatever fit in context | a budgeted, cited pack, assembled deterministically |
+| **What it may touch** | whatever you allow | a declared blast radius, checked by machine |
+| **What it cost** | your usage page | per run, per stage, per agent, folded from an append-only ledger |
+| **When data is missing** | a plausible number | `unavailable`, with the reason. Never zero |
+| **Where it runs** | somebody's cloud | the same files on your laptop, your box, or your cloud |
+
+<!-- DIAGRAM:awareness-pack -->
+
+**Local-first is not a degraded mode.** The same definition files, the same harness and the
+same guarantees run on a laptop with a local model as in a data centre. CI proves the whole
+suite passes with the network denied. No control plane you don't own.
 
 Licensed under [Apache-2.0](LICENSE).
 
@@ -124,16 +206,26 @@ every new user that warnings are normal.
 Everything the factory does is described by these files, so changing its behaviour is a
 change you can review, diff, and revert — including changes the factory proposes to itself.
 
-## Why this one is different
+## The bet
 
 Most agent platforms treat the model as the product and the scaffolding as plumbing. This
-inverts that. The bet is:
+inverts that:
 
 > **A modest model inside an excellent harness beats a frontier model inside a poor one.**
 
-That is a hypothesis, not a slogan, and [§11.2 of the PRD](docs/PRD.md) is the
-pre-registered experiment written to falsify it. Every subsystem below exists because it
-is one of the mechanisms that claim depends on.
+That is a hypothesis, not a slogan. [§11.2 of the PRD](docs/PRD.md) is the pre-registered
+experiment written to falsify it, and `sf experiment status` reports what it has actually
+shown so far:
+
+```console
+$ sf experiment status
+insufficient_data — no trials recorded
+```
+
+No trials have run. A test in the suite asserts this cannot report `supported` without
+them. Every subsystem below exists because that claim depends on it — and if an ablation
+ever shows one of them earning nothing, the protocol says it is removed, not kept for
+plausibility.
 
 | | What the agent gets |
 | --- | --- |
