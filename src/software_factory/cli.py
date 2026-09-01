@@ -93,6 +93,48 @@ def _emit(payload: dict[str, Any]) -> None:
     console.print_json(json.dumps(payload, default=str))
 
 
+def _container_runtime() -> dict[str, Any]:
+    """Whether a container executor would actually run, not whether a binary is on PATH.
+
+    `sf doctor` exists to say what this machine can and cannot do *before* a run finds out
+    the expensive way, and it answered this one with `shutil.which`. On this very machine
+    that printed `ok  container-runtime  docker` while `docker info` fails and the parity
+    suite skipped itself with "a binary with no daemon does not count" — the project's own
+    test naming the mistake its own doctor was making.
+
+    The executor already probes properly. Two reports of one capability that disagree is
+    worse than either alone: the one an operator reads is the one that was wrong.
+    """
+    import shutil
+
+    from software_factory.runtime.executors import _daemon_reachable
+
+    found = next((c for c in ("docker", "podman") if shutil.which(c)), "")
+    if not found:
+        return {
+            "check": "container-runtime",
+            "ok": False,
+            "detail": "not found",
+            "remediation": "Optional. Needed only for the container executor.",
+        }
+    if not _daemon_reachable(shutil.which(found) or found):
+        return {
+            "check": "container-runtime",
+            "ok": False,
+            "detail": f"{found} found, daemon not reachable",
+            "remediation": (
+                f"Start the {found} daemon, or use the local executor. The binary alone "
+                "cannot run anything."
+            ),
+        }
+    return {
+        "check": "container-runtime",
+        "ok": True,
+        "detail": found,
+        "remediation": "Optional. Needed only for the container executor.",
+    }
+
+
 def _fail(exc: FactoryError, as_json: bool) -> None:
     """Report a deliberate failure and exit. Never a traceback: the user did nothing wrong."""
     if as_json:
@@ -2089,12 +2131,7 @@ def doctor(as_json: JsonOpt = False) -> None:
             "detail": shutil.which("git") or "not found",
             "remediation": "Install git; the factory works in git worktrees.",
         },
-        {
-            "check": "container-runtime",
-            "ok": any(shutil.which(c) for c in ("docker", "podman")),
-            "detail": next((c for c in ("docker", "podman") if shutil.which(c)), "not found"),
-            "remediation": "Optional. Needed only for the container executor.",
-        },
+        _container_runtime(),
         {
             "check": "schema-versions",
             "ok": True,
@@ -2103,17 +2140,28 @@ def doctor(as_json: JsonOpt = False) -> None:
         },
     ]
     required = {"python", "git"}
-    ok = all(c["ok"] for c in checks if c["check"] in required)
+    for check in checks:
+        check["required"] = check["check"] in required
+    ok = all(c["ok"] for c in checks if c["required"])
 
     if as_json:
         _emit({"ok": ok, "checks": checks})
         raise typer.Exit(EXIT_OK if ok else EXIT_FAILED)
 
     for check in checks:
-        mark = "[green]ok  [/]" if check["ok"] else "[red]fail[/]"
-        console.print(f"  {mark} {check['check']:<20} {check['detail']}")
+        # Three states, not two. An optional capability this machine does not have is not a
+        # failure -- `fail` in red beside an entry whose own remediation begins "Optional"
+        # tells an operator their machine is broken when it is merely smaller. The same
+        # three-way vocabulary the metrics use, for the same reason.
+        if check["ok"]:
+            mark = "[green]ok    [/]"
+        elif check["required"]:
+            mark = "[red]fail  [/]"
+        else:
+            mark = "[yellow]absent[/]"
+        console.print(f"  {mark} {check['check']:<19} {check['detail']}")
         if not check["ok"] and check["remediation"]:
-            console.print(f"       [dim]{check['remediation']}[/]")
+            console.print(f"        [dim]{check['remediation']}[/]")
     raise typer.Exit(EXIT_OK if ok else EXIT_FAILED)
 
 

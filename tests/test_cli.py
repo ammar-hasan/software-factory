@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from software_factory.cli import EXIT_UNUSABLE, app
+from software_factory.cli import EXIT_OK, EXIT_UNUSABLE, app
 from software_factory.ledger import EntryType, Ledger
 
 runner = CliRunner()
@@ -238,6 +238,49 @@ def test_doctor_reports_environment_checks() -> None:
         assert check["detail"], f"{check['check']} reports no detail"
         if not check["ok"]:
             assert check["remediation"], f"{check['check']} fails with no remediation"
+
+
+def test_doctor_does_not_call_a_binary_a_capability(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`sf doctor` exists to say what this machine can do *before* a run finds out the
+    expensive way, and it answered the container question with `shutil.which`.
+
+    On the machine this was written on it printed `ok  container-runtime  docker` while
+    `docker info` failed and the parity suite skipped itself with "a binary with no daemon
+    does not count" — the project's own test naming the mistake its own doctor was making.
+    The executor had probed properly all along, so two reports of one capability disagreed,
+    and the one an operator reads was the wrong one.
+    """
+    import software_factory.runtime.executors as executors
+
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(executors, "_daemon_reachable", lambda _runtime: False)
+
+    checks = payload(runner.invoke(app, ["doctor", "--json"]).output)["checks"]
+    runtime = next(c for c in checks if c["check"] == "container-runtime")
+
+    assert runtime["ok"] is False, "a binary with no reachable daemon was called a capability"
+    assert "not reachable" in runtime["detail"]
+    assert runtime["remediation"]
+
+
+def test_doctor_survives_an_optional_capability_being_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An optional capability this machine lacks is not a broken machine.
+
+    Reported as `absent`, not `fail`: red beside an entry whose own remediation begins
+    "Optional" tells an operator their environment is broken when it is merely smaller, and
+    the exit code has always agreed with that — only the word did not.
+    """
+    import software_factory.runtime.executors as executors
+
+    monkeypatch.setattr(executors, "_daemon_reachable", lambda _runtime: False)
+    result = runner.invoke(app, ["doctor"])
+
+    assert result.exit_code == EXIT_OK, "an optional capability failed the whole check"
+    assert "fail" not in result.output
+    if "container-runtime" in result.output:
+        assert "absent" in result.output
 
 
 def test_doctor_fails_and_says_why_when_a_required_tool_is_missing(
