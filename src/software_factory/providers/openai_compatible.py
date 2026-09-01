@@ -283,12 +283,20 @@ def _parse_arguments(arguments: Any, *, name: str) -> dict[str, Any]:
         return {}
     try:
         parsed = json.loads(arguments)
-    except json.JSONDecodeError as exc:
-        raise ProviderError(
-            f"tool call {name!r} had unparseable arguments ({exc}); "
-            f"the model emitted: {arguments[:200]!r}",
-            retryable=True,
-        ) from exc
+    except json.JSONDecodeError:
+        # One retry, non-strict. `strict=False` differs from the default in exactly one
+        # way: it accepts literal control characters inside strings. A model that wrote a
+        # real tab into a command instead of `\t` has produced JSON that is invalid and
+        # unambiguous, and refusing it throws away a whole run's work over a character
+        # nobody disagrees about the meaning of. Everything else still fails.
+        try:
+            parsed = json.loads(arguments, strict=False)
+        except json.JSONDecodeError as exc:
+            raise ProviderError(
+                f"tool call {name!r} had unparseable arguments ({exc}); "
+                f"the model emitted: {arguments[:200]!r}",
+                retryable=True,
+            ) from exc
     if not isinstance(parsed, dict):
         raise ProviderError(
             f"tool call {name!r} arguments decoded to {type(parsed).__name__}, expected an object",

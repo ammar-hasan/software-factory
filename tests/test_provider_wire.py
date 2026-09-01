@@ -902,3 +902,87 @@ ERROR test_importer.py::test_new_behaviour - ImportError: cannot import name...
 
     assert not result.is_behavioural_failure
     assert result.classified().value in ("import", "collection")
+
+
+# ------------------------------------ what the third live run found: a lost run
+
+
+def test_a_raw_control_character_in_tool_arguments_is_accepted() -> None:
+    """The exact malformation that ended a twenty-nine-turn build.
+
+    The model wrote a literal tab inside a JSON string instead of `\\t`. That is invalid
+    JSON and it is unambiguous, and refusing it threw away a run that had already passed
+    every gate — including `regression-proven`. Losing a whole run to one character is the
+    single reason small models fail in agent harnesses.
+    """
+    from software_factory.providers.openai_compatible import _parse_arguments
+
+    assert _parse_arguments('{"command": "ls\t-la"}', name="proc.run") == {"command": "ls\t-la"}
+
+
+def test_genuinely_broken_arguments_are_still_refused() -> None:
+    """The tolerance is for one unambiguous case, not for guessing.
+
+    `{}` is a valid argument object for several real tools, so substituting it would turn a
+    parse error into a successful call that does nothing — the invented result FR-11.10
+    exists to forbid.
+    """
+    from software_factory.providers.base import ProviderError
+    from software_factory.providers.openai_compatible import _parse_arguments
+
+    with pytest.raises(ProviderError, match="unparseable"):
+        _parse_arguments('{"command": [', name="proc.run")
+
+
+def test_a_malformed_tool_call_is_repaired_rather_than_ending_the_run() -> None:
+    """The model is told what was wrong and gets to try again, within the repair budget."""
+    from software_factory.harness.loop import Budget, RunStatus, TurnLoop
+    from software_factory.providers.base import ProviderError
+
+    class Flaky:
+        name = "flaky"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, messages, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise ProviderError(
+                    "tool call 'proc.run' had unparseable arguments (bad escape)",
+                    retryable=True,
+                )
+            from software_factory.providers.base import Completion, StopReason, Usage
+
+            # The harness must have told the model what was wrong.
+            told = any("could not be parsed" in str(m.content) for m in messages)
+            assert told, "the model was retried without being told what was malformed"
+            return Completion(
+                text='{"summary": "done"}', stop_reason=StopReason.COMPLETE, usage=Usage()
+            )
+
+    from tests.test_loop import loop as build_loop
+
+    provider = Flaky()
+    result = build_loop(provider).run()
+
+    assert result.status is not RunStatus.PROVIDER_FAILED, result.reason
+    assert provider.calls == 2
+    del Budget, TurnLoop
+
+
+def test_an_endpoint_that_is_down_still_ends_the_run() -> None:
+    """Telling a model about a 503 does not help, and retrying inside the run wastes the
+    budget the caller set."""
+    from software_factory.harness.loop import RunStatus
+    from software_factory.providers.base import ProviderError
+
+    class Down:
+        name = "down"
+
+        def complete(self, *args, **kwargs):
+            raise ProviderError("cannot reach https://host/v1: connection refused", retryable=True)
+
+    from tests.test_loop import loop as build_loop
+
+    assert build_loop(Down()).run().status is RunStatus.PROVIDER_FAILED

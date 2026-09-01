@@ -282,6 +282,31 @@ class TurnLoop:
                     tools=self._tool_schemas(),
                 )
             except ProviderError as exc:
+                # A malformed tool call is the model's mistake, not the provider's, and it
+                # is one the model can fix if told. Ending the run here threw away a
+                # twenty-nine-turn build that had already passed every gate -- including
+                # `regression-proven` -- because one tool call carried a raw tab inside a
+                # JSON string. Losing an entire run to a character is the single reason
+                # small models fail in agent harnesses, and this project's whole bet is
+                # that a modest model in a good harness does well.
+                #
+                # Bounded by the same repair budget as schema failures, and only for
+                # malformations: an endpoint that is down is still a provider failure and
+                # still ends the run, because telling a model about a 503 does not help.
+                if _is_malformed_tool_call(exc) and result.repair_attempts < self.repair_budget:
+                    result.repair_attempts += 1
+                    messages.append(
+                        Message(
+                            role=Role.USER,
+                            content=(
+                                "<harness>Your last tool call could not be parsed: "
+                                f"{exc}. Send the call again with valid JSON arguments. "
+                                "Escape control characters; a literal tab or newline "
+                                "inside a JSON string is not valid.</harness>"
+                            ),
+                        )
+                    )
+                    continue
                 return self._end(result, RunStatus.PROVIDER_FAILED, str(exc))
 
             result.spend.add_usage(
@@ -566,3 +591,20 @@ def _extract_calibration(output: dict[str, Any]) -> Calibration:
 
 def working_set_tokens(messages: list[Message]) -> int:
     return sum(estimate_tokens(message.content) for message in messages)
+
+
+#: What a provider error says when the *model* produced something unusable, rather than the
+#: endpoint failing. The distinction decides whether telling the model helps.
+_MALFORMED = ("unparseable arguments", "decoded to", "arguments of type")
+
+
+def _is_malformed_tool_call(exc: Exception) -> bool:
+    """Whether this failure is the model's output rather than the endpoint's health.
+
+    Matched on the message because `ProviderError` carries no field for it, and adding one
+    would mean every adapter has to set it correctly before this works at all. The strings
+    come from one function in one adapter; when a second adapter needs this, the right move
+    is a typed field, not a longer list.
+    """
+    text = str(exc)
+    return any(phrase in text for phrase in _MALFORMED)
