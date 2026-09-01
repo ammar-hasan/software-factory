@@ -473,6 +473,64 @@ def test_work_dry_run_plans_stages_without_executing(scaffold: Path) -> None:
     assert "nothing was executed" in body["note"]
 
 
+def test_work_dry_run_says_why_the_path_is_that_one(scaffold: Path) -> None:
+    """The README promises this prints the stages "and why", and it printed the stages.
+
+    Why is the one thing a dry run exists to explain: the work class chose the shape, and a
+    reader looking at `TRIAGE → BUILD → REVIEW → HANDOFF` cannot tell whether DESIGN was
+    skipped by policy or lost by a bug.
+    """
+    for request, expect in (
+        ("Add semicolon delimiter support", "DESIGN is planned"),
+        ("The importer crashes on BOM headers", "DESIGN is skipped"),
+    ):
+        result = runner.invoke(
+            app,
+            ["work", request, "--factory", str(scaffold), "--dry-run", "--json"],
+        )
+
+        assert result.exit_code == 0
+        reason = payload(result.output)["reason"]
+        assert expect in reason, reason
+
+
+def test_planning_a_path_needs_no_runtime(scaffold: Path) -> None:
+    """A pure function of the work item, reachable as one.
+
+    It was a method, so the dry run — whose whole job is to answer this without running
+    anything — built a `Coordinator` through `__new__` to reach it, dodging the constructor
+    of a class that owns a ledger, a workspace factory and a provider. A planning question
+    answered by an uninitialised object is one edit away from one that needs a provider.
+    """
+    from software_factory.orchestrator import SourceContext, WorkClass, WorkItem, new_id
+    from software_factory.orchestrator.coordinator import planned_path
+
+    def plan(work_class: WorkClass, request: str):
+        return planned_path(
+            WorkItem(
+                id=new_id(),
+                factory="f",
+                title="t",
+                request=request,
+                source=SourceContext(provider="cli", kind="test", ref="t"),
+                work_class=work_class,
+            )
+        )
+
+    feature = plan(WorkClass.FEATURE, "add a thing")
+    defect = plan(WorkClass.DEFECT, "it crashes")
+
+    assert "DESIGN" in [s.value for s in feature.stages]
+    assert "DESIGN" not in [s.value for s in defect.stages]
+    # REVIEW is in every path (FR-3.3a), and so is TRIAGE — the docstring this replaced
+    # claimed TRIAGE was skipped for a well-described request, and no branch ever did.
+    for path in (feature, defect, plan(WorkClass.DEFECT, "it crashes. " + "detail. " * 60)):
+        stages = [s.value for s in path.stages]
+        assert stages[0] == "TRIAGE" and stages[-1] == "HANDOFF"
+        assert "REVIEW" in stages
+        assert path.reason, "a planned path with no reason is the defect this fixed"
+
+
 def test_work_dry_run_classifies_the_request(scaffold: Path) -> None:
     result = runner.invoke(
         app,

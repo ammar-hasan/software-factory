@@ -1037,21 +1037,8 @@ class Coordinator:
     # ----------------------------------------------------------------------- stages
 
     def _default_path(self, item: WorkItem) -> list[Stage]:
-        """The shortest path that still meets the quality policy.
-
-        Triage is skipped when the request already explains what is wrong and what to
-        change; review never is (FR-3.3a).
-        """
-        # Every path ends at HANDOFF. It did not, and the consequence was quiet: a factory
-        # that never reaches handoff opens no changes, so `changes_opened` and
-        # `cost_per_change` folded on a key nobody wrote and reported "no work item both
-        # incurred cost and reached handoff" -- which reads as an observation about
-        # throughput when it was a statement about a stage the path never included.
-        if item.work_class is WorkClass.DEFECT and len(item.request) > 200:
-            return [Stage.TRIAGE, Stage.BUILD, Stage.REVIEW, Stage.HANDOFF]
-        if item.work_class in (WorkClass.FEATURE, WorkClass.REFACTOR):
-            return [Stage.TRIAGE, Stage.DESIGN, Stage.BUILD, Stage.REVIEW, Stage.HANDOFF]
-        return [Stage.TRIAGE, Stage.BUILD, Stage.REVIEW, Stage.HANDOFF]
+        """The shortest path that still meets the quality policy."""
+        return list(planned_path(item).stages)
 
     def _run_stage(self, item: WorkItem, stage: Stage, workspace: Workspace) -> StageOutcome:
         # A run is one agent working one stage of one work item, and it needs its own id.
@@ -1959,6 +1946,58 @@ class Coordinator:
                 return findings[0].remediation
             return "review the failing gates"
         return outcome.run.reason or "investigate the run"
+
+
+@dataclass(frozen=True, slots=True)
+class PlannedPath:
+    """The stages a work item would take, and the sentence explaining why."""
+
+    stages: tuple[Stage, ...]
+    reason: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"stages": [s.value for s in self.stages], "reason": self.reason}
+
+
+def planned_path(item: WorkItem) -> PlannedPath:
+    """The shortest path that still meets the quality policy, and why it is that one.
+
+    A module-level function because it is a pure function of the work item and nothing
+    else. It was a method, so `sf work --dry-run` -- whose whole job is to answer this
+    without running anything -- had to build a `Coordinator` through `__new__` to reach it,
+    dodging the constructor of a class that owns a ledger, a workspace factory and a
+    provider. A planning question answered by an uninitialised object is one edit away from
+    a planning question that needs a provider.
+
+    The reason travels with the path. `--dry-run` told a reader which stages would run and
+    not why that path and not another, so the one thing a dry run exists to explain -- that
+    the work class chose this shape -- was the thing it left out.
+
+    REVIEW is in every path (FR-3.3a). So is TRIAGE: the docstring this replaces said it
+    was skipped when a request already explains what to change, and no branch here has ever
+    skipped it. A comment describing a policy the code does not implement is worse than
+    none, because it is the one a reader trusts.
+    """
+    # Every path ends at HANDOFF. It did not, and the consequence was quiet: a factory that
+    # never reaches handoff opens no changes, so `changes_opened` and `cost_per_change`
+    # folded on a key nobody wrote and reported "no work item both incurred cost and reached
+    # handoff" -- which reads as an observation about throughput when it was a statement
+    # about a stage the path never included.
+    tail = (Stage.BUILD, Stage.REVIEW, Stage.HANDOFF)
+    if item.work_class is WorkClass.DEFECT and len(item.request) > 200:
+        return PlannedPath(
+            (Stage.TRIAGE, *tail),
+            "a defect this fully described needs no design stage; the report is the design",
+        )
+    if item.work_class in (WorkClass.FEATURE, WorkClass.REFACTOR):
+        return PlannedPath(
+            (Stage.TRIAGE, Stage.DESIGN, *tail),
+            f"{item.work_class.value} work changes the shape of the code, so DESIGN is planned",
+        )
+    return PlannedPath(
+        (Stage.TRIAGE, *tail),
+        f"{item.work_class.value} work is scoped by its own report, so DESIGN is skipped",
+    )
 
 
 def _registry_from(definition: Definition) -> SkillRegistry:

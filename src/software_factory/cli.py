@@ -508,7 +508,7 @@ def work(
     so, not produce unverified output (PR-9).
     """
     from software_factory.orchestrator import SourceContext, WorkClass, WorkItem, new_id
-    from software_factory.orchestrator.coordinator import Coordinator
+    from software_factory.orchestrator.coordinator import planned_path
     from software_factory.orchestrator.workitem import classify_request
 
     try:
@@ -528,24 +528,23 @@ def work(
     )
 
     if dry_run:
-        coordinator = Coordinator.__new__(Coordinator)  # planning needs no runtime
-        planned = [
-            stage.value
-            # Planning is a pure function of the work item, so it needs no runtime.
-            for stage in Coordinator._default_path(coordinator, item)
-        ]
+        path = planned_path(item)
+        planned = [stage.value for stage in path.stages]
         if as_json:
             _emit(
                 {
                     "ok": True,
                     "workItem": item.as_dict(),
                     "plannedStages": planned,
+                    "reason": path.reason,
                     "note": "dry run: nothing was executed",
                 }
             )
             raise typer.Exit(EXIT_OK)
         console.print(f"[bold]{item.title}[/] [dim]({resolved_class.value})[/]")
         console.print(f"  planned stages: {' → '.join(planned)}")
+        # The README promises this prints the stages "and why", and it printed the stages.
+        console.print(f"  [dim]{escape(path.reason)}[/]")
         console.print("\n[dim]dry run: nothing was executed[/]")
         raise typer.Exit(EXIT_OK)
 
