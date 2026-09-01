@@ -28,6 +28,7 @@ cannot be scripted, and PR-2 makes the local path the reference one.
 | `sf explain` | Ask a handed-off work item why it did something (FR-32). |
 | `sf providers` | What each tier will actually call, and whether it can right now. |
 | `sf doctor` | Report what works in this environment and what does not (FR-28.1). |
+| `sf mine` | Read past runs back for things worth keeping. |
 | `sf agent inbox` | What one agent has been sent. |
 | `sf agent lifecycle` | Every run's observable state, and which questions are still unanswered. |
 | `sf agent send` | Address one agent. The message reaches it at the start of its next run. |

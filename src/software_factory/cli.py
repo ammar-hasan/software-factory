@@ -4289,6 +4289,62 @@ def experiment_amend(
     raise typer.Exit(EXIT_OK)
 
 
+@app.command("mine")
+def mine_command(
+    state: Annotated[
+        Path, typer.Option("--state", help="Where run state and the ledger live.")
+    ] = Path(".factory"),
+    scope_ref: Annotated[
+        str, typer.Option("--scope", help="What the proposed memories are about.")
+    ] = "",
+    as_json: JsonOpt = False,
+) -> None:
+    """Read past runs back for things worth keeping.
+
+    Proposes; never writes. Admission control, corroboration and quarantine live in the
+    memory store already, and a miner that wrote directly would be a second door into
+    memory with none of them behind it. What comes out here goes in through `sf memory`
+    like anything else, or does not go in at all.
+    """
+    from software_factory.improvement.mining import Confidence, Mine
+    from software_factory.ledger import Ledger
+
+    path = state / "ledger.jsonl"
+    if not path.exists():
+        console.print(f"[red]no ledger at {path}[/]")
+        raise typer.Exit(EXIT_UNUSABLE)
+
+    findings = Mine(scope_ref=scope_ref).run(Ledger(path).read())
+
+    if as_json:
+        _emit({"ok": findings.confidence is Confidence.AVAILABLE, **findings.as_dict()})
+        raise typer.Exit(EXIT_OK)
+
+    if findings.confidence is Confidence.INSUFFICIENT_DATA:
+        console.print(f"[yellow]insufficient data[/] — {findings.reason}")
+        raise typer.Exit(EXIT_OK)
+
+    console.print(f"[dim]read {findings.runs_read} run(s)[/]\n")
+    if findings.memories:
+        table = Table(show_header=True, header_style="bold", box=None)
+        for column in ("proposed memory", "kind", "sources"):
+            table.add_column(column, overflow="fold")
+        for candidate in findings.memories:
+            table.add_row(candidate.content, candidate.kind.value, str(len(candidate.provenance)))
+        console.print(table)
+        console.print()
+    for idea in findings.skills:
+        console.print(f"[bold]skill idea[/] {idea.name} [dim]— {idea.rationale}[/]")
+    if not findings.memories and not findings.skills:
+        console.print(f"[dim]{findings.reason}[/]")
+    if findings.discarded:
+        console.print(f"\n[dim]{len(findings.discarded)} observation(s) discarded:[/]")
+        for note in findings.discarded[:10]:
+            console.print(f"  [dim]{note}[/]")
+    console.print("\n[dim]Proposals. Nothing was written.[/]")
+    raise typer.Exit(EXIT_OK)
+
+
 # The module-as-script entry point stays at the very bottom, and it matters that it does.
 # Run as `python -m software_factory.cli`, this file executes top to bottom: a guard placed
 # mid-file calls `app()` and exits *before* any command group defined below it is
