@@ -176,8 +176,18 @@ rewritten to look prescient.
 | Skills cannot be invoked | MEDIUM | **Closed.** Declared arguments, `sf skill render` and `sf skill run`. |
 | Computer use | MEDIUM | **Closed.** `UI` effect class, session contract, declared `ui.*` tools, mandatory recording, credential refusal. |
 | Chat and git-host integrations | — | **Closed.** Both ship; the git host also makes three outcome metrics computable. |
-| Run routing has no labels or pool | MEDIUM | Open. |
-| Conversation mining | MEDIUM | Open. Cheaper now that the chat adapter is real. |
+| Run routing has no labels or pool | MEDIUM | **Closed.** Work declares labels, workers declare labels, leases counted on disk and reclaimed on expiry. A requirement nothing satisfies is refused by name rather than downgraded. |
+| Conversation mining | MEDIUM | **Closed.** `sf mine` reads completed runs for candidate memories and skill ideas. Proposes; writes nothing. |
+
+Everything ranked in this analysis is now closed, along with four gaps that were not in it
+and were found by looking again at the same documentation:
+
+| Gap | Status |
+| --- | --- |
+| Agent-to-agent messaging | **Closed.** Messages live in the ledger, so a message and the run it is about share one sequence and cannot be observed out of order. `sf agent lifecycle` distinguishes a run that is `running` and healthy from one `running` and waiting on a question nobody read. |
+| Named orchestration patterns | **Closed.** Fan-out/fan-in, DAG, swarm, critic, supervisor -- five constructors over one validated engine, so a cycle check written once holds for all of them. |
+| The §11.2 experiment | **Closed as machinery, open as a result.** The full protocol exists: a registration that locks at the first trial, Holm-corrected primaries, a verdict that can be `falsified`, and named removals when an ablation shows a subsystem earning nothing. `sf experiment status` reports `insufficient_data` because no trials have run, which is the honest state. |
+| Repository-tailored spec templates, recording post-production, media as research, cross-factory audit | **Closed.** |
 
 ## What the live runs changed about this analysis
 
@@ -198,3 +208,32 @@ somebody who already knew what the gate meant. That is the finding worth carryin
 harness is not verified by its own authors' tests.** The gap that mattered most was not in
 the comparison table at all — it was that nothing here had ever met a model it did not
 script.
+
+## What building a product changed about this analysis
+
+Then the factory built something: a real JSON validator, through a sequence of work items
+chosen to probe where a factory fails rather than where it demonstrates. One step found
+three more defects, and they are worth recording because none is the kind of gap a
+comparison against another product's documentation could ever surface.
+
+* **The change surface included the run's own droppings.** `HOME` was the repository root,
+  so one `pip install` put thirty-eight cache files and `.rustup/settings.toml` into
+  `changed_paths` -- which is what the blast-radius contract is checked against and what a
+  change would commit.
+* **The declared budget was read by nothing.** An operator could write
+  `budget: {tokens: 50000}`, watch it validate, and have it ignored.
+* **`TOOL_CALLED` was written by nothing**, while the dashboard counted it, the run
+  inspector rendered it, and conversation mining searched for it. Every run reported zero
+  tool calls, and mining's whole skill-idea half was dead code over an empty set.
+
+That is now six instances of one shape -- *a control that exists and is not wired in* -- and
+it has appeared in every layer of this codebase: identity, retention, spend caps, the
+improvement loop, the provider registry, and now the ledger's own tool record. The lesson is
+not "check for it again". It is that **presence is not capability, and only running the
+thing distinguishes them.** A comparison of surfaces cannot: every one of these features was
+present, documented, and tested.
+
+The other finding is about cost. Adding a `--version` flag took sixty-five turns across five
+stages, eighteen of them in triage, with an awareness pack of a thousand tokens. The expense
+is the transcript growing across turns, not the context being assembled -- the opposite of
+where anyone looks first, and invisible until the trial reported turns rather than tokens.
