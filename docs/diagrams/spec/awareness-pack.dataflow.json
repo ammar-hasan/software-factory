@@ -1,0 +1,322 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "Awareness Pack \u2014 what an agent is given before it acts",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1080,
+      610
+    ],
+    "legend": {
+      "entries": {
+        "emphasis": {
+          "label": "primary path"
+        },
+        "default": {
+          "label": "supporting"
+        },
+        "security": {
+          "label": "policy filter"
+        },
+        "dashed": {
+          "label": "recorded"
+        },
+        "database": {
+          "label": "store"
+        }
+      }
+    }
+  },
+  "stages": [
+    {
+      "label": "Sources"
+    },
+    {
+      "label": "Deterministic builders"
+    },
+    {
+      "label": "Budget"
+    },
+    {
+      "label": "The pack"
+    },
+    {
+      "label": "Read by the agent"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "spec",
+      "type": "database",
+      "label": "Living Spec",
+      "sublabel": "units on surface",
+      "tag": "spec:",
+      "stage": 0,
+      "row": 0,
+      "width": 96,
+      "yOffset": 0
+    },
+    {
+      "id": "memory",
+      "type": "database",
+      "label": "Memory Fabric",
+      "sublabel": "canon lane only",
+      "tag": "retrieved",
+      "stage": 0,
+      "row": 1,
+      "width": 96,
+      "yOffset": -29
+    },
+    {
+      "id": "precedent",
+      "type": "messagebus",
+      "label": "Ledger",
+      "sublabel": "tried here before",
+      "tag": "run:",
+      "stage": 0,
+      "row": 2,
+      "width": 96,
+      "yOffset": -58
+    },
+    {
+      "id": "skills",
+      "type": "database",
+      "label": "Skill Registry",
+      "sublabel": "ranked offer",
+      "tag": "policy:",
+      "stage": 0,
+      "row": 3,
+      "width": 96,
+      "yOffset": -87
+    },
+    {
+      "id": "repo",
+      "type": "database",
+      "label": "Repository",
+      "sublabel": "churn + reverts",
+      "tag": "file:",
+      "stage": 0,
+      "row": 4,
+      "width": 96,
+      "yOffset": -116
+    },
+    {
+      "id": "builders",
+      "type": "backend",
+      "label": "Section builders",
+      "sublabel": "no model needed",
+      "tag": "cited",
+      "stage": 1,
+      "row": 2,
+      "width": 96,
+      "yOffset": -58
+    },
+    {
+      "id": "budget",
+      "type": "security",
+      "label": "Token budget",
+      "sublabel": "role weights",
+      "tag": "per section",
+      "stage": 2,
+      "row": 2,
+      "width": 96,
+      "yOffset": -58
+    },
+    {
+      "id": "pack",
+      "type": "backend",
+      "label": "Awareness Pack",
+      "sublabel": "ten cited sections",
+      "tag": "budgeted",
+      "stage": 3,
+      "row": 2,
+      "width": 96,
+      "yOffset": -58
+    },
+    {
+      "id": "model",
+      "type": "backend",
+      "label": "Turn loop",
+      "sublabel": "the current tier",
+      "tag": "untrusted marked",
+      "stage": 4,
+      "row": 1,
+      "width": 96,
+      "yOffset": -29
+    },
+    {
+      "id": "digest",
+      "type": "messagebus",
+      "label": "pack.assembled",
+      "sublabel": "digest + tokens",
+      "tag": "sha-256",
+      "stage": 4,
+      "row": 3,
+      "width": 96,
+      "yOffset": -87
+    }
+  ],
+  "flows": [
+    {
+      "id": "spec-in",
+      "from": "spec",
+      "to": "builders",
+      "label": "spec slice",
+      "variant": "default",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [
+        [
+          258,
+          157
+        ],
+        [
+          258,
+          327
+        ]
+      ],
+      "labelAt": [
+        197,
+        157
+      ]
+    },
+    {
+      "id": "memory-in",
+      "from": "memory",
+      "to": "builders",
+      "label": "canon lane",
+      "variant": "security",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [
+        [
+          248,
+          242
+        ],
+        [
+          248,
+          327
+        ]
+      ],
+      "labelAt": [
+        197,
+        242
+      ]
+    },
+    {
+      "id": "precedent-in",
+      "from": "precedent",
+      "to": "builders",
+      "label": "precedent",
+      "variant": "emphasis",
+      "labelAt": [
+        196,
+        327
+      ]
+    },
+    {
+      "id": "skills-in",
+      "from": "skills",
+      "to": "builders",
+      "label": "skills",
+      "variant": "default",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [
+        [
+          248,
+          412
+        ],
+        [
+          248,
+          327
+        ]
+      ],
+      "labelAt": [
+        197,
+        412
+      ]
+    },
+    {
+      "id": "repo-in",
+      "from": "repo",
+      "to": "builders",
+      "label": "code shape",
+      "variant": "default",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [
+        [
+          258,
+          497
+        ],
+        [
+          258,
+          327
+        ]
+      ],
+      "labelAt": [
+        197,
+        497
+      ]
+    },
+    {
+      "id": "sections",
+      "from": "builders",
+      "to": "budget",
+      "label": "ten sections",
+      "variant": "emphasis"
+    },
+    {
+      "id": "trimmed",
+      "from": "budget",
+      "to": "pack",
+      "label": "trimmed to fit",
+      "variant": "emphasis"
+    },
+    {
+      "id": "to-model",
+      "from": "pack",
+      "to": "model",
+      "label": "awareness",
+      "variant": "emphasis"
+    },
+    {
+      "id": "to-ledger",
+      "from": "pack",
+      "to": "digest",
+      "label": "digest",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "The budget is a property of the pack",
+      "items": [
+        "Each section is given a share of the budget chosen by the agent's role",
+        "Overflow drops whole items from the tail, never half an item",
+        "Mission, contract and toolbelt keep a protected floor, and a trim is announced"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Cited, or absent",
+      "items": [
+        "Every item carries a citation kind and a resolvable reference",
+        "An item without one is dropped rather than shown",
+        "An unavailable source degrades one section with a stated reason"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Digested, so two packs can be compared",
+      "items": [
+        "The digest covers the notices plus everything the pack renders",
+        "It is appended to the ledger with the token count",
+        "Identical inputs over the same snapshot produce an identical pack"
+      ]
+    }
+  ]
+}

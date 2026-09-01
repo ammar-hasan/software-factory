@@ -1,0 +1,387 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Software Factory \u2014 definition, harness, executors, and one ledger",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1200,
+      650
+    ]
+  },
+  "components": [
+    {
+      "id": "policy",
+      "type": "security",
+      "label": "policy/",
+      "sublabel": "stages, gates, budgets",
+      "pos": [
+        40,
+        48
+      ],
+      "size": [
+        170,
+        58
+      ]
+    },
+    {
+      "id": "factory",
+      "type": "external",
+      "label": "factory.yaml",
+      "sublabel": "repositories, tiers, workers",
+      "pos": [
+        40,
+        150
+      ],
+      "size": [
+        170,
+        58
+      ]
+    },
+    {
+      "id": "agents",
+      "type": "external",
+      "label": "agents/*/agent.md",
+      "sublabel": "config + role prompt",
+      "pos": [
+        40,
+        240
+      ],
+      "size": [
+        170,
+        58
+      ]
+    },
+    {
+      "id": "stagemachine",
+      "type": "backend",
+      "label": "Stage machine",
+      "sublabel": "bounded routing authority",
+      "pos": [
+        250,
+        46
+      ],
+      "size": [
+        150,
+        62
+      ]
+    },
+    {
+      "id": "coordinator",
+      "type": "backend",
+      "label": "Coordinator",
+      "sublabel": "one stage at a time",
+      "pos": [
+        250,
+        148
+      ],
+      "size": [
+        150,
+        62
+      ]
+    },
+    {
+      "id": "pack",
+      "type": "backend",
+      "label": "Pack assembly",
+      "sublabel": "budgeted, cited, digested",
+      "pos": [
+        440,
+        148
+      ],
+      "size": [
+        150,
+        62
+      ]
+    },
+    {
+      "id": "loop",
+      "type": "backend",
+      "label": "Turn loop",
+      "sublabel": "budgets, repair, escalation",
+      "pos": [
+        630,
+        148
+      ],
+      "size": [
+        150,
+        62
+      ]
+    },
+    {
+      "id": "tools",
+      "type": "security",
+      "label": "Tool registry",
+      "sublabel": "typed, default-deny grants",
+      "pos": [
+        820,
+        148
+      ],
+      "size": [
+        150,
+        62
+      ]
+    },
+    {
+      "id": "executors",
+      "type": "cloud",
+      "label": "Executors",
+      "sublabel": "local, container, ssh-worker",
+      "tag": "parity suite",
+      "pos": [
+        1010,
+        148
+      ],
+      "size": [
+        150,
+        62
+      ]
+    },
+    {
+      "id": "ledger",
+      "type": "database",
+      "label": "Ledger",
+      "sublabel": "append-only, hash-chained, tamper-evident",
+      "tag": "the single source of truth",
+      "pos": [
+        250,
+        380
+      ],
+      "size": [
+        910,
+        78
+      ]
+    },
+    {
+      "id": "dash",
+      "type": "frontend",
+      "label": "Dashboard",
+      "sublabel": "sf dash, local",
+      "pos": [
+        420,
+        530
+      ],
+      "size": [
+        170,
+        58
+      ]
+    },
+    {
+      "id": "metrics",
+      "type": "backend",
+      "label": "Metrics",
+      "sublabel": "measures folded per window",
+      "pos": [
+        650,
+        530
+      ],
+      "size": [
+        170,
+        58
+      ]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "HTTP API",
+      "sublabel": "sf api, authenticated",
+      "pos": [
+        880,
+        530
+      ],
+      "size": [
+        170,
+        58
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Definition \u2014 a run reads it and may not write it",
+      "wraps": [
+        "policy",
+        "factory",
+        "agents"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "Loom harness",
+      "wraps": [
+        "pack",
+        "loop",
+        "tools"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "Folded from the ledger",
+      "wraps": [
+        "dash",
+        "metrics",
+        "api"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "policy-stages",
+      "from": "policy",
+      "to": "stagemachine",
+      "label": "stages, gates, budgets",
+      "labelAt": [
+        200,
+        132
+      ]
+    },
+    {
+      "id": "factory-coord",
+      "from": "factory",
+      "to": "coordinator"
+    },
+    {
+      "id": "agents-coord",
+      "from": "agents",
+      "to": "coordinator",
+      "label": "role prompt, tier, grants",
+      "labelAt": [
+        230,
+        225
+      ]
+    },
+    {
+      "id": "coord-stages",
+      "from": "coordinator",
+      "to": "stagemachine",
+      "label": "advance, or refuse",
+      "variant": "emphasis",
+      "labelAt": [
+        325,
+        133
+      ]
+    },
+    {
+      "id": "coord-pack",
+      "from": "coordinator",
+      "to": "pack",
+      "label": "role, stage, change surface",
+      "variant": "emphasis",
+      "labelAt": [
+        420,
+        245
+      ]
+    },
+    {
+      "id": "pack-loop",
+      "from": "pack",
+      "to": "loop",
+      "label": "budgeted, cited sections",
+      "variant": "emphasis",
+      "labelAt": [
+        610,
+        245
+      ]
+    },
+    {
+      "id": "loop-tools",
+      "from": "loop",
+      "to": "tools",
+      "label": "tool call, checked against grants",
+      "variant": "emphasis",
+      "labelAt": [
+        800,
+        245
+      ]
+    },
+    {
+      "id": "tools-exec",
+      "from": "tools",
+      "to": "executors",
+      "label": "exec inside the sandbox",
+      "variant": "security",
+      "labelAt": [
+        990,
+        245
+      ]
+    },
+    {
+      "id": "coord-ledger",
+      "from": "coordinator",
+      "to": "ledger",
+      "label": "every entry, hash-chained",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        325,
+        310
+      ]
+    },
+    {
+      "id": "ledger-pack",
+      "from": "ledger",
+      "to": "pack",
+      "label": "precedent and hazards",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelAt": [
+        515,
+        340
+      ]
+    },
+    {
+      "id": "ledger-metrics",
+      "from": "ledger",
+      "to": "metrics",
+      "label": "folded into measures",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        735,
+        494
+      ]
+    },
+    {
+      "id": "metrics-dash",
+      "from": "metrics",
+      "to": "dash"
+    },
+    {
+      "id": "metrics-api",
+      "from": "metrics",
+      "to": "api"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "One writer, many readers",
+      "items": [
+        "The coordinator is the only component that appends to the ledger",
+        "The harness takes a callback instead of a ledger handle, because it also runs in tests, in replay and in the parity suite",
+        "Entries are hash-chained and never rewritten, so a run replays from them"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Nothing observable is computed twice",
+      "items": [
+        "Metrics are folded from ledger entries over a window",
+        "The dashboard and the authenticated HTTP API serve the same numbers",
+        "A measure with no integration behind it is unavailable with a reason, never zero"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "The definition is read, never written",
+      "items": [
+        "factory.yaml, the agents and the policy files are inputs the execution plane cannot write",
+        "Grants are default-deny and an ungranted call is a recorded violation",
+        "Changing what the factory does is a change you can review, diff and revert"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,274 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Stage Machine \u2014 a work item from intake to handoff",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    {
+      "id": "design_lane",
+      "label": "Design \u2014 feature and refactor work only"
+    },
+    {
+      "id": "flow",
+      "label": "Work item"
+    },
+    {
+      "id": "gates",
+      "label": "Gates between stages"
+    },
+    {
+      "id": "stopped",
+      "label": "Blocked",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "understand",
+      "label": "Understand",
+      "fromCol": 0,
+      "toCol": 2
+    },
+    {
+      "id": "make",
+      "label": "Build and prove",
+      "fromCol": 3,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "deliver",
+      "label": "Hand off",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "groups": [
+    {
+      "id": "gate_band",
+      "label": "Severity block \u2014 the item does not advance",
+      "lane": "gates",
+      "fromCol": 3,
+      "toCol": 4,
+      "variant": "security"
+    }
+  ],
+  "mainPath": [
+    "intake",
+    "triage",
+    "design",
+    "build",
+    "review",
+    "handoff"
+  ],
+  "semanticChecks": {
+    "allowedRoots": [
+      "intake"
+    ],
+    "allowedTerminals": [
+      "handoff",
+      "blocked"
+    ],
+    "requiredPaths": [
+      {
+        "from": "intake",
+        "to": "handoff"
+      },
+      {
+        "from": "intake",
+        "to": "blocked"
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "id": "intake",
+      "lane": "flow",
+      "col": 0,
+      "type": "external",
+      "label": "INTAKE",
+      "sublabel": "request accepted",
+      "width": 140
+    },
+    {
+      "id": "triage",
+      "lane": "flow",
+      "col": 1,
+      "type": "backend",
+      "label": "TRIAGE",
+      "sublabel": "work class + surface",
+      "width": 140
+    },
+    {
+      "id": "design",
+      "lane": "design_lane",
+      "col": 2,
+      "type": "backend",
+      "label": "DESIGN",
+      "sublabel": "architect agent",
+      "tag": "conditional",
+      "width": 140
+    },
+    {
+      "id": "build",
+      "lane": "flow",
+      "col": 3,
+      "type": "backend",
+      "label": "BUILD",
+      "sublabel": "builder agent",
+      "width": 140
+    },
+    {
+      "id": "review",
+      "lane": "flow",
+      "col": 4,
+      "type": "backend",
+      "label": "REVIEW",
+      "sublabel": "critic agent",
+      "width": 140
+    },
+    {
+      "id": "handoff",
+      "lane": "flow",
+      "col": 5,
+      "type": "external",
+      "label": "HANDOFF",
+      "sublabel": "a human reads it next",
+      "width": 140
+    },
+    {
+      "id": "gate_build",
+      "lane": "gates",
+      "col": 3,
+      "type": "security",
+      "label": "Build gates",
+      "sublabel": "regression-proven",
+      "tag": "blocks",
+      "width": 140
+    },
+    {
+      "id": "gate_review",
+      "lane": "gates",
+      "col": 4,
+      "type": "security",
+      "label": "Review gates",
+      "sublabel": "evidence-complete",
+      "tag": "blocks",
+      "width": 140
+    },
+    {
+      "id": "blocked",
+      "lane": "stopped",
+      "col": 4,
+      "type": "security",
+      "label": "BLOCKED",
+      "sublabel": "the action that clears it",
+      "width": 140
+    }
+  ],
+  "edges": [
+    {
+      "id": "intake-triage",
+      "from": "intake",
+      "to": "triage",
+      "variant": "emphasis"
+    },
+    {
+      "id": "triage-design",
+      "from": "triage",
+      "to": "design",
+      "label": "feature or refactor",
+      "variant": "default",
+      "role": "branch"
+    },
+    {
+      "id": "design-build",
+      "from": "design",
+      "to": "build",
+      "variant": "emphasis"
+    },
+    {
+      "id": "triage-build",
+      "from": "triage",
+      "to": "build",
+      "label": "defect: DESIGN skipped",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "build-review",
+      "from": "build",
+      "to": "review",
+      "label": "build gates pass",
+      "variant": "emphasis"
+    },
+    {
+      "id": "review-handoff",
+      "from": "review",
+      "to": "handoff",
+      "label": "review gates pass",
+      "variant": "emphasis"
+    },
+    {
+      "id": "build-evidence",
+      "from": "build",
+      "to": "gate_build",
+      "label": "evidence bundle",
+      "variant": "default"
+    },
+    {
+      "id": "review-evidence",
+      "from": "review",
+      "to": "gate_review",
+      "label": "evidence bundle",
+      "variant": "default"
+    },
+    {
+      "id": "build-blocked",
+      "from": "gate_build",
+      "to": "blocked",
+      "label": "a gate blocks",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "review-blocked",
+      "from": "gate_review",
+      "to": "blocked",
+      "variant": "security",
+      "role": "error"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Gates sit between stages",
+      "items": [
+        "Build: regression-proven, tests-pass, build-green, secret-clean",
+        "Review: evidence-complete, independent-review, delta-present, spec-agreement",
+        "A gate that cannot run reports error, and error is not pass"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Blocked is a stop with an address",
+      "items": [
+        "Every blocker carries the exact action that would clear it",
+        "A blocker with no action is refused by the stage machine",
+        "The run's own failure outranks any gate finding when naming the action"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "The path is the shortest one policy allows",
+      "items": [
+        "Defect-class work goes TRIAGE to BUILD; DESIGN is skipped",
+        "Feature and refactor work passes through DESIGN",
+        "REVIEW is never skipped, and every path ends at HANDOFF"
+      ]
+    }
+  ]
+}

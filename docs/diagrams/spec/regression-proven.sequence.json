@@ -1,0 +1,188 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "regression-proven \u2014 the fix must fail at the parent, for the right reason",
+    "quality_profile": "showcase",
+    "column_fit": "spread",
+    "viewBox": [
+      1060,
+      586
+    ]
+  },
+  "participants": [
+    {
+      "id": "item",
+      "type": "external",
+      "label": "Work item",
+      "sublabel": "defect class"
+    },
+    {
+      "id": "coord",
+      "type": "backend",
+      "label": "Coordinator",
+      "sublabel": "runs validation"
+    },
+    {
+      "id": "tip",
+      "type": "database",
+      "label": "Tip tree",
+      "sublabel": "the run's changes"
+    },
+    {
+      "id": "parent",
+      "type": "database",
+      "label": "Parent worktree",
+      "sublabel": "detached, code only"
+    },
+    {
+      "id": "gate",
+      "type": "security",
+      "label": "regression-proven",
+      "sublabel": "the keystone gate"
+    }
+  ],
+  "segments": [
+    {
+      "from": 150,
+      "to": 286,
+      "label": "The fix arrives"
+    },
+    {
+      "from": 302,
+      "to": 414,
+      "label": "Two commits, two real runs"
+    },
+    {
+      "from": 430,
+      "to": 470,
+      "label": "Refused \u2014 the wrong kind of failure"
+    },
+    {
+      "from": 478,
+      "to": 522,
+      "label": "Proven \u2014 the right kind"
+    }
+  ],
+  "messages": [
+    {
+      "id": "arrives",
+      "from": "item",
+      "to": "coord",
+      "y": 190,
+      "label": "defect fix, with a new test",
+      "variant": "emphasis"
+    },
+    {
+      "id": "run-tip",
+      "from": "coord",
+      "to": "tip",
+      "y": 226,
+      "label": "run the suite where the work stands",
+      "variant": "default"
+    },
+    {
+      "id": "tip-result",
+      "from": "tip",
+      "to": "coord",
+      "y": 262,
+      "label": "the new test passes",
+      "variant": "return"
+    },
+    {
+      "id": "checkout",
+      "from": "coord",
+      "to": "parent",
+      "y": 320,
+      "label": "check out the parent, carry the new tests",
+      "variant": "security"
+    },
+    {
+      "id": "parent-result",
+      "from": "parent",
+      "to": "coord",
+      "y": 356,
+      "label": "the new test fails",
+      "variant": "return"
+    },
+    {
+      "id": "evaluate",
+      "from": "coord",
+      "to": "gate",
+      "y": 392,
+      "label": "per-test outcome and failure class",
+      "variant": "emphasis"
+    },
+    {
+      "id": "refuse",
+      "from": "gate",
+      "to": "item",
+      "y": 452,
+      "label": "refused: ImportError, not behaviour",
+      "variant": "security"
+    },
+    {
+      "id": "prove",
+      "from": "gate",
+      "to": "item",
+      "y": 500,
+      "label": "proven: an assertion failure at the parent",
+      "variant": "emphasis"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "coord",
+      "from": 185,
+      "to": 398,
+      "type": "backend"
+    },
+    {
+      "participant": "tip",
+      "from": 221,
+      "to": 268,
+      "type": "database"
+    },
+    {
+      "participant": "parent",
+      "from": 315,
+      "to": 362,
+      "type": "database"
+    },
+    {
+      "participant": "gate",
+      "from": 387,
+      "to": 514,
+      "type": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Two checkouts, deliberately",
+      "items": [
+        "The gate needs per-test resolution at two commits, so the suite runs twice",
+        "The parent runs in its own detached worktree; the live tree is never touched",
+        "The tip's tests are carried over the parent's code: new test, old code"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "The failure class is the gate",
+      "items": [
+        "Only an assertion about behaviour counts as proof",
+        "Import, collection, fixture, timeout and crash failures are not behavioural proof",
+        "An assertion that a name merely exists is carved out for the same reason"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "What it refuses, and what it does not",
+      "items": [
+        "At least one new test must fail behaviourally at the parent",
+        "Invariants that pass before and after are allowed alongside it",
+        "A parent that cannot be resolved is an error, which is not a pass"
+      ]
+    }
+  ]
+}

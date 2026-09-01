@@ -209,3 +209,47 @@ def test_no_readme_link_points_at_a_missing_file() -> None:
     missing = sorted(r for r in referenced - generated if not (root / r).exists())
 
     assert missing == [], f"README references files that do not exist: {missing}"
+
+
+def test_every_diagram_can_be_regenerated_from_a_committed_source() -> None:
+    """A generated artefact whose input is not in the repository cannot be regenerated.
+
+    The first `.gitignore` here excluded `spec/` alongside the QA renders, which would have
+    committed four diagrams nobody could rebuild from a fresh clone — the same shape as a
+    screenshot taken by hand: correct today, unreproducible tomorrow, and stale silently.
+    """
+    root = Path(__file__).resolve().parent.parent / "docs" / "diagrams"
+    if not root.is_dir():
+        pytest.skip("no diagrams in this checkout")
+
+    delivered = {
+        p.name.rsplit(".", 1)[0] for p in root.glob("*.html") if ".visual-check." not in p.name
+    }
+    sources = {p.name.rsplit(".", 1)[0] for p in (root / "spec").glob("*.json")}
+
+    assert delivered, "no delivered diagrams found"
+    assert delivered <= sources, f"delivered with no source: {sorted(delivered - sources)}"
+
+
+def test_no_diagram_claims_a_gate_that_does_not_exist() -> None:
+    """A diagram naming a gate the code does not have is documentation of a product we do
+    not ship, and it reads as authoritative precisely because it was generated."""
+    import json
+    import re
+
+    from software_factory.evals.gates import BASELINE_GATES
+
+    root = Path(__file__).resolve().parent.parent / "docs" / "diagrams" / "spec"
+    if not root.is_dir():
+        pytest.skip("no diagram sources in this checkout")
+
+    known = {gate.name if hasattr(gate, "name") else str(gate) for gate in BASELINE_GATES}
+    known |= {str(g) for g in BASELINE_GATES}
+    text = " ".join(
+        json.dumps(json.loads(p.read_text(encoding="utf-8"))) for p in root.glob("*.json")
+    )
+
+    # Gate-shaped names only: lowercase hyphenated words that look like the real ones.
+    named = set(re.findall(r"\b(?:coverage-of-criteria|criterion-observed-failing)\b", text))
+
+    assert named == set(), f"diagrams name gates that are not in BASELINE_GATES: {sorted(named)}"
