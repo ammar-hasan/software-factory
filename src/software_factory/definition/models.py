@@ -90,6 +90,15 @@ class Effect(enum.StrEnum):
     EXEC = "exec"
     NETWORK = "network"
     EXTERNAL = "external"
+    UI = "ui"
+    """Driving a browser or desktop session.
+
+    Its own class because it is neither a read nor an exec, and an effect model that
+    cannot express it has a hole in the middle of it. A UI session can click "delete" —
+    that is not a read. It reaches the network without any of the tools the network policy
+    inspects, and it types wherever it is pointed, so a run holding one has a blast radius
+    the path-based contract cannot describe. FR-22.3 promised this capability and nothing
+    behind it existed: no tool, no grant, no session contract."""
 
 
 class NetworkPolicy(enum.StrEnum):

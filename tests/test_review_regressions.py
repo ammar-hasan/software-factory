@@ -2225,24 +2225,58 @@ def test_m19_an_unrecognised_tool_makes_the_audit_silent_not_confident() -> None
 
 def test_m19_the_effect_table_matches_the_registry_it_describes(tmp_path: Path) -> None:
     """A static audit answered from a hand-maintained list would drift from the registry.
-    The table is the registry's own source, so this asserts they cannot disagree."""
+    The table is the registry's own source, so this asserts they cannot disagree.
+
+    Checked in both directions, because they fail differently. A tool the registry offers
+    and the table does not know is invisible to `sf audit` -- a capability with no declared
+    effect, which is the worse of the two. A table entry nothing ever registers is a
+    capability the documentation claims and the product does not have.
+
+    The second direction has to consider *every* configuration: computer use is granted
+    rather than default, so a registry built without a session legitimately lacks it.
+    """
     from software_factory.runtime.executor import LocalExecutor, SandboxLevel, SandboxPolicy
     from software_factory.runtime.tools import BUILTIN_TOOL_EFFECTS, build_registry
+    from software_factory.runtime.ui import UiContract, UiSession
     from software_factory.runtime.workspace import Workspace
 
     workspace = Workspace(root=tmp_path, run_id="run-1", base_commit="deadbeef")
-    registry = build_registry(
-        workspace,
-        LocalExecutor(SandboxPolicy(workspace=tmp_path), level=SandboxLevel.PROCESS),
-    )
 
-    registered = {
+    def registry(with_ui: bool):
+        return build_registry(
+            workspace,
+            LocalExecutor(SandboxPolicy(workspace=tmp_path), level=SandboxLevel.PROCESS),
+            ui_session=(
+                UiSession(
+                    contract=UiContract(
+                        origins=frozenset({"https://x.test"}), record_to=tmp_path / "rec.json"
+                    ),
+                    driver=object(),
+                )
+                if with_ui
+                else None
+            ),
+        )
+
+    # Nothing is offered whose effect the table does not declare.
+    for with_ui in (False, True):
+        for name in ("repo.read", "file.write", "proc.run", "ui.navigate", "ui.type"):
+            tool = registry(with_ui).get(name)
+            if tool is None:
+                continue
+            assert tool.effect is BUILTIN_TOOL_EFFECTS[name], name
+
+    # And nothing the table declares goes unregistered by every configuration.
+    everything = registry(True)
+    unregistered = sorted(n for n in BUILTIN_TOOL_EFFECTS if everything.get(n) is None)
+    assert unregistered == [], unregistered
+
+    registered_effects = {
         name: tool.effect
         for name in BUILTIN_TOOL_EFFECTS
-        if (tool := registry.get(name)) is not None
+        if (tool := everything.get(name)) is not None
     }
-
-    assert registered == BUILTIN_TOOL_EFFECTS
+    assert registered_effects == BUILTIN_TOOL_EFFECTS
 
 
 # --------------------------------------------------------------------------------- M26

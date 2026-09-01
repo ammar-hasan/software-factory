@@ -26,6 +26,7 @@ from software_factory.harness.tools import (
     CostClass,
     Example,
     FailureKind,
+    Handler,
     Tool,
     ToolFailure,
     ToolRegistry,
@@ -54,6 +55,14 @@ BUILTIN_TOOL_EFFECTS: dict[str, Effect] = {
     "proc.run": Effect.EXEC,
     "checkpoint.create": Effect.WRITE,
     "checkpoint.restore": Effect.WRITE,
+    # Computer use. Declared here like everything else so the grant model covers it and
+    # `sf audit` cannot disagree with the running registry. They are `UI` rather than
+    # `EXEC` because a run that may run tests must not thereby be able to click "delete".
+    "ui.navigate": Effect.UI,
+    "ui.click": Effect.UI,
+    "ui.type": Effect.UI,
+    "ui.observe": Effect.UI,
+    "ui.close": Effect.UI,
 }
 
 
@@ -86,9 +95,19 @@ def _safe_path(workspace: Workspace, relative: str) -> Path | None:
 
 
 def build_registry(
-    workspace: Workspace, executor: LocalExecutor, *, test_command: list[str] | None = None
+    workspace: Workspace,
+    executor: LocalExecutor,
+    *,
+    test_command: list[str] | None = None,
+    ui_session: Any = None,
 ) -> ToolRegistry:
-    """Register the baseline toolbelt against one workspace."""
+    """Register the baseline toolbelt against one workspace.
+
+    `ui_session` is absent for almost every run. Computer use is a granted capability
+    rather than a default one: a run that does not need a browser must not be offered a
+    tool that can click "delete", and offering it and relying on the grant check to refuse
+    would put the capability in the pack for a model to reason about.
+    """
     registry = ToolRegistry()
 
     # ------------------------------------------------------------------ read tools
@@ -415,6 +434,11 @@ def build_registry(
         )
     )
 
+    # ------------------------------------------------------------------- computer use
+
+    if ui_session is not None:
+        _register_ui(registry, ui_session)
+
     return registry
 
 
@@ -502,4 +526,114 @@ def parse_pytest(output: str, command: list[str], commit: str) -> TestRun:
         commit=commit,
         exit_code=0 if not any(r.outcome is Outcome.FAILED for r in results.values()) else 1,
         results=list(results.values()),
+    )
+
+
+def _register_ui(registry: ToolRegistry, session: Any) -> None:
+    """Expose one UI session as tools.
+
+    Every refusal lives in the session's contract rather than here, so a second driver or a
+    second caller cannot arrive without them. These handlers translate, and translate only.
+    """
+    from software_factory.runtime.ui import UiError, UiUnavailableError
+
+    def guarded(action: Any) -> Handler:
+        def handler(args: dict[str, Any]) -> ToolResult:
+            try:
+                return ToolSuccess(value=action(args))
+            except UiError as exc:
+                # DENIED, not an error: the contract said no, and the agent should read that
+                # as a boundary rather than as something to retry differently.
+                return ToolFailure(FailureKind.DENIED, str(exc), remediation=exc.remediation)
+            except UiUnavailableError as exc:
+                return ToolFailure(FailureKind.UNAVAILABLE, str(exc), remediation=exc.remediation)
+
+        return handler
+
+    registry.register(
+        Tool(
+            name="ui.navigate",
+            description="Open a URL in the session's browser. Only declared origins.",
+            effect=Effect.UI,
+            input_schema={
+                "type": "object",
+                "properties": {"url": {"type": "string"}},
+                "required": ["url"],
+            },
+            output_schema={"type": "object"},
+            handler=guarded(lambda a: session.navigate(str(a["url"]))),
+            examples=(Example(inputs={"url": "https://docs.example.test/csv"}, output="{}"),),
+            idempotent=False,
+        )
+    )
+    registry.register(
+        Tool(
+            name="ui.click",
+            description="Click an element by CSS selector.",
+            effect=Effect.UI,
+            input_schema={
+                "type": "object",
+                "properties": {"selector": {"type": "string"}},
+                "required": ["selector"],
+            },
+            output_schema={"type": "object"},
+            handler=guarded(lambda a: session.click(str(a["selector"]))),
+            examples=(Example(inputs={"selector": "#submit"}, output="{}"),),
+            idempotent=False,
+        )
+    )
+    registry.register(
+        Tool(
+            name="ui.type",
+            description=(
+                "Type text into an element. Text matching a secret this run holds is "
+                "refused, whatever the field is called."
+            ),
+            effect=Effect.UI,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "selector": {"type": "string"},
+                    "text": {"type": "string"},
+                    # Declared rather than inferred from the field name. A model claiming
+                    # it is signing in is checked against the grant; one that does not
+                    # claim it cannot sign in by choosing a field called `#password`.
+                    "authenticating": {"type": "boolean"},
+                },
+                "required": ["selector", "text"],
+            },
+            output_schema={"type": "object"},
+            handler=guarded(
+                lambda a: session.type(
+                    str(a["selector"]),
+                    str(a["text"]),
+                    authenticating=bool(a.get("authenticating", False)),
+                )
+            ),
+            examples=(Example(inputs={"selector": "#q", "text": "byte order mark"}, output="{}"),),
+            idempotent=False,
+        )
+    )
+    registry.register(
+        Tool(
+            name="ui.observe",
+            description="Read the current page. Counted against the session's action bound.",
+            effect=Effect.UI,
+            input_schema={"type": "object", "properties": {}},
+            output_schema={"type": "object"},
+            handler=guarded(lambda _a: session.observe()),
+            examples=(Example(inputs={}, output="{}"),),
+        )
+    )
+    registry.register(
+        Tool(
+            name="ui.close",
+            description="Close the session and write its recording.",
+            effect=Effect.UI,
+            input_schema={"type": "object", "properties": {}},
+            output_schema={"type": "object"},
+            handler=guarded(lambda _a: session.close()),
+            examples=(Example(inputs={}, output="{}"),),
+            idempotent=False,
+        )
     )

@@ -19,3 +19,8 @@ and the running registry cannot disagree.
 | `repo.search` | `read` |
 | `repo.tree` | `read` |
 | `test.run` | `exec` |
+| `ui.click` | `ui` |
+| `ui.close` | `ui` |
+| `ui.navigate` | `ui` |
+| `ui.observe` | `ui` |
+| `ui.type` | `ui` |
