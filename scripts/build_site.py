@@ -308,6 +308,21 @@ def link(href: str) -> str:
     return html.escape(href)
 
 
+#: The film, embedded at the top of the overview page only.
+#:
+#: `preload="none"` and no autoplay: a six-megabyte download nobody asked for is a worse
+#: first impression than no video, and a page that starts making noise is worse still.
+#: Captions are a track rather than burned-in-only, so the film is readable with sound off
+#: and searchable by anything that reads the page.
+FILM = """<video controls preload="none" poster="images/dashboard-overview.png"
+  style="width:100%;border-radius:10px;border:1px solid var(--rule);margin:0 0 26px">
+  <source src="video/software-factory.mp4" type="video/mp4">
+  <track kind="captions" src="video/software-factory.vtt" srclang="en" label="English" default>
+  Your browser cannot play this video.
+  <a href="video/software-factory.mp4">Download it instead.</a>
+</video>"""
+
+
 def shell(page: Page, body: str, pages: tuple[Page, ...]) -> str:
     nav = [
         '<a class="brand" href="index.html">Software Factory</a>',
@@ -323,6 +338,11 @@ def shell(page: Page, body: str, pages: tuple[Page, ...]) -> str:
     nav.append('<a href="contributing.html">Contributing</a>')
     nav.append('<a href="security.html">Security</a>')
 
+    film = (
+        FILM
+        if page.slug == "index" and (ROOT / "docs" / "video" / "software-factory.mp4").is_file()
+        else ""
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -336,6 +356,7 @@ def shell(page: Page, body: str, pages: tuple[Page, ...]) -> str:
 <div class="shell">
 <nav>{"".join(nav)}</nav>
 <main>
+{film}
 {body}
 <div class="footer">
 Generated from the repository by <code>scripts/build_site.py</code>.
@@ -369,6 +390,18 @@ def main() -> int:
     images = ROOT / "docs" / "images"
     if images.is_dir():
         shutil.copytree(images, out / "images")
+
+    # The film, if it has been rendered. Copied rather than linked to the repository,
+    # because a page that plays a video from a raw GitHub URL stops playing the moment the
+    # branch is renamed -- and the site is the one place the film is actually watchable.
+    film = ROOT / "docs" / "video" / "software-factory.mp4"
+    if film.is_file():
+        (out / "video").mkdir(exist_ok=True)
+        shutil.copy2(film, out / "video" / film.name)
+        for sidecar in ("software-factory.srt", "software-factory.vtt"):
+            captions = film.parent / sidecar
+            if captions.is_file():
+                shutil.copy2(captions, out / "video" / sidecar)
 
     # No Jekyll: the site is already HTML, and Jekyll would try to process it and drop
     # anything in a directory beginning with an underscore.

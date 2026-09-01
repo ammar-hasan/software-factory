@@ -124,3 +124,43 @@ def test_the_site_builds(tmp_path: Path) -> None:
     index = (out / "index.html").read_text(encoding="utf-8")
     assert "<title>Software Factory</title>" in index
     assert 'href="cli.html"' in index
+
+
+def test_the_film_appears_on_the_overview_and_nowhere_else(tmp_path: Path) -> None:
+    """A video embedded on every page is a six-megabyte element on thirteen pages nobody
+    came to watch it on. The site is the one place the film is actually playable, and the
+    overview is the one page somebody arrives at wanting to see what this is."""
+    out = tmp_path / "_site"
+    subprocess.run(
+        [sys.executable, "scripts/build_site.py", "--out", str(out)],
+        cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True,
+        check=True,
+    )
+
+    film = Path(__file__).resolve().parent.parent / "docs" / "video" / "software-factory.mp4"
+    if not film.is_file():
+        pytest.skip("the film has not been rendered in this checkout")
+
+    assert "<video" in (out / "index.html").read_text(encoding="utf-8")
+    assert "<video" not in (out / "cli.html").read_text(encoding="utf-8")
+    assert (out / "video" / "software-factory.mp4").is_file()
+    assert (out / "video" / "software-factory.vtt").is_file(), "captions must ship with it"
+
+
+def test_the_film_does_not_autoplay(tmp_path: Path) -> None:
+    """A six-megabyte download nobody asked for is a worse first impression than no video,
+    and a page that starts making noise is worse still."""
+    out = tmp_path / "_site"
+    subprocess.run(
+        [sys.executable, "scripts/build_site.py", "--out", str(out)],
+        cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True,
+        check=True,
+    )
+    index = (out / "index.html").read_text(encoding="utf-8")
+
+    if "<video" not in index:
+        pytest.skip("the film has not been rendered in this checkout")
+    assert "autoplay" not in index
+    assert 'preload="none"' in index
