@@ -3422,3 +3422,219 @@ def main() -> None:
 
 if __name__ == "__main__":  # pragma: no cover
     main()
+
+
+agent_app = typer.Typer(
+    help="Messages between agents, and what each run is doing.", no_args_is_help=True
+)
+app.add_typer(agent_app, name="agent")
+
+
+def _mailbox(state: Path):  # type: ignore[no-untyped-def]
+    """The factory's mailbox, or a usable error saying which factory has none.
+
+    Refuses to create the ledger. A mailbox conjured on an empty directory answers every
+    question with "no messages", which reads identically to a healthy fleet and is the one
+    answer an operator must never be given by mistake.
+    """
+    from software_factory.ledger import Ledger
+    from software_factory.orchestrator.mailbox import Mailbox
+
+    path = state / "ledger.jsonl"
+    if not path.exists():
+        console.print(f"[red]no ledger at {path}[/]")
+        console.print("[dim]Run something first, or point --state at the factory that did.[/]")
+        raise typer.Exit(EXIT_UNUSABLE)
+    return Mailbox(ledger=Ledger(path), state_dir=state)
+
+
+@agent_app.command("send")
+def agent_send(
+    recipient: Annotated[str, typer.Argument(help="The agent to address.")],
+    body: Annotated[str, typer.Argument(help="What to tell them.")],
+    kind: Annotated[
+        str, typer.Option("--kind", help="status, question, answer, result, blocked or handoff.")
+    ] = "status",
+    sender: Annotated[
+        str, typer.Option("--from", help="Who is sending. Defaults to `operator`.")
+    ] = "operator",
+    in_reply_to: Annotated[
+        int, typer.Option("--reply-to", help="The sequence number this answers.")
+    ] = 0,
+    state: Annotated[
+        Path, typer.Option("--state", help="Where run state and the ledger live.")
+    ] = Path(".factory"),
+    as_json: JsonOpt = False,
+) -> None:
+    """Address one agent. The message reaches it at the start of its next run.
+
+    Not a broadcast. An operator who can address the fleet at once can interrupt every
+    agent with one keystroke, and the message that is worth everyone's attention is rare
+    enough to be worth sending twice.
+    """
+    from software_factory.errors import FactoryError
+
+    mailbox = _mailbox(state)
+    try:
+        message = mailbox.send(
+            sender=sender, recipient=recipient, kind=kind, body=body, in_reply_to=in_reply_to
+        )
+    except FactoryError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(EXIT_UNUSABLE) from exc
+
+    if as_json:
+        _emit({"ok": True, "message": message.as_dict()})
+        raise typer.Exit(EXIT_OK)
+    console.print(f"[green]sent[/] #{message.seq} to {recipient} ({message.kind.value})")
+    if message.truncated:
+        console.print("[yellow]the body was truncated[/]")
+    raise typer.Exit(EXIT_OK)
+
+
+@agent_app.command("inbox")
+def agent_inbox(
+    agent: Annotated[str, typer.Argument(help="Whose inbox to read.")],
+    unread_only: Annotated[
+        bool, typer.Option("--unread", help="Only what the agent has not been shown.")
+    ] = False,
+    state: Annotated[
+        Path, typer.Option("--state", help="Where run state and the ledger live.")
+    ] = Path(".factory"),
+    as_json: JsonOpt = False,
+) -> None:
+    """What one agent has been sent.
+
+    Reading does not mark anything read. The cursor belongs to the agent's runs, and an
+    operator looking at an inbox to find out why a fleet is stuck must not be the reason
+    the agent never sees the question.
+    """
+    mailbox = _mailbox(state)
+    messages, left = mailbox.unread(agent) if unread_only else mailbox.inbox(agent)
+    owed = {m.seq for m in mailbox.unanswered(agent)}
+
+    if as_json:
+        _emit(
+            {
+                "ok": True,
+                "agent": agent,
+                "messages": [m.as_dict() for m in messages],
+                "unanswered": sorted(owed),
+                "leftBehind": left,
+            }
+        )
+        raise typer.Exit(EXIT_OK)
+
+    if not messages:
+        console.print(f"[dim]nothing for {agent}[/]")
+        raise typer.Exit(EXIT_OK)
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("seq", "from", "kind", "body", ""):
+        table.add_column(column, overflow="fold")
+    for message in messages:
+        table.add_row(
+            str(message.seq),
+            message.sender,
+            message.kind.value,
+            message.body,
+            "[yellow]unanswered[/]" if message.seq in owed else "",
+        )
+    console.print(table)
+    if left:
+        console.print(f"[dim]{left} older messages not shown[/]")
+    raise typer.Exit(EXIT_OK)
+
+
+@agent_app.command("thread")
+def agent_thread(
+    seq: Annotated[int, typer.Argument(help="The message to open.")],
+    state: Annotated[
+        Path, typer.Option("--state", help="Where run state and the ledger live.")
+    ] = Path(".factory"),
+    as_json: JsonOpt = False,
+) -> None:
+    """A message and its replies."""
+    messages = _mailbox(state).thread(seq)
+    if as_json:
+        _emit({"ok": True, "thread": [m.as_dict() for m in messages]})
+        raise typer.Exit(EXIT_OK)
+    if not messages:
+        console.print(f"[dim]no message at #{seq}[/]")
+        raise typer.Exit(EXIT_OK)
+    for message in messages:
+        console.print(message.render())
+    raise typer.Exit(EXIT_OK)
+
+
+@agent_app.command("lifecycle")
+def agent_lifecycle(
+    state: Annotated[
+        Path, typer.Option("--state", help="Where run state and the ledger live.")
+    ] = Path(".factory"),
+    running_only: Annotated[
+        bool, typer.Option("--running", help="Only runs that have not ended.")
+    ] = False,
+    as_json: JsonOpt = False,
+) -> None:
+    """Every run's observable state, and which questions are still unanswered.
+
+    The two together are the fleet view: a run can be `running` and healthy, or `running`
+    and waiting on a question nobody has read, and only the second is a stall. A fleet
+    view that shows the first and not the second reports a busy factory that is doing
+    nothing.
+    """
+    from software_factory.ledger import Ledger
+    from software_factory.orchestrator.mailbox import lifecycle
+
+    path = state / "ledger.jsonl"
+    if not path.exists():
+        console.print(f"[red]no ledger at {path}[/]")
+        raise typer.Exit(EXIT_UNUSABLE)
+    ledger = Ledger(path)
+    lives = lifecycle(ledger.read())
+    if running_only:
+        lives = [life for life in lives if life.state == "running"]
+
+    mailbox = _mailbox(state)
+    stalled = {
+        life.agent: len(mailbox.unanswered(life.agent))
+        for life in lives
+        if mailbox.unanswered(life.agent)
+    }
+
+    if as_json:
+        _emit(
+            {
+                "ok": True,
+                "runs": [life.as_dict() for life in lives],
+                "unanswered": stalled,
+            }
+        )
+        raise typer.Exit(EXIT_OK)
+
+    if not lives:
+        console.print("[dim]no runs yet[/]")
+        raise typer.Exit(EXIT_OK)
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("run", "agent", "stage", "state", "waiting on", "reason"):
+        table.add_column(column, overflow="fold")
+    colours = {
+        "running": "cyan",
+        "succeeded": "green",
+        "blocked": "yellow",
+        "failed": "red",
+        "cancelled": "dim",
+    }
+    for life in lives:
+        colour = colours.get(life.state, "white")
+        owed = stalled.get(life.agent, 0)
+        table.add_row(
+            life.run[:12],
+            life.agent,
+            life.stage,
+            f"[{colour}]{life.state}[/]",
+            f"[yellow]{owed} question(s)[/]" if owed else "",
+            life.reason,
+        )
+    console.print(table)
+    raise typer.Exit(EXIT_OK)

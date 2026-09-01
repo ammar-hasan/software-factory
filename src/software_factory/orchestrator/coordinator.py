@@ -63,6 +63,7 @@ from software_factory.identity.loading import directory_from
 from software_factory.ledger import EntryType, Ledger
 from software_factory.memory.records import utc_now
 from software_factory.memory.store import MemoryStore
+from software_factory.orchestrator.mailbox import Conversation, Mailbox
 from software_factory.orchestrator.workitem import (
     Blocker,
     SourceContext,
@@ -751,6 +752,11 @@ class Coordinator:
         from software_factory.orchestrator.stopping import StopBook
 
         self.stops = stops if stops is not None else StopBook.in_state(ledger.path.parent)
+
+        # One mailbox per factory, on the same ledger. Agents address each other by name;
+        # the bus and the audit log are the same object, which is what makes a message and
+        # the run it is about impossible to observe out of order.
+        self.mailbox = Mailbox(ledger=ledger, state_dir=ledger.path.parent)
         self.skills = skills or _registry_from(definition)
         self.pack_budget_tokens = pack_budget_tokens
         self.machine = StageMachine()
@@ -912,7 +918,7 @@ class Coordinator:
         run_id = f"{item.id}:{stage.value.lower()}:{len(item.history)}"
         role = ROLE_FOR_STAGE.get(stage, AgentRole.CUSTOM)
         agent = self._agent_for(role)
-        agent_name = agent[0] if agent else role.value.lower()
+        agent_name = self.agent_for_stage(stage)
         prompt = agent[1] if agent else f"You are the {role.value.lower()} agent."
 
         execution = (
@@ -923,7 +929,10 @@ class Coordinator:
 
         policy = SandboxPolicy(workspace=workspace.root, wall_clock_s=900)
         executor = LocalExecutor(policy, allow_unsandboxed=self.allow_unsandboxed)
-        registry = build_registry(workspace, executor)
+        # The mailbox is handed in bound to *this* agent, so `agent.send` cannot name a
+        # different sender. A message whose author is whatever the model typed is not
+        # evidence of anything.
+        registry = build_registry(workspace, executor, mailbox=self.mailbox, agent=agent_name)
 
         effects = frozenset(execution.effects or (Effect.READ, Effect.WRITE, Effect.EXEC))
         grants = Grants(
@@ -984,6 +993,16 @@ class Coordinator:
             },
         )
 
+        # What arrived for this agent while it was not running, and what it still owes an
+        # answer to. Composed into the task rather than delivered by a tool call, because a
+        # tool an agent has to *choose* to call is a message it can go a whole run without
+        # reading -- and a question nobody reads is a fleet that has quietly stopped, with
+        # every run still reporting success. The cursor moves after the run, not before: a
+        # run that crashes re-reads its messages, which costs a repeat and never a loss.
+        letters = Conversation.for_agent(self.mailbox, agent_name)
+        task = item.request if letters.empty else f"{item.request}\n\n{letters.render()}"
+        highest_read = max((m.seq for m in letters.unread), default=0)
+
         loop = TurnLoop(
             provider=self.provider,
             registry=registry,
@@ -993,7 +1012,7 @@ class Coordinator:
             budget=Budget(),
             routing=routing,
             role_prompt=prompt,
-            task=item.request,
+            task=task,
             output_schema=STAGE_SCHEMAS.get(stage),
             should_stop=lambda: self._stop_reason(item),
         )
@@ -1014,6 +1033,8 @@ class Coordinator:
             )
 
         run = loop.run()
+        if highest_read:
+            self.mailbox.mark_read(agent_name, highest_read)
 
         self._carry_forward(conversation, item, stage, run, run_id)
         discoveries = self._file_discoveries(item, stage, run, run_id)
@@ -1541,6 +1562,18 @@ class Coordinator:
         )
 
     # --------------------------------------------------------------------- plumbing
+
+    def agent_for_stage(self, stage: Stage) -> str:
+        """Which agent will run this stage.
+
+        Public because addressing an agent requires knowing its name, and the name is a
+        property of the factory definition rather than of the stage: a factory that renames
+        its reviewer must not leave every message addressed to `review` going nowhere. Both
+        the fleet view and anything sending a message resolve it here, so there is one
+        answer rather than two that agree until somebody edits the definition.
+        """
+        agent = self._agent_for(ROLE_FOR_STAGE.get(stage, AgentRole.CUSTOM))
+        return agent[0] if agent else stage.value.lower()
 
     def _agent_for(self, role: AgentRole) -> tuple[str, str, Any] | None:
         for agent in self.definition.agents.values():

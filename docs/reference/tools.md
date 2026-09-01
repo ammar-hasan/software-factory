@@ -11,6 +11,8 @@ and the running registry cannot disagree.
 
 | Tool | Effect |
 | --- | --- |
+| `agent.inbox` | `read` |
+| `agent.send` | `external` |
 | `checkpoint.create` | `write` |
 | `checkpoint.restore` | `write` |
 | `file.write` | `write` |

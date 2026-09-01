@@ -2235,6 +2235,8 @@ def test_m19_the_effect_table_matches_the_registry_it_describes(tmp_path: Path) 
     The second direction has to consider *every* configuration: computer use is granted
     rather than default, so a registry built without a session legitimately lacks it.
     """
+    from software_factory.ledger import Ledger
+    from software_factory.orchestrator.mailbox import Mailbox
     from software_factory.runtime.executor import LocalExecutor, SandboxLevel, SandboxPolicy
     from software_factory.runtime.tools import BUILTIN_TOOL_EFFECTS, build_registry
     from software_factory.runtime.ui import UiContract, UiSession
@@ -2242,10 +2244,16 @@ def test_m19_the_effect_table_matches_the_registry_it_describes(tmp_path: Path) 
 
     workspace = Workspace(root=tmp_path, run_id="run-1", base_commit="deadbeef")
 
-    def registry(with_ui: bool):
+    def registry(with_ui: bool, with_mailbox: bool = False):
         return build_registry(
             workspace,
             LocalExecutor(SandboxPolicy(workspace=tmp_path), level=SandboxLevel.PROCESS),
+            mailbox=(
+                Mailbox(ledger=Ledger(tmp_path / "ledger.jsonl"), state_dir=tmp_path)
+                if with_mailbox
+                else None
+            ),
+            agent="builder" if with_mailbox else "",
             ui_session=(
                 UiSession(
                     contract=UiContract(
@@ -2267,7 +2275,11 @@ def test_m19_the_effect_table_matches_the_registry_it_describes(tmp_path: Path) 
             assert tool.effect is BUILTIN_TOOL_EFFECTS[name], name
 
     # And nothing the table declares goes unregistered by every configuration.
-    everything = registry(True)
+    # `registry(True, True)` is the maximal one -- computer use *and* messaging, both
+    # granted rather than default. Adding a conditionally-registered family and forgetting
+    # it here is how the table grows an entry nothing registers: this caught exactly that
+    # when `agent.send` arrived, which is the direction the check exists for.
+    everything = registry(True, True)
     unregistered = sorted(n for n in BUILTIN_TOOL_EFFECTS if everything.get(n) is None)
     assert unregistered == [], unregistered
 

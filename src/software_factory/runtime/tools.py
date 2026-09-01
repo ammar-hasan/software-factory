@@ -63,6 +63,12 @@ BUILTIN_TOOL_EFFECTS: dict[str, Effect] = {
     "ui.type": Effect.UI,
     "ui.observe": Effect.UI,
     "ui.close": Effect.UI,
+    # Messages between agents. `agent.send` is EXTERNAL because it puts text in front of
+    # somebody who did not ask for it: an agent granted only READ and WRITE must not be
+    # able to interrupt the fleet, and a message is the one side effect that escapes the
+    # workspace without touching the filesystem.
+    "agent.send": Effect.EXTERNAL,
+    "agent.inbox": Effect.READ,
 }
 
 
@@ -100,8 +106,15 @@ def build_registry(
     *,
     test_command: list[str] | None = None,
     ui_session: Any = None,
+    mailbox: Any = None,
+    agent: str = "",
 ) -> ToolRegistry:
     """Register the baseline toolbelt against one workspace.
+
+    `mailbox` and `agent` travel together: a mailbox with no agent to bind cannot register
+    a sender, and registering a sender the caller did not name would let a model choose its
+    own. Both absent means the run has no way to message anybody, which is correct for a
+    run nobody is coordinating with.
 
     `ui_session` is absent for almost every run. Computer use is a granted capability
     rather than a default one: a run that does not need a browser must not be offered a
@@ -439,6 +452,11 @@ def build_registry(
     if ui_session is not None:
         _register_ui(registry, ui_session)
 
+    # ---------------------------------------------------------------- agent messaging
+
+    if mailbox is not None and agent:
+        _register_mailbox(registry, mailbox, agent=agent)
+
     return registry
 
 
@@ -526,6 +544,94 @@ def parse_pytest(output: str, command: list[str], commit: str) -> TestRun:
         commit=commit,
         exit_code=0 if not any(r.outcome is Outcome.FAILED for r in results.values()) else 1,
         results=list(results.values()),
+    )
+
+
+def _register_mailbox(registry: ToolRegistry, mailbox: Any, *, agent: str) -> None:
+    """Expose one mailbox as tools, bound to the agent that holds them.
+
+    The sender is bound at registration, not passed as an argument. An agent that can name
+    its own sender can answer its own questions, and a fleet view built on unanswered
+    questions then reports a healthy factory while nothing is progressing. A message whose
+    author is whatever the model typed is not evidence of anything.
+    """
+    from software_factory.orchestrator.mailbox import MessageError
+
+    def send(args: dict[str, Any]) -> ToolResult:
+        try:
+            message = mailbox.send(
+                sender=agent,
+                recipient=str(args["to"]),
+                kind=str(args.get("kind", "status")),
+                body=str(args["body"]),
+                run=str(args.get("run", "")),
+                in_reply_to=int(args.get("in_reply_to", 0) or 0),
+            )
+        except MessageError as exc:
+            return ToolFailure(FailureKind.DENIED, str(exc), exc.remediation)
+        return ToolSuccess(value={"seq": message.seq, "to": message.recipient})
+
+    def inbox(args: dict[str, Any]) -> ToolResult:
+        messages, left = mailbox.inbox(agent, after=int(args.get("after", 0) or 0))
+        return ToolSuccess(
+            value={"messages": [m.as_dict() for m in messages], "olderNotShown": left}
+        )
+
+    registry.register(
+        Tool(
+            name="agent.send",
+            description=(
+                "Send a short coordination message to another agent: a handoff, a "
+                "question, a blocker or a result. Not for transporting work -- the "
+                "workspace and the ledger carry that. An answer must name the sequence "
+                "number of the question it answers, or the asker is still waiting."
+            ),
+            effect=BUILTIN_TOOL_EFFECTS["agent.send"],
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string"},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["status", "question", "answer", "result", "blocked", "handoff"],
+                    },
+                    "body": {"type": "string"},
+                    "run": {"type": "string"},
+                    "in_reply_to": {"type": "integer"},
+                },
+                "required": ["to", "body"],
+            },
+            output_schema={"type": "object"},
+            handler=send,
+            idempotent=False,
+            examples=(
+                Example(
+                    inputs={
+                        "to": "reviewer",
+                        "kind": "handoff",
+                        "body": "Fix is on the branch; the regression test is test_strips_bom.",
+                    },
+                    output='{"seq": 41, "to": "reviewer"}',
+                ),
+            ),
+        )
+    )
+    registry.register(
+        Tool(
+            name="agent.inbox",
+            description=(
+                "Read messages addressed to you. Your unread messages are already in "
+                "your task; use this to look further back."
+            ),
+            effect=BUILTIN_TOOL_EFFECTS["agent.inbox"],
+            input_schema={
+                "type": "object",
+                "properties": {"after": {"type": "integer"}},
+            },
+            output_schema={"type": "object"},
+            handler=inbox,
+            examples=(Example(inputs={"after": 0}, output='{"messages": [], "olderNotShown": 0}'),),
+        )
     )
 
 

@@ -48,6 +48,15 @@ class EntryType(enum.StrEnum):
     BUDGET_EVENT = "budget.event"
     SEGMENT_SEALED = "segment.sealed"
     IMPROVEMENT_PROPOSAL = "improvement.proposal"
+    AGENT_MESSAGE = "agent.message"
+    """One agent addressing another (PRD FR-3.7).
+
+    In the ledger rather than in a separate bus, which is the whole design: messages and
+    run lifecycle entries then share one sequence, so a parent cannot observe a child's
+    terminal state before the message that produced the result. A separate bus has to
+    invent a global sequence number to get that property; here it is the same counter that
+    was already there."""
+
     SCHEDULE_FIRED = "schedule.fired"
     """A scheduled trigger fired, and which scheduled instant it stood in for.
 

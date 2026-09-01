@@ -28,6 +28,10 @@ cannot be scripted, and PR-2 makes the local path the reference one.
 | `sf explain` | Ask a handed-off work item why it did something (FR-32). |
 | `sf providers` | What each tier will actually call, and whether it can right now. |
 | `sf doctor` | Report what works in this environment and what does not (FR-28.1). |
+| `sf agent inbox` | What one agent has been sent. |
+| `sf agent lifecycle` | Every run's observable state, and which questions are still unanswered. |
+| `sf agent send` | Address one agent. The message reaches it at the start of its next run. |
+| `sf agent thread` | A message and its replies. |
 | `sf api serve` | Serve the API, so something other than a person at a terminal can drive this. |
 | `sf change observe` | Record what the repository says happened to a change (FR-15.14). |
 | `sf change receive` | Put a saved git-host delivery through intake, with no network at all. |

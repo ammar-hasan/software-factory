@@ -664,3 +664,82 @@ def test_a_factory_inside_its_cap_runs_normally(definition, repo: Path, tmp_path
     ).run(item())
 
     assert outcome.stages, "the cap blocked a factory that had spent nothing"
+
+
+# ------------------------------------------------------- messages reaching a real run
+
+
+def test_a_message_sent_before_a_run_reaches_the_model(
+    definition, repo: Path, tmp_path: Path
+) -> None:
+    """The delivery path, end to end, through a real coordinator.
+
+    A mailbox that stores a message perfectly and never puts it in front of a model is the
+    same failure as one that drops it — with the added cost that the ledger says it was
+    delivered. This asserts the text arrives in the model's task, not merely in the log.
+    """
+    provider = StubProvider([says(triage_output()), says(build_output()), says(review_output())])
+    coord = coordinator(definition, repo, tmp_path, provider)
+    work = item(WorkClass.CHORE)
+    agent = coord.agent_for_stage(Stage.TRIAGE)
+
+    coord.mailbox.send(
+        sender="operator", recipient=agent, kind="status", body="prefer the stdlib codecs module"
+    )
+    coord.run(work)
+
+    task = provider.calls[0][-1].content
+    assert "prefer the stdlib codecs module" in task
+
+
+def test_a_message_is_not_delivered_twice_to_the_same_agent(
+    definition, repo: Path, tmp_path: Path
+) -> None:
+    """The cursor has to move, or every later run re-reads the same instruction.
+
+    Two work items rather than two stages: each stage runs a *different* agent, so a stage
+    sequence never re-reads one agent's inbox and would let a cursor that never advanced
+    look correct. The first version of this test made exactly that mistake and passed with
+    the cursor disabled. Two items share the triage agent, which is where the repetition
+    would actually show up -- and a model told the same thing on every run stops treating
+    it as new information, which makes a message channel worse than no channel.
+    """
+    provider = StubProvider(
+        [says(triage_output()), says(build_output()), says(review_output())] * 2
+    )
+    coord = coordinator(definition, repo, tmp_path, provider)
+    agent = coord.agent_for_stage(Stage.TRIAGE)
+    coord.mailbox.send(sender="operator", recipient=agent, kind="status", body="ZZ-MARKER-ZZ")
+
+    coord.run(item(WorkClass.CHORE))
+    coord.run(item(WorkClass.CHORE))
+
+    seen = sum(1 for call in provider.calls if "ZZ-MARKER-ZZ" in call[-1].content)
+    assert seen == 1
+
+
+def test_an_agent_cannot_send_as_somebody_else(definition, repo: Path, tmp_path: Path) -> None:
+    """The sender is bound when the tool is registered, not taken from the arguments.
+
+    A model that can choose its own sender can answer its own questions, and a fleet view
+    built on unanswered questions then reports a healthy factory while nothing progresses.
+    """
+    from software_factory.runtime.executor import LocalExecutor, SandboxPolicy
+    from software_factory.runtime.tools import build_registry
+
+    provider = StubProvider([says(triage_output()), says(build_output()), says(review_output())])
+    coord = coordinator(definition, repo, tmp_path, provider)
+    agent = coord.agent_for_stage(Stage.TRIAGE)
+    workspace = coord.workspaces.create(run_id="wi-forgery")
+
+    registry = build_registry(
+        workspace,
+        LocalExecutor(SandboxPolicy(workspace=workspace.root), allow_unsandboxed=True),
+        mailbox=coord.mailbox,
+        agent=agent,
+    )
+    tool = registry.get("agent.send")
+    assert tool is not None
+    tool.handler({"to": "reviewer", "body": "hi", "sender": "architect", "from": "architect"})
+
+    assert [m.sender for m in coord.mailbox.inbox("reviewer")[0]] == [agent]
