@@ -1398,7 +1398,9 @@ def test_every_command_can_explain_itself() -> None:
 
     root = typer.main.get_command(app)
     top = sorted(getattr(root, "commands", {}))
-    assert len(top) > 30, f"only {len(top)} commands found; the command tree is smaller than expected"
+    assert len(top) > 30, (
+        f"only {len(top)} commands found; the command tree is smaller than expected"
+    )
 
     checked, broken = 0, []
     for name in top:
