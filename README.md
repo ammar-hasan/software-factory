@@ -12,6 +12,118 @@ Licensed under [Apache-2.0](LICENSE).
 
 ---
 
+## Sixty seconds
+
+```bash
+pip install -e ".[dev]"
+sf init myfactory --name payments --owner acme --repo payments-service
+sf work "The CSV importer mangles BOM headers" --factory myfactory --repo ~/code/payments --dry-run
+```
+
+That prints the stages the work item would take and why, without spending anything. To run
+it for real, point the factory at a model — any OpenAI-compatible endpoint, local or hosted:
+
+```bash
+# a local runner: nothing leaves the machine, no key
+export SF_PROVIDER=ollama
+sf work "The CSV importer mangles BOM headers" --factory myfactory --repo ~/code/payments
+
+# or any hosted endpoint
+export SF_PROVIDER=openai-compatible
+export SF_PROVIDER_ENDPOINT=https://your-host/v1
+export SF_PROVIDER_API_KEY=...          # never a flag: `ps` shows flags to every process
+```
+
+`sf providers` says what a definition will actually call and whether it can right now.
+`sf doctor` says what this machine can and cannot do — a sandbox, a browser, a container
+runtime — before a run finds out the expensive way.
+
+Everything below runs against the tree `sf init` just wrote. Nothing needs an account.
+
+## A tour, in commands
+
+**See the work.** `sf work` carries one request through triage, design, build, review and
+handoff. `sf agent lifecycle` shows every run's state and — the column that matters — which
+agents are waiting on a question nobody answered. A run can be `running` and healthy, or
+`running` and stalled, and only a view showing both can tell them apart.
+
+```bash
+sf work "Reject duplicate keys" --factory myfactory --repo ~/code/jsonlint
+sf agent lifecycle --state myfactory/.factory
+sf agent send reviewer "prefer the stdlib codecs module" --state myfactory/.factory
+```
+
+**Run several agents at once.** Five named patterns over one engine — fan-out/fan-in, a
+dependency graph, a swarm, a critic, a supervisor with workers. Every one is a dry run
+unless you add `--execute`, because a plan is the one command whose cost is multiplied by a
+number you typed.
+
+```bash
+sf orchestrate fan-out "audit auth" "audit parsing" "audit export" --join quorum --quorum 2
+sf orchestrate swarm "make the parser handle BOMs" --attempts 3
+sf orchestrate critic "write the migration" "check it is reversible" \
+    --producer builder --reviewer architect
+```
+
+A swarm is scored, never raced: first-past-the-post selects for speed, and the fastest
+answer is the one that did the least work. A critic may not be the producer.
+
+**Send work to the machine that can run it.** Work declares labels it needs; workers declare
+labels they have. A requirement nothing satisfies is refused *by name* — never downgraded to
+whatever is free, because work that asked for a GPU and ran on a CPU box produces results
+that are wrong rather than missing.
+
+```bash
+sf worker list --root myfactory
+sf worker route --requires gpu --requires linux    # would it place? without claiming a slot
+sf worker leases --root myfactory                  # who holds what, and what expired
+```
+
+**Read the past back.** `sf mine` reads completed runs for things worth keeping: a gate
+finding that keeps recurring, a question one agent keeps asking and the answer it keeps
+getting, a tool sequence nothing has named. It proposes and writes nothing — admission
+control lives in the memory store, and a miner that wrote would be a second door with none
+of it behind it.
+
+```bash
+sf mine --state myfactory/.factory
+sf spec template --repo ~/code/jsonlint     # the unit shape that fits *this* repository
+sf media read call.vtt                      # a recording as research: untrusted, quoted
+```
+
+**Watch the whole thing.** `sf dash` serves a dashboard from the ledger; `sf api` serves the
+same numbers over authenticated HTTP; `sf workspace audit` answers the question an operator
+running several factories actually has.
+
+```bash
+sf dash --state myfactory/.factory
+sf workspace audit --root ~/factories       # broken? drifting? who is the outlier?
+sf experiment status                        # what the central bet has actually been shown
+```
+
+`sf experiment status` reports `insufficient_data — no trials recorded`, which is the true
+state of this project's central claim today. A test asserts it cannot report `supported`
+without trials behind it.
+
+### What's in a definition
+
+```
+factory.yaml               repositories, tier ladder, execution defaults, workers
+agents/<name>/agent.md     frontmatter config, Markdown body as the role prompt
+automations/               what starts work, and the filters that decide which events
+runners/                   the compute a run executes on
+scorers/                   sampling classifiers over completed runs
+skills/                    versioned procedures agents can load
+policy/                    stages, gates, budgets, memory policy
+```
+
+`sf init` writes a definition that validates and lints with **zero warnings**, offline, with
+no account. CI checks that on every run, because a scaffold that emits warnings teaches
+every new user that warnings are normal.
+
+Everything the factory does is described by these files, so changing its behaviour is a
+change you can review, diff, and revert — including changes the factory proposes to itself.
+
 ## Why this one is different
 
 Most agent platforms treat the model as the product and the scaffolding as plumbing. This
@@ -68,38 +180,6 @@ Every image here is regenerated by `python scripts/capture_screenshots.py` from 
 for the same reason `docs/reference/` is generated: a screenshot captured by hand goes stale
 silently, and a stale screenshot of a CLI shows output the tool no longer produces.
 
-## Quick start
-
-```bash
-pip install -e ".[dev]"
-
-sf init myfactory --name payments --owner acme --repo payments-service
-sf validate myfactory     # structure and cross-references
-sf lint myfactory         # advisory checks
-sf plan myfactory         # the resolved configuration for every agent
-sf audit myfactory        # what each agent can reach, and where data can go
-```
-
-`sf init` writes a definition that validates and lints with **zero warnings**, offline,
-with no account. CI checks that on every run, because a scaffold that emits warnings
-teaches every new user that warnings are normal.
-
-### What's in a definition
-
-```
-factory.yaml               repositories, tier ladder, execution defaults
-agents/<name>/agent.md     frontmatter config, Markdown body as the role prompt
-automations/               what starts work, and the filters that decide which events
-runners/                   the compute a run executes on
-scorers/                   sampling classifiers over completed runs
-skills/                    versioned procedures agents can load
-policy/                    stages, gates, budgets, memory policy
-```
-
-Everything the factory does is described by these files, so changing its behaviour is a
-change you can review, diff, and revert — including changes the factory proposes to
-itself.
-
 ## Status
 
 Under construction, and specific about where. What exists and is tested:
@@ -124,15 +204,23 @@ Under construction, and specific about where. What exists and is tested:
 | Scheduling | Cron triggers that actually fire, with a missed window firing once rather than once per occurrence |
 | Workspaces | More than one factory in one tree, with cross-factory validation and metrics |
 | Computer use | A `UI` effect class, a session contract, declared `ui.*` tools, and a mandatory recording |
+| Messaging | Agents address each other through the ledger, so a message and the run it is about cannot be observed out of order |
+| Worker routing | Work declares labels, workers declare labels, leases are counted on disk and reclaimed when they expire |
+| Orchestration | Fan-out/fan-in, DAG, swarm, critic and supervisor — five constructors over one validated engine |
+| The experiment | PRD §11.2's protocol: a registration that locks at the first trial, Holm-corrected primaries, and a verdict that can be `falsified` |
+| Mining | Completed runs read back for candidate memories and skills, with corroboration counted over distinct sources |
+| Templates | Spec unit shapes derived from the repository, with sections the repository cannot support marked rather than dropped |
+| Cross-factory | One audit over a workspace: what is broken, what is drifting, and who is the outlier |
 
 **Honestly not there yet.** The behavioural half of the executor parity suite skips without
-a container daemon and a reachable worker, and says so rather than passing. Agent-to-agent
-messaging is absent — `sf stop` ends a fleet, and nothing lets one running agent talk to
-another. Run routing has no worker labels and no pool. Conversation mining is designed and
-unbuilt. And no provider is exercised against a live endpoint *in CI*: the suite drives real
-providers over a real socket against a server speaking the hosts' wire formats, which is the
-strongest claim a suite can make on its own, and `scripts/live_trial.py` is the one command
-that goes further. See the [milestone plan](docs/PRD.md).
+a container daemon and a reachable worker, and says so rather than passing. The §11.2
+experiment has its full protocol and **no trials**: `sf experiment status` reports
+`insufficient_data`, which is the honest state of the project's central claim and the thing
+most worth fixing next. No provider is exercised against a live endpoint *in CI* — the suite
+drives real providers over a real socket against a server speaking the hosts' wire formats,
+which is the strongest claim a suite can make on its own, and `scripts/live_trial.py` and
+`scripts/product_trial.py` are the two commands that go further. See the
+[milestone plan](docs/PRD.md).
 
 ## Does it work?
 
@@ -177,6 +265,27 @@ exist, not that the behaviour was wrong"* — which is FR-13.3a working in the w
 The finding worth carrying is not any of the four. It is that **a harness is not verified by
 its own authors' tests**: every test in the suite was written by somebody who already knew
 what the gate meant, so none of them could disagree with it.
+
+### And then it built something
+
+One work item is the smallest honest claim, and not the interesting one. A factory is a
+thing you use for months, and what decides whether it is usable is the second, fifth and
+twentieth change. `scripts/product_trial.py` builds a real JSON validator through a sequence
+of work items chosen to probe where a factory actually fails:
+
+| Step | What it probes | What the factory getting it wrong looks like |
+| --- | --- | --- |
+| A `--version` flag | a change too small to justify ceremony | spending as much as the largest step — a factory whose floor cost is its ceiling cost is unusable for the changes people make most often |
+| Line and column in errors | a large change to an existing public API | breaking the old signature, or reaching handoff with the new surface untested |
+| "Make the errors better" | a request with nothing checkable in it | quietly guessing and reaching handoff — an unfalsifiable change nobody asked for |
+| Reject duplicate keys | `regression-proven` on a genuine defect | handing off with a test that passed before the change |
+| A planted trailing-comma bug | recovery in code the factory already touched | fixing it by reverting the file, which passes the new test and deletes every previous change |
+| Split parsing from reporting | a change that must alter structure and nothing else | changing behaviour under cover of a refactor, which no test names |
+
+Every step's expectation **and its falsifier** are written down before the run and printed
+beside the result, because deciding afterwards what a run was testing is how every trial
+comes out a success. The report is [`docs/product-trial.md`](docs/product-trial.md).
+
 
 ## Reviews
 

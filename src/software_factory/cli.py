@@ -599,20 +599,44 @@ def _resolve_provider() -> Provider | None:
 
     Deliberately explicit: a factory with no reachable inference must say so rather than
     silently doing less. There is no default that quietly points somewhere.
+
+    This used to raise "no HTTP provider is built yet" whenever `SF_PROVIDER_ENDPOINT` was
+    set -- while `providers.registry` had OpenAI, Anthropic, vLLM, Ollama, LM Studio and
+    an openai-compatible adapter, all tested. The provider layer was finished and nothing
+    in the CLI could reach it, so every `sf work` against a real model refused with a
+    message describing a milestone that had already landed. A control that exists and is
+    not wired in, for the fourth time in this codebase.
+
+    `SF_PROVIDER` names the adapter and `SF_PROVIDER_ENDPOINT` the URL. Either alone is
+    enough: an endpoint with no name is an openai-compatible server, which is what almost
+    every local runner speaks.
     """
     import os
 
-    endpoint = os.environ.get("SF_PROVIDER_ENDPOINT")
-    if not endpoint:
+    from software_factory.providers.registry import UnknownProviderError, resolve
+
+    name = os.environ.get("SF_PROVIDER", "").strip()
+    endpoint = os.environ.get("SF_PROVIDER_ENDPOINT", "").strip()
+    if not name and not endpoint:
         return None
-    raise FactoryError(
-        f"provider endpoint {endpoint!r} is configured but no HTTP provider is built yet",
-        remediation=(
-            "The HTTP provider lands with the integrations milestone. Until then, use "
-            "--dry-run, or drive the coordinator directly from Python with your own "
-            "Provider implementation."
-        ),
-    )
+
+    try:
+        resolution = resolve(name or "openai-compatible", base_url=endpoint or None)
+    except UnknownProviderError as exc:
+        raise FactoryError(str(exc), remediation="Set SF_PROVIDER to a known adapter.") from exc
+
+    if not resolution.usable:
+        # Returned as a refusing provider rather than raised, so the caller's own "cannot
+        # run" path prints the reason with its remediation. Raising here produced a
+        # traceback where the CLI already had a readable message for exactly this case.
+        raise FactoryError(
+            f"provider {resolution.spec.name!r} is not usable: {resolution.reason}",
+            remediation=(
+                "Set the key it names, or point SF_PROVIDER_ENDPOINT at a local server "
+                "that needs none."
+            ),
+        )
+    return resolution.provider
 
 
 spec_app = typer.Typer(
@@ -3427,21 +3451,28 @@ agent_app = typer.Typer(
 app.add_typer(agent_app, name="agent")
 
 
-def _mailbox(state: Path):  # type: ignore[no-untyped-def]
+def _mailbox(state: Path, *, create: bool = False):  # type: ignore[no-untyped-def]
     """The factory's mailbox, or a usable error saying which factory has none.
 
-    Refuses to create the ledger. A mailbox conjured on an empty directory answers every
-    question with "no messages", which reads identically to a healthy fleet and is the one
-    answer an operator must never be given by mistake.
+    Asymmetric on purpose. *Reading* an absent mailbox must refuse: a mailbox conjured on an
+    empty directory answers every question with "no messages", which reads identically to a
+    healthy fleet and is the one answer an operator must never be given by mistake.
+
+    *Writing* to one may create it. Leaving a note for the reviewer before the first run has
+    ever happened is an ordinary thing to want, and the first version of this refused it --
+    so the very first command a new user might reasonably try answered "run something
+    first", which is a wall in front of the thing they were trying to set up.
     """
     from software_factory.ledger import Ledger
     from software_factory.orchestrator.mailbox import Mailbox
 
     path = state / "ledger.jsonl"
-    if not path.exists():
+    if not path.exists() and not create:
         console.print(f"[red]no ledger at {path}[/]")
         console.print("[dim]Run something first, or point --state at the factory that did.[/]")
         raise typer.Exit(EXIT_UNUSABLE)
+    if create:
+        path.parent.mkdir(parents=True, exist_ok=True)
     return Mailbox(ledger=Ledger(path), state_dir=state)
 
 
@@ -3471,7 +3502,7 @@ def agent_send(
     """
     from software_factory.errors import FactoryError
 
-    mailbox = _mailbox(state)
+    mailbox = _mailbox(state, create=True)
     try:
         message = mailbox.send(
             sender=sender, recipient=recipient, kind=kind, body=body, in_reply_to=in_reply_to

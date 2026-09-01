@@ -509,3 +509,35 @@ def test_the_fleet_view_shows_who_is_waiting(tmp_path: Path) -> None:
     payload = json.loads(result.stdout)
     assert payload["runs"][0]["state"] == "running"
     assert payload["unanswered"] == {"builder": 1}
+
+
+def test_a_note_can_be_left_before_the_first_run(tmp_path: Path) -> None:
+    """Reading an absent mailbox refuses; writing to one creates it.
+
+    Asymmetric on purpose. A mailbox conjured for a *read* answers every question with "no
+    messages", which reads identically to a healthy fleet. But leaving a note for the
+    reviewer before anything has run is an ordinary thing to want, and refusing it put
+    "run something first" in front of the very first command a new user might try.
+    """
+    state = tmp_path / ".factory"
+
+    sent = runner.invoke(
+        app, ["agent", "send", "reviewer", "use the codecs module", "--json", "--state", str(state)]
+    )
+
+    assert sent.exit_code == 0, sent.output
+    assert (state / "ledger.jsonl").exists()
+
+    read = runner.invoke(app, ["agent", "inbox", "reviewer", "--json", "--state", str(state)])
+    assert [m["body"] for m in json.loads(read.stdout)["messages"]] == ["use the codecs module"]
+
+
+def test_reading_an_absent_mailbox_still_refuses(tmp_path: Path) -> None:
+    """The half that must not become forgiving: a conjured mailbox reporting no messages
+    is indistinguishable from a fleet with nothing waiting."""
+    result = runner.invoke(
+        app, ["agent", "inbox", "reviewer", "--json", "--state", str(tmp_path / "nowhere")]
+    )
+
+    assert result.exit_code != 0
+    assert "no ledger" in result.output
