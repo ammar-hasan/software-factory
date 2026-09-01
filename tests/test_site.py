@@ -11,6 +11,8 @@ paragraph structure is wrong is a reader who has already decided the project is 
 
 from __future__ import annotations
 
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -253,3 +255,93 @@ def test_no_diagram_claims_a_gate_that_does_not_exist() -> None:
     named = set(re.findall(r"\b(?:coverage-of-criteria|criterion-observed-failing)\b", text))
 
     assert named == set(), f"diagrams name gates that are not in BASELINE_GATES: {sorted(named)}"
+
+
+@pytest.mark.integration
+def test_no_link_on_the_built_site_points_at_nothing(tmp_path: Path) -> None:
+    """Five 404s shipped on the published front page before this existed.
+
+    `LICENSE`, `NOTICE`, `docs/adr` and `docs/reviews` were rewritten site-relative and are
+    not on the site; `product-trial.html` was linked from a build that had skipped it, with
+    the reason printed to a stderr nobody reads. The old check walked the README against the
+    *repository*, where all five resolve. Only the built output can answer this.
+    """
+    out = tmp_path / "_site"
+    result = subprocess.run(
+        [sys.executable, "scripts/build_site.py", "--out", str(out)],
+        cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    broken, checked = [], 0
+    for page in sorted(out.glob("*.html")):
+        for match in re.finditer(r'(?:href|src)="([^"]+)"', page.read_text(encoding="utf-8")):
+            href = match.group(1)
+            if href.startswith(("http://", "https://", "#", "mailto:", "data:")):
+                continue
+            target = href.split("#")[0]
+            if not target:
+                continue
+            checked += 1
+            if not (out / target).exists():
+                broken.append(f"{page.name} -> {href}")
+
+    assert checked > 100, f"only {checked} local links checked; the sweep found nothing"
+    assert broken == [], f"{len(broken)} dead link(s) on the built site: {broken[:10]}"
+
+
+@pytest.mark.integration
+def test_a_cross_reference_between_two_site_pages_stays_on_the_site(tmp_path: Path) -> None:
+    """`docs/harness/HARNESS.md` writes `[memory](memory.md)`, meaning its own directory.
+
+    Matched against the repository root that is not a page, so every cross-reference between
+    the harness documents left for GitHub -- a reader following the spec through six
+    documents was ejected from the site five times.
+    """
+    out = tmp_path / "_site"
+    subprocess.run(
+        [sys.executable, "scripts/build_site.py", "--out", str(out)],
+        cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True,
+        check=True,
+    )
+    harness = (out / "harness.html").read_text(encoding="utf-8")
+
+    assert 'href="memory.html"' in harness
+    assert "blob/main/docs/harness/memory.md" not in harness
+
+
+@pytest.mark.integration
+def test_a_dead_link_stops_the_build_and_writes_nothing(tmp_path: Path) -> None:
+    """A generated site reads as authoritative *because* it was generated.
+
+    Both halves matter. Reporting every dead link in one run rather than the first, and
+    writing no page at all -- a half-written site whose front page links to twelve missing
+    ones is worse than the link it stopped for.
+    """
+    root = Path(__file__).resolve().parent.parent
+    scratch = tmp_path / "repo"
+    shutil.copytree(root, scratch, ignore=shutil.ignore_patterns(".git", "_site", "*.pyc"))
+    readme = scratch / "README.md"
+    readme.write_text(
+        readme.read_text(encoding="utf-8")
+        + "\n[gone](docs/no-such-document.md) and [also gone](docs/nor-this-one.md)\n",
+        encoding="utf-8",
+    )
+
+    out = tmp_path / "_site"
+    result = subprocess.run(
+        [sys.executable, "scripts/build_site.py", "--out", str(out)],
+        cwd=scratch,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stdout
+    assert "no-such-document.md" in result.stderr
+    assert "nor-this-one.md" in result.stderr, "only the first dead link was reported"
+    assert not list(out.glob("*.html")), "a partial site was written"
