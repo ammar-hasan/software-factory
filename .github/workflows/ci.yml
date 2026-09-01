@@ -122,6 +122,44 @@ jobs:
           done
       - name: sf doctor reports the environment
         run: sf doctor --json
+      - name: Every command group runs against the reference factory
+        # A command that imports and then crashes on its first real call is invisible to a
+        # unit test that only imports it. These are the whole surface an operator meets, so
+        # each group is exercised once against the tree `sf init` just wrote.
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/reference/.factory
+          sf schedule list /tmp/reference --json > /dev/null
+          sf schedule due /tmp/reference --ledger /tmp/reference/.factory/ledger.jsonl --json > /dev/null
+          sf skill list /tmp/reference --json > /dev/null
+          sf stop list --state /tmp/reference/.factory --json > /dev/null
+          sf api key create --principal ci --state /tmp/reference/.factory --json > /dev/null
+          sf api key list --state /tmp/reference/.factory --json > /dev/null
+          sf gates --json > /dev/null
+          sf stages --json > /dev/null
+          sf providers /tmp/reference --json > /dev/null
+          sf principals /tmp/reference --json > /dev/null
+          sf govern classes --json > /dev/null
+      - name: A workspace of two factories validates and reports the overlap
+        # FR-1.4 is a P0 rule that no single-factory command can check, so it is checked
+        # here or nowhere.
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/workspace && mkdir -p /tmp/workspace
+          sf init /tmp/workspace/payments --name payments --owner acme --repo shared
+          sf init /tmp/workspace/identity --name identity --owner acme --repo shared
+          sf workspace init /tmp/workspace --name acme --factory payments --factory identity
+          sf workspace list /tmp/workspace --json > /dev/null
+          sf workspace metrics /tmp/workspace --json > /dev/null
+          sf workspace validate /tmp/workspace --json \
+            | python -c "import json,sys; d=json.load(sys.stdin); assert d['overlaps'], 'the repository overlap went unreported'"
+      - name: A saved chat delivery replays through intake with no network
+        # FR-18.10's local parity, checked rather than claimed.
+        run: |
+          set -euo pipefail
+          printf '%s' '{"type":"event_callback","event_id":"Ev1","team_id":"T1","event":{"type":"app_mention","user":"U1","text":"<@U0BOT> the importer mangles BOM headers","channel":"C1","ts":"1700000000.000100"}}' > /tmp/event.json
+          sf chat receive /tmp/event.json --root /tmp/reference --json \
+            | python -c "import json,sys; d=json.load(sys.stdin); assert d['event']['title'], 'the delivery did not normalise'"
       - name: The generated reference matches the definitions
         # NFR-4.3: the reference is produced *from* the definitions the validator uses, not
         # written alongside them. Documentation written alongside drifts, and the drift is
