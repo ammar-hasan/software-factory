@@ -1585,9 +1585,35 @@ class Coordinator:
             case _:
                 return Blocker.GATE_FAILED_TERMINAL
 
-    @staticmethod
-    def _action_for(outcome: StageOutcome) -> str:
-        """A blocker must name what would clear it, not merely that something failed."""
+    #: Run failures that are not the work being wrong, and whose reason outranks any gate.
+    #:
+    #: When the run never produced output, the gates evaluate an empty result and fail --
+    #: truthfully, but about a consequence. The blocker already named the real cause; only
+    #: the action did not, so the two disagreed and the action is what an operator reads.
+    _RUN_FAILURES = frozenset(
+        {
+            RunStatus.PROVIDER_FAILED,
+            RunStatus.SETUP_FAILED,
+            RunStatus.BUDGET_EXCEEDED,
+            RunStatus.CANCELLED,
+        }
+    )
+
+    @classmethod
+    def _action_for(cls, outcome: StageOutcome) -> str:
+        """A blocker must name what would clear it, not merely that something failed.
+
+        The run's own failure outranks a gate finding. A first live run against a real
+        endpoint made this concrete: the provider answered 400 "model does not exist", the
+        run ended `provider_failed`, the calibration gate then failed because there was no
+        output to calibrate, and the work item was blocked with "Emit the calibration block
+        required by the stage's output schema" -- advice that sends somebody to rewrite a
+        prompt when the model id in their ladder is wrong. The blocker said
+        `external_dependency` and the action said something else entirely, and the action
+        is the sentence an operator acts on.
+        """
+        if outcome.run.status in cls._RUN_FAILURES:
+            return outcome.run.reason or f"the run ended {outcome.run.status.value}"
         if outcome.gates.blocked:
             findings = outcome.gates.findings
             if findings:
