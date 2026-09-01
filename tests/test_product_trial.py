@@ -177,3 +177,45 @@ def test_a_blocked_steps_work_does_not_land(tmp_path: Path) -> None:
     assert not result.reached_handoff, "the fixture was meant to block"
     assert result.landed is not True
     assert not (repo / "jsonlint" / "__main__.py").exists(), "rejected work reached the product"
+
+
+def test_a_provider_outage_is_not_reported_as_a_factory_decision(tmp_path: Path) -> None:
+    """A dropped connection tells you nothing about the factory.
+
+    A real run blocked with `RemoteDisconnected: Remote end closed connection without
+    response` and the trial recorded it as `BLOCKED` — which reads as the factory refusing
+    to hand the work over, when it was a network. That is the same class of dishonesty as
+    reporting a metric with no data as zero.
+    """
+    from software_factory.providers.base import ProviderError
+
+    class Dropping:
+        name = "dropping"
+
+        def complete(self, *args, **kwargs):
+            raise ProviderError("RemoteDisconnected: Remote end closed connection")
+
+        def available(self) -> tuple[bool, str]:
+            return True, ""
+
+    repo, factory = prepared(tmp_path)
+
+    result = trial.run_step(
+        trial.STEPS[0], repo=repo, factory=factory, state=tmp_path / "state", provider=Dropping()
+    )
+
+    assert result.infrastructure is True, (result.blocker, result.action)
+    assert result.landed is not True, "work from an outage must not land"
+
+
+def test_a_factory_block_is_not_an_infrastructure_failure(tmp_path: Path) -> None:
+    """The other direction, which matters more: a genuine refusal must never be excused as
+    infrastructure, or the trial retries the factory until it agrees."""
+    repo, factory = prepared(tmp_path)
+
+    provider = StubProvider([says("not valid stage output") for _ in range(8)])
+    result = trial.run_step(
+        trial.STEPS[0], repo=repo, factory=factory, state=tmp_path / "state", provider=provider
+    )
+
+    assert result.infrastructure is False

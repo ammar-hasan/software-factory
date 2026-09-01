@@ -272,6 +272,13 @@ class Result:
     seconds: float = 0.0
     changed: list[str] = field(default_factory=list)
     tests_pass: bool | None = None
+    infrastructure: bool = False
+    """True when the step ended because something outside the factory failed.
+
+    A provider that drops the connection is not the factory refusing, and reporting both as
+    "blocked" is a measurement that reads as a product decision when it was a network. The
+    trial reports it separately and does not count it as a step outcome.
+    """
     landed: bool | None = None
     """Whether the workspace's change was carried back into the product.
 
@@ -332,6 +339,7 @@ def run_step(step: Step, *, repo: Path, factory: Path, state: Path, provider: An
 
     result.stage = item.stage.value
     result.blocker = item.blocker.value if item.blocker else ""
+    result.infrastructure = result.blocker == "external_dependency"
     result.action = item.blocker_action
     result.stages_run = [s.stage.value for s in outcome.stages]
     result.changed = list(outcome.changed_paths)
@@ -434,7 +442,9 @@ def render(results: list[Result], *, provider: str, model: str) -> str:
     for r in results:
         tests = {True: "pass", False: "**FAIL**", None: "—"}[r.tests_pass]
         reached = r.stage or "crashed"
-        if r.blocker:
+        if r.infrastructure:
+            reached = "infrastructure failure"
+        elif r.blocker:
             reached = f"{reached} ({r.blocker})"
         body += (
             f"| {r.step.name} | {r.step.tests} | {reached} | {tests} | "
@@ -453,7 +463,12 @@ def render(results: list[Result], *, provider: str, model: str) -> str:
             body += f"**The run raised:** `{r.error}`\n\n"
             continue
         body += f"Reached **{r.stage}** after {' → '.join(r.stages_run) or 'no stages'}.\n\n"
-        if r.blocker:
+        if r.infrastructure:
+            body += (
+                f"**Not a factory result.** Something outside it failed: `{r.action}`. "
+                "Reported rather than counted.\n\n"
+            )
+        elif r.blocker:
             body += f"Blocked: `{r.blocker}` — {r.action}\n\n"
         if r.changed:
             body += "Changed: " + ", ".join(f"`{p}`" for p in r.changed) + "\n\n"
@@ -517,6 +532,20 @@ def main() -> int:
         result = run_step(
             step, repo=repo, factory=factory, state=state, provider=resolution.provider
         )
+        if result.infrastructure:
+            # One retry, and only for an outside failure. A provider that drops the
+            # connection has told us nothing about the factory, and letting that stand as
+            # the step's result means the next step starts from a seed the trial then
+            # reports as an evolution. Retrying a *factory* block would be the opposite
+            # mistake: running it until it agrees.
+            print(
+                f"        infrastructure failure, retrying once: {result.action[:80]}",
+                file=sys.stderr,
+                flush=True,
+            )
+            result = run_step(
+                step, repo=repo, factory=factory, state=state, provider=resolution.provider
+            )
         results.append(result)
         mark = (
             "handoff" if result.reached_handoff else (result.blocker or result.error or "stopped")
@@ -561,6 +590,7 @@ def main() -> int:
         "handoffs": sum(1 for r in results if r.reached_handoff),
         "testsFailing": sum(1 for r in results if r.tests_pass is False),
         "crashes": sum(1 for r in results if r.error),
+        "infrastructure": sum(1 for r in results if r.infrastructure),
     }
     print(json.dumps(summary), file=sys.stderr)
     # Non-zero only on a crash or a broken product tree. A blocked step is a *result*, and
