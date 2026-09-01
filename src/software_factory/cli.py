@@ -3258,6 +3258,163 @@ def _arg_map(pairs: list[str] | None) -> dict[str, str]:
     return values
 
 
+api_app = typer.Typer(help="The local HTTP API, and the keys that reach it.", no_args_is_help=True)
+app.add_typer(api_app, name="api")
+
+key_app = typer.Typer(help="API keys.", no_args_is_help=True)
+api_app.add_typer(key_app, name="key")
+
+
+@key_app.command("create")
+def api_key_create(
+    principal: Annotated[str, typer.Option("--principal", help="Who this key acts as.")],
+    label: Annotated[str, typer.Option("--label", help="What it is for.")] = "",
+    state: Annotated[
+        Path, typer.Option("--state", help="Where run state and the ledger live.")
+    ] = Path(".factory"),
+    as_json: JsonOpt = False,
+) -> None:
+    """Issue an API key. It is printed once and never recoverable.
+
+    Stored as a hash. A key file an operator can read their key back out of is a second
+    copy of the credential, and the usual outcome is that it gets copied somewhere with
+    weaker permissions.
+    """
+    from software_factory.observability.api import KeyStore
+
+    issued, secret = KeyStore.in_state(state).create(principal=principal, label=label)
+
+    if as_json:
+        _emit({"ok": True, "keyId": issued.key_id, "principal": principal, "key": secret})
+        raise typer.Exit(EXIT_OK)
+    console.print(f"[green]issued[/] {issued.key_id} for [bold]{principal}[/]")
+    console.print(f"\n  {secret}\n")
+    console.print("[yellow]This is the only time this key is shown.[/] It is stored hashed.")
+    raise typer.Exit(EXIT_OK)
+
+
+@key_app.command("list")
+def api_key_list(
+    state: Annotated[
+        Path, typer.Option("--state", help="Where run state and the ledger live.")
+    ] = Path(".factory"),
+    as_json: JsonOpt = False,
+) -> None:
+    """Issued keys. Never the keys themselves."""
+    from software_factory.observability.api import KeyStore
+
+    keys = KeyStore.in_state(state).all()
+    if as_json:
+        _emit(
+            {
+                "ok": True,
+                "keys": [
+                    {
+                        "keyId": k.key_id,
+                        "principal": k.principal,
+                        "label": k.label,
+                        "createdAt": k.created_at.isoformat(),
+                    }
+                    for k in keys
+                ],
+            }
+        )
+        raise typer.Exit(EXIT_OK)
+    if not keys:
+        console.print("[dim]no keys issued[/]")
+        raise typer.Exit(EXIT_OK)
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("key id", "principal", "label", "created"):
+        table.add_column(column, overflow="fold")
+    for key in keys:
+        table.add_row(
+            key.key_id, key.principal, key.label or "[dim]—[/]", key.created_at.isoformat()
+        )
+    console.print(table)
+    raise typer.Exit(EXIT_OK)
+
+
+@key_app.command("revoke")
+def api_key_revoke(
+    key_id: Annotated[str, typer.Argument(help="Which key.")],
+    state: Annotated[
+        Path, typer.Option("--state", help="Where run state and the ledger live.")
+    ] = Path(".factory"),
+    as_json: JsonOpt = False,
+) -> None:
+    """Revoke a key immediately."""
+    from software_factory.observability.api import KeyStore
+
+    revoked = KeyStore.in_state(state).revoke(key_id)
+    if as_json:
+        _emit({"ok": revoked, "keyId": key_id})
+    elif revoked:
+        console.print(f"[green]revoked[/] {key_id}")
+    else:
+        console.print(f"[yellow]no key {key_id}[/]")
+    raise typer.Exit(EXIT_OK if revoked else EXIT_FAILED)
+
+
+@api_app.command("serve")
+def api_serve(
+    root: RootArg = Path(),
+    state: Annotated[
+        Path, typer.Option("--state", help="Where run state and the ledger live.")
+    ] = Path(".factory"),
+    host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port")] = 8788,
+    integration: Annotated[
+        list[str] | None, typer.Option("--integration", help="An integration this factory has.")
+    ] = None,
+) -> None:
+    """Serve the API, so something other than a person at a terminal can drive this.
+
+    Authenticated on **every** request, including the reads. A ledger is a factory's whole
+    history, and "read-only" is not the same as "public". Binding anywhere but loopback
+    with no keys issued is refused rather than being a documented footgun.
+    """
+    from software_factory.identity.loading import directory_from
+    from software_factory.observability.api import serve as serve_api
+
+    ledger_path = state / "ledger.jsonl"
+    if not ledger_path.exists():
+        console.print(f"[red]no ledger at {ledger_path}[/]")
+        raise typer.Exit(EXIT_UNUSABLE)
+
+    directory = None
+    try:
+        definition = load_strict(root)
+        directory = directory_from(definition)
+    except FactoryError as exc:
+        # A capability check that passes because no directory loaded is worse than none: it
+        # looks like enforcement and is not. So this is stated, and privileged routes will
+        # refuse.
+        console.print(f"[yellow]no principal directory[/] ({exc.message})")
+        console.print("[dim]privileged routes will refuse every caller until this loads[/]")
+
+    try:
+        server = serve_api(
+            ledger_path,
+            host=host,
+            port=port,
+            root=root,
+            directory=directory,
+            integrations=frozenset(integration or []),
+            ready=lambda url: console.print(f"api on {url}  [dim](ctrl-c to stop)[/]"),
+        )
+    except FactoryError as exc:
+        _fail(exc, False)
+        return
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        console.print("\nstopped")
+    finally:
+        server.server_close()
+    raise typer.Exit(EXIT_OK)
+
+
 def main() -> None:
     """Console-script entry point."""
     app()

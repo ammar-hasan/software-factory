@@ -28,6 +28,7 @@ cannot be scripted, and PR-2 makes the local path the reference one.
 | `sf explain` | Ask a handed-off work item why it did something (FR-32). |
 | `sf providers` | What each tier will actually call, and whether it can right now. |
 | `sf doctor` | Report what works in this environment and what does not (FR-28.1). |
+| `sf api serve` | Serve the API, so something other than a person at a terminal can drive this. |
 | `sf change observe` | Record what the repository says happened to a change (FR-15.14). |
 | `sf change receive` | Put a saved git-host delivery through intake, with no network at all. |
 | `sf change verify` | Check one delivery's signature against this repository's webhook secret. |
