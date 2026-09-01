@@ -11,6 +11,7 @@ narrower claim than "the trials ran".
 
 from __future__ import annotations
 
+import argparse
 import sys
 import tempfile
 from pathlib import Path
@@ -49,7 +50,20 @@ that did not hold. A trial with surprises is not a failure to hide; it is the tr
 
 
 def main() -> int:
-    destination = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("docs/trials.md")
+    # Argparse rather than `sys.argv[1]`, because the bare version treated *any* argument as
+    # a destination -- so `run_trials.py --help` silently wrote a file named `--help` into
+    # the repository and reported success. A script that answers a request for help by
+    # creating a file called `--help` is a small trap, and it caught me twice in one
+    # session; `--out` produced a file named `--out` the same way.
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "destination",
+        nargs="?",
+        default="docs/trials.md",
+        type=Path,
+        help="Where to write the report.",
+    )
+    destination = parser.parse_args().destination
     sections: list[str] = [PREAMBLE]
     surprises = 0
 
