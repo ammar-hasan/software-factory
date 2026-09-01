@@ -179,6 +179,12 @@ jobs:
           printf '%s' '{"type":"event_callback","event_id":"Ev1","team_id":"T1","event":{"type":"app_mention","user":"U1","text":"<@U0BOT> the importer mangles BOM headers","channel":"C1","ts":"1700000000.000100"}}' > /tmp/event.json
           sf chat receive /tmp/event.json --root /tmp/reference --json \
             | python -c "import json,sys; d=json.load(sys.stdin); assert d['event']['title'], 'the delivery did not normalise'"
+      - name: Several factories in one tree stay separate
+        # The failures that only appear at plurality: state one factory writes that another
+        # reads, an identifier unique per factory and not per workspace, a report that
+        # averages over factories that cannot be compared. None of them are reachable from
+        # a single-factory test, so they are checked here or nowhere.
+        run: pytest tests/test_multi_factory.py -q
       - name: The public site builds from the repository's documents
         # Built here as well as in the Pages workflow, so a renderer change that breaks the
         # site fails on the pull request rather than on the deploy -- where the only signal
