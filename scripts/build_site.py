@@ -30,7 +30,43 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+#: Where a document that is in the repository but not on the site is read instead.
+#:
+#: The site is a subset of the repository on purpose -- the licence, the decision records
+#: and the reviews are read on GitHub, not here -- so a link to one of them has to leave.
+#: Rewriting it site-relative is what shipped `LICENSE`, `NOTICE`, `docs/adr` and
+#: `docs/reviews` as four 404s on the published front page.
 REPO_URL = "https://github.com/ammar-hasan/software-factory"
+
+#: What this build actually wrote. `link` consults it rather than assuming, because the
+#: page set is not fixed: three pages come from reports a live run produces, and a link to
+#: one of those is a link to nothing in a checkout where the run has not happened. That is
+#: how `product-trial.html` reached the published site as a fifth 404, with the build
+#: printing `no source for: product-trial` to a stderr nobody reads and exiting 0.
+_BUILT: set[str] = set()
+
+#: Links that resolved to nothing, reported together at the end of the build.
+_DEAD: list[str] = []
+
+
+def built(names: set[str]) -> None:
+    """Declare what the site contains, before any document is rendered."""
+    _BUILT.clear()
+    _BUILT.update(names)
+
+
+#: The directory the document being rendered was read from.
+#:
+#: A relative link in `docs/PRD.md` means `docs/`, not the repository root, and resolving
+#: it against the root is how `[reviews/](reviews/)` -- eight review records, the PRD's own
+#: evidence -- became a 404 on every page that cites them. The site serves flat, so the
+#: source's directory is not recoverable from the output and has to be carried in.
+_BASE: list[Path] = [ROOT]
+
+
+def rendering(source: Path) -> None:
+    """Name the document whose links are being rewritten."""
+    _BASE[0] = source.parent
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +146,9 @@ body {
   transition: background-color .25s var(--ease), color .25s var(--ease);
 }
 ::selection { background: color-mix(in srgb, var(--accent) 32%, transparent); }
+/* A page a live run writes, in a build where that run has not happened. Said, not
+   linked: a reference that looks clickable and is not is worse than a plain note. */
+.pending { color: var(--muted); font-size: 0.88em; }
 a { color: var(--accent); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 .skip {
@@ -709,9 +748,7 @@ def inline(text: str) -> str:
         lambda m: diagram_embed(m.group(1), m.group(2), m.group(4), m.group(3)),
         text,
     )
-    text = re.sub(
-        r"\[([^\]]+)\]\(([^)]+)\)", lambda m: f'<a href="{link(m.group(2))}">{m.group(1)}</a>', text
-    )
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", anchor, text)
     text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
     text = re.sub(r"(?<!\w)\*([^*]+)\*(?!\w)", r"<em>\1</em>", text)
     return re.sub(r"\x00(\d+)\x00", lambda m: spans[int(m.group(1))], text)
@@ -731,6 +768,21 @@ def diagram_embed(alt: str, poster: str, page: str, attrs: str = "") -> str:
         '<button type="button" class="diagram-load">Load interactive diagram</button>'
         "</span></div>"
     )
+
+def anchor(match: re.Match[str]) -> str:
+    """One Markdown link, as an anchor -- or as plain text when there is nothing to link to.
+
+    Three of the site's pages are reports a live run writes, so in a checkout where that run
+    has not happened the page does not exist. That is not a broken link in the source
+    document and must not stop the build; it is a page that is not there yet, and the honest
+    rendering of a reference to a page that is not there is the words without the link.
+    Anything else unresolvable is a real dead link and `link` still refuses it.
+    """
+    text, href = match.group(1), match.group(2)
+    target = href.lstrip("./").split("#")[0]
+    if target in LINKS and LINKS[target] not in _BUILT and _BUILT:
+        return f'{text} <span class="pending">(not generated in this build)</span>'
+    return f'<a href="{link(href)}">{text}</a>'
 
 
 #: Repository paths that have a page, so an in-document link lands on the site rather than
@@ -757,16 +809,65 @@ LINKS = {
 
 
 def link(href: str) -> str:
+    """Rewrite one link, and never emit one this build did not satisfy.
+
+    Three destinations, in order: a page the site contains, an asset the site copied, or
+    the document in the repository. Nothing falls through unchanged, because a relative
+    path that was correct in a Markdown file read from the repository root is a 404 the
+    moment the same text is served from the site root -- which is what happened to every
+    link here that was not in `LINKS`.
+    """
     if href.startswith(("http://", "https://", "#", "mailto:")):
         return html.escape(href)
-    clean = href.lstrip("./")
-    if clean in LINKS:
-        return LINKS[clean]
-    if clean.startswith("docs/images/"):
-        return html.escape("images/" + clean.split("/", 2)[2])
-    if clean.startswith("docs/diagrams/"):
-        return html.escape("diagrams/" + clean.split("/", 2)[2])
+    raw, _, fragment = href.partition("#")
+    suffix = f"#{fragment}" if fragment else ""
+    if not raw:
+        return html.escape(href)
+
+    # Normalise to a repository-relative path *before* anything is looked up. A link is
+    # written relative to the document that carries it, so `docs/harness/HARNESS.md`'s
+    # `[memory](memory.md)` means `docs/harness/memory.md` -- a page this site has. Matching
+    # `LINKS` on the raw text instead sent every cross-reference between harness documents
+    # out to GitHub, and `docs/PRD.md`'s `[reviews/](reviews/)` to a 404.
+    inside = _repo_path(raw)
+    target = inside or raw.lstrip("./")
+
+    page = LINKS.get(target)
+    if page is not None and (not _BUILT or page in _BUILT):
+        return html.escape(page + suffix)
+    # Rewritten on the path's shape, not on the file being there: a copied asset that is
+    # missing is a broken image, and the sweep over the built site is what names it. Doing
+    # it here would report the same fault twice and in the less useful place.
+    if target.startswith("docs/images/"):
+        return html.escape("images/" + target.split("/", 2)[2] + suffix)
+    if target.startswith("docs/diagrams/"):
+        return html.escape("diagrams/" + target.split("/", 2)[2] + suffix)
+    if inside:
+        where = "tree" if (ROOT / inside).is_dir() else "blob"
+        return html.escape(f"{REPO_URL}/{where}/main/{inside}{suffix}")
+
+    # In neither place: a dead link in the source document. Collected rather than raised, so
+    # one build names all of them; a generator that publishes one quietly is worse than a
+    # build that stops, because the site reads as authoritative *because* it was generated.
+    _DEAD.append(f"{_BASE[0].relative_to(ROOT).as_posix() or '.'}: {href}")
     return html.escape(href)
+
+
+def _repo_path(raw: str) -> str:
+    """The link's target as a path inside the repository, or `""` if it points at nothing.
+
+    The document's own directory first, because that is what the link meant; the root
+    second, because documents at the root already write root-relative paths.
+    """
+    for candidate in (_BASE[0] / raw, ROOT / raw.lstrip("./")):
+        resolved = candidate.resolve()
+        if not resolved.exists():
+            continue
+        try:
+            return resolved.relative_to(ROOT).as_posix()
+        except ValueError:  # outside the repository; nothing sane to publish
+            return ""
+    return ""
 
 
 #: The film, embedded at the top of the overview page only.
@@ -991,7 +1092,15 @@ def main() -> int:
 
     present = tuple(p for p in PAGES if p.source.is_file())
     missing = [p.slug for p in PAGES if not p.source.is_file()]
+    built({f"{p.slug}.html" for p in present})
+
+    # Rendered before anything is written. A build that aborts halfway leaves a site whose
+    # front page links to twelve pages that are not there -- worse than the dead link it
+    # stopped for, and it stops on the first one, so fixing them takes as many builds as
+    # there are faults.
+    rendered = {}
     for page in present:
+        rendering(page.source)
         text = page.source.read_text(encoding="utf-8")
         if page.slug == "index":
             # The hero already carries the README's title and pitch; rendering them
@@ -1001,9 +1110,20 @@ def main() -> int:
             if marker in text:
                 text = text[text.index(marker) :]
         body, headings = render(text)
-        (out / f"{page.slug}.html").write_text(
-            shell(page, body, headings, present), encoding="utf-8"
+        rendered[page.slug] = shell(page, body, headings, present)
+
+    if _DEAD:
+        for dead in _DEAD:
+            print(f"build_site: link points at nothing -- {dead}", file=sys.stderr)
+        print(
+            f"build_site: {len(_DEAD)} dead link(s); nothing written. A generated site "
+            "reads as authoritative because it was generated.",
+            file=sys.stderr,
         )
+        return 1
+
+    for slug, body in rendered.items():
+        (out / f"{slug}.html").write_text(body, encoding="utf-8")
 
     images = ROOT / "docs" / "images"
     if images.is_dir():
