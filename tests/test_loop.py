@@ -601,3 +601,46 @@ def test_a_stop_signalled_mid_run_ends_it_at_the_next_turn() -> None:
 
     assert result.status is RunStatus.CANCELLED
     assert result.spend.turns == 1, "the stop did not take effect at the next turn"
+
+
+def test_any_provider_failure_ends_the_run_with_a_typed_status() -> None:
+    """`RunStatus` says there is deliberately no `unknown`, and only `ProviderError` was caught.
+
+    Found by the stress suite, not by this one. A provider raising anything else — a
+    `TimeoutError` past the transport, a third-party harness raising its own type, a bug in
+    an adapter — propagated out of `run()` and out of the coordinator, leaving the work item
+    in whatever stage the exception happened in. Nothing downstream can tell that from work
+    still in progress.
+    """
+
+    class Raises:
+        name = "raises"
+
+        def __init__(self, error: Exception) -> None:
+            self.error = error
+
+        def complete(self, *args, **kwargs):
+            raise self.error
+
+    for error in (
+        TimeoutError("timed out"),
+        ValueError("an adapter bug"),
+        RuntimeError("a third-party harness"),
+    ):
+        result = loop(Raises(error)).run()
+        assert result.status is RunStatus.PROVIDER_FAILED, error
+        assert type(error).__name__ in result.reason
+
+
+def test_a_mistake_inside_the_loop_still_raises() -> None:
+    """Scoped to the provider call alone. Recording our own bug as the provider's fault
+    would make the loop's own failures invisible."""
+
+    class Rude:
+        name = "rude"
+
+        def complete(self, *args, **kwargs):
+            return "not a Completion at all"
+
+    with pytest.raises(AttributeError):
+        loop(Rude()).run()

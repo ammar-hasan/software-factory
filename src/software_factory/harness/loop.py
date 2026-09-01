@@ -308,6 +308,18 @@ class TurnLoop:
                     )
                     continue
                 return self._end(result, RunStatus.PROVIDER_FAILED, str(exc))
+            except Exception as exc:
+                # `RunStatus` says there is deliberately no `unknown`, and that promise is
+                # only kept if *every* way a provider can fail arrives as one of its values.
+                # Only `ProviderError` was caught, so anything else -- a `TimeoutError`
+                # raised past the transport, a third-party harness raising its own type, a
+                # bug in an adapter -- propagated out of `run()` and out of the coordinator,
+                # leaving the work item in whatever stage the exception happened in. Nothing
+                # downstream can tell that from work still in progress.
+                #
+                # Scoped to the provider call alone, so a mistake in this loop still raises
+                # rather than being recorded as the provider's fault.
+                return self._end(result, RunStatus.PROVIDER_FAILED, f"{type(exc).__name__}: {exc}")
 
             result.spend.add_usage(
                 completion.usage,
