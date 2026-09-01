@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from software_factory.cli import app
+from software_factory.cli import EXIT_UNUSABLE, app
 from software_factory.ledger import EntryType, Ledger
 
 runner = CliRunner()
@@ -1291,3 +1291,48 @@ def test_no_command_name_is_claimed_twice() -> None:
     for names, kind in ((groups, "group"), (commands, "command")):
         duplicates = sorted({n for n in names if names.count(n) > 1})
         assert duplicates == [], f"duplicate {kind} name(s): {duplicates}"
+
+
+def test_no_command_answers_a_missing_factory_with_a_traceback(tmp_path: Path) -> None:
+    """`_fail` says "never a traceback: the user did nothing wrong", and one command did.
+
+    `sf worker route` pointed at a directory with no `factory.yaml` — which is what the
+    README's own example did, since it was the one worker command written without `--root`
+    — answered a typo with twenty lines of Python internals. Fifty-one call sites kept the
+    promise by catching individually, which is a promise that lapses on the next command
+    somebody adds, so it is now kept by the group.
+
+    Swept rather than spot-checked, for the same reason.
+    """
+    empty = tmp_path / "nowhere"
+    empty.mkdir()
+    commands = [
+        ["worker", "route", "--root", str(empty), "--requires", "gpu"],
+        ["worker", "list", "--root", str(empty)],
+        ["plan", "--root", str(empty)],
+        ["validate", "--root", str(empty)],
+        ["audit", "--root", str(empty)],
+        ["providers", "--root", str(empty)],
+    ]
+
+    leaked = []
+    for argv in commands:
+        result = runner.invoke(app, argv)
+        if result.exception is not None and not isinstance(result.exception, SystemExit):
+            leaked.append(f"{' '.join(argv)}: {type(result.exception).__name__}")
+        if "Traceback" in result.output:
+            leaked.append(f"{' '.join(argv)}: printed a traceback")
+
+    assert leaked == [], leaked
+
+
+def test_the_message_survives_the_group_handler(tmp_path: Path) -> None:
+    """Caught is not the same as reported: the error's own remediation has to come out."""
+    empty = tmp_path / "nowhere"
+    empty.mkdir()
+
+    result = runner.invoke(app, ["worker", "route", "--root", str(empty), "--requires", "gpu"])
+
+    assert result.exit_code == EXIT_UNUSABLE
+    assert "no factory.yaml" in result.output
+    assert "Run `sf init` here" in result.output

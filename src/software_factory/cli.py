@@ -24,6 +24,7 @@ import typer
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
+from typer.core import TyperGroup
 
 from software_factory import SCHEMA_VERSIONS, __version__
 from software_factory.definition import load, load_strict, resolve_for_agent
@@ -38,8 +39,35 @@ from software_factory.ledger import EntryType, Ledger
 from software_factory.providers.base import Provider
 from software_factory.runtime.tools import BUILTIN_TOOL_EFFECTS
 
+
+class _Group(TyperGroup):
+    """Turns any `FactoryError` that escapes a command into the message it already carries.
+
+    `_fail` below says "never a traceback: the user did nothing wrong", and fifty-one call
+    sites keep that promise by catching individually. `sf worker route` did not, so pointing
+    it at a directory with no `factory.yaml` — which is what the README's own example does,
+    since it is the one worker command written without `--root` — answered a typo with
+    twenty lines of Python internals.
+
+    Caught here rather than audited into the remaining call sites: a promise kept by
+    everybody remembering is a promise that lapses on the next command somebody adds. The
+    per-command `except` blocks stay, because several of them do more than report.
+
+    `ctx` is typed `Any` rather than `click.Context`: click is Typer's dependency and not
+    this project's, and importing it directly would make the CLI stop starting the day Typer
+    vendors it — which is not a hypothetical, since `import click` does not resolve here.
+    """
+
+    def invoke(self, ctx: Any) -> Any:
+        try:
+            return super().invoke(ctx)
+        except FactoryError as exc:
+            _fail(exc, bool(ctx.params.get("as_json")))
+
+
 app = typer.Typer(
     name="sf",
+    cls=_Group,
     help="Run a software factory: agents that carry work from intake to a reviewable change.",
     no_args_is_help=True,
     add_completion=False,

@@ -181,7 +181,7 @@ produces results that are wrong rather than missing.
 
 ```bash
 sf worker list --root myfactory
-sf worker route --requires gpu --requires linux    # would it place? without claiming a slot
+sf worker route --root myfactory --requires gpu --requires linux   # would it place?
 sf worker leases --root myfactory                  # who holds what, and what expired
 ```
 
