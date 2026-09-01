@@ -456,6 +456,13 @@ class Validation:
     at_parent: Any | None = None
     new_test_ids: tuple[str, ...] = ()
     build_ok: bool | None = None
+    parent_resolved: bool = True
+    """Whether the commit this work sits on could be resolved at all.
+
+    False makes `regression-proven` *unenforceable* rather than failed. An empty
+    `new_test_ids` means one of two very different things -- the author wrote no test, or
+    we could not work out what "new" means -- and reporting the second as the first told an
+    author to write a test they had already written."""
 
 
 def _test_command_for(root: Path) -> list[str] | None:
@@ -500,6 +507,42 @@ def _run_suite(root: Path, command: list[str]) -> Any:
     run = parse_pytest(completed.stdout + "\n" + completed.stderr, command, head)
     run.exit_code = completed.returncode
     return run
+
+
+def _parent_commit(workspace: Workspace, item: Any) -> str | None:
+    """The commit a run's uncommitted changes sit on, or None when there is not one.
+
+    Two bugs lived in the expression this replaces, `item.base_commit or "HEAD~1"`.
+
+    `base_commit` was declared on `WorkItem` and written by nothing, so the fallback was
+    not a fallback -- it was the only path. And the fallback was wrong: a run leaves its
+    changes *uncommitted* in the workspace, so the parent of the work is `HEAD`, not the
+    commit before it. Against a repository with real history that compared the tip to a
+    commit one further back than intended, which quietly widens what counts as "new".
+
+    In a repository with a single commit `HEAD~1` does not resolve at all, and every
+    lookup failed silently: `regression-proven` then reported "no new test" and blocked
+    the fix, telling an author to write the test they had already written. That is the
+    keystone gate refusing correct work with advice that cannot be acted on, and it would
+    have done it to every defect fix in a young repository.
+
+    None rather than a guess when the commit cannot be resolved. A gate that cannot look
+    must say so rather than report a failure -- the rule this codebase applies to every
+    metric, applied to the gate it rests on.
+    """
+    import subprocess
+
+    candidate = str(getattr(item, "base_commit", "") or "").strip() or "HEAD"
+    resolved = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{candidate}^{{commit}}"],
+        cwd=workspace.root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if resolved.returncode != 0:
+        return None
+    return resolved.stdout.strip()
 
 
 def _new_tests(
@@ -749,6 +792,9 @@ class Coordinator:
         # starts from the source, so discarding the previous workspace is intended here
         # rather than stumbled into.
         workspace = self.workspaces.create(run_id=item.id, replace=True)
+        # The commit this work sits on. `WorkItem.base_commit` was declared and written by
+        # nothing, so every run fell through to a `HEAD~1` guess -- see `_parent_commit`.
+        item.base_commit = item.base_commit or workspace.head
         try:
             for stage in stages or self._default_path(item):
                 # Checked per stage, not once at the start: a long work item can cross the
@@ -1411,6 +1457,7 @@ class Coordinator:
             tests_at_tip=validation.at_tip,
             tests_at_parent=validation.at_parent,
             new_test_ids=validation.new_test_ids,
+            parent_resolved=validation.parent_resolved,
             build_ok=validation.build_ok,
             external_actions=(),
             permitted_external=frozenset(),
@@ -1441,6 +1488,7 @@ class Coordinator:
         at_tip = _run_suite(workspace.root, command)
         at_parent = None
         new_test_ids: tuple[str, ...] = ()
+        parent_resolved = True
         if item.work_class is WorkClass.DEFECT:
             # The *new tests*, carried onto the parent's source. This is what FR-13.3a
             # actually asks for, and it is the gate's own remediation: "run the new test
@@ -1452,20 +1500,21 @@ class Coordinator:
             # Transplanting the tests and nothing else is the whole point: the test is the
             # tip's, the code under it is the parent's, and a test that passes in that
             # combination has not demonstrated the defect.
-            at_parent = _run_suite_at(
-                workspace.root,
-                command,
-                item.base_commit or "HEAD~1",
-                carrying=_test_paths(workspace),
-            )
-            if at_parent is not None:
-                new_test_ids = _new_tests(workspace, at_tip, command, item.base_commit or "HEAD~1")
+            parent = _parent_commit(workspace, item)
+            if parent is not None:
+                at_parent = _run_suite_at(
+                    workspace.root, command, parent, carrying=_test_paths(workspace)
+                )
+                if at_parent is not None:
+                    new_test_ids = _new_tests(workspace, at_tip, command, parent)
+            parent_resolved = parent is not None
 
         return Validation(
             has_test_command=True,
             at_tip=at_tip,
             at_parent=at_parent,
             new_test_ids=new_test_ids,
+            parent_resolved=parent_resolved,
             # A suite that ran at all is evidence the tree imports. A separate build step is
             # the honest answer for a compiled language; for Python, collection *is* the
             # build, and claiming a build we did not run would be the lie this replaces.

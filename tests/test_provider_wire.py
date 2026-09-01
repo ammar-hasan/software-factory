@@ -595,3 +595,147 @@ def test_a_provider_failure_is_reported_as_one_not_as_a_gate_failure(wire, tmp_p
     assert "calibration" not in (item.blocker_action or "").lower(), (
         "a provider failure was reported as a calibration problem"
     )
+
+
+def test_a_run_records_the_commit_its_work_sits_on(wire, tmp_path) -> None:
+    """`WorkItem.base_commit` was declared and written by nothing.
+
+    So `_gate_context` fell through to a hard-coded `HEAD~1` on every run, which is the
+    fallback that broke the keystone gate below.
+    """
+    import subprocess
+
+    from software_factory.definition import load_strict
+    from software_factory.orchestrator import SourceContext, WorkClass, WorkItem, new_id
+    from software_factory.orchestrator.coordinator import local_coordinator
+    from software_factory.scaffold import init_factory
+
+    recorder, base = wire
+    recorder.answers = [
+        (
+            200,
+            openai_answer(
+                choices=[
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps({**CARRIED, **output}),
+                        },
+                    }
+                ]
+            ),
+        )
+        for output in STAGE_OUTPUTS
+    ]
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "importer.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.test",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.test",
+        "PATH": __import__("os").environ.get("PATH", ""),
+        "HOME": str(tmp_path),
+    }
+    for args in (("init", "--quiet", "-b", "main"), ("add", "-A"), ("commit", "-q", "-m", "one")):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, env=env)
+
+    factory = tmp_path / "factory"
+    init_factory(factory, name="wire", owner="acme", repo="importer")
+    item = WorkItem(
+        id=new_id(),
+        factory="wire",
+        title="t",
+        request="r",
+        source=SourceContext(provider="cli", kind="test", ref="wire"),
+        work_class=WorkClass.CHORE,
+    )
+
+    local_coordinator(
+        load_strict(factory),
+        repo=repo,
+        state_dir=tmp_path / "state",
+        provider=OpenAICompatibleProvider(base_url=f"{base}/v1", name="wire-test"),
+        allow_unsandboxed=True,
+    ).run(item)
+
+    assert item.base_commit, "base_commit is written by nothing"
+    assert len(item.base_commit) == 40, "a commit id, not a symbolic ref"
+
+
+def test_the_parent_of_uncommitted_work_is_head_not_the_commit_before_it(tmp_path) -> None:
+    """The second half of the same bug, and the half that broke young repositories.
+
+    A run leaves its changes *uncommitted*, so the parent of the work is `HEAD`. The old
+    expression asked for `HEAD~1` — one commit too far back against real history, and
+    unresolvable in a repository with a single commit, which is what every new project and
+    everything `sf init` leaves behind has.
+    """
+    import subprocess
+
+    from software_factory.orchestrator.coordinator import _parent_commit
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.test",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.test",
+        "PATH": __import__("os").environ.get("PATH", ""),
+        "HOME": str(tmp_path),
+    }
+    for args in (("init", "--quiet", "-b", "main"), ("add", "-A"), ("commit", "-q", "-m", "one")):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, env=env)
+
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    class FakeWorkspace:
+        root = repo
+
+    class Blank:
+        base_commit = ""
+
+    assert _parent_commit(FakeWorkspace(), Blank()) == head
+
+    class Recorded:
+        base_commit = head
+
+    assert _parent_commit(FakeWorkspace(), Recorded()) == head
+
+    class Unresolvable:
+        base_commit = "0" * 40
+
+    assert _parent_commit(FakeWorkspace(), Unresolvable()) is None, (
+        "an unresolvable commit must be None, not a guess"
+    )
+
+
+def test_the_keystone_gate_is_unenforceable_when_the_parent_is_unknown() -> None:
+    """A gate that cannot look must say so rather than report a failure.
+
+    Reporting this as FAIL is what told a real model — which had fixed the defect and
+    written two tests — to "write the test first, and watch it fail before you fix
+    anything". That is the keystone gate refusing correct work with advice the author had
+    already followed, and an empty `new_test_ids` cannot distinguish the two cases on its
+    own.
+    """
+    from software_factory.evals.gates import GateContext, GateOutcome, regression_proven
+
+    cannot_look = regression_proven(
+        GateContext(stage="VERIFY", work_class="defect", parent_resolved=False)
+    )
+    assert cannot_look.outcome is GateOutcome.ERROR
+    assert "could not be resolved" in cannot_look.detail
+
+    wrote_none = regression_proven(
+        GateContext(stage="VERIFY", work_class="defect", parent_resolved=True)
+    )
+    assert wrote_none.outcome is GateOutcome.FAIL, "a genuine absence must still fail"

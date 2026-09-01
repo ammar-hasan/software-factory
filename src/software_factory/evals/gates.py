@@ -122,6 +122,12 @@ class GateContext:
     tests_at_tip: TestRun | None = None
     tests_at_parent: TestRun | None = None
     new_test_ids: tuple[str, ...] = ()
+    parent_resolved: bool = True
+    """Whether the commit this work sits on could be resolved.
+
+    False makes `regression-proven` unenforceable rather than failed. An empty
+    `new_test_ids` means either "the author wrote no test" or "we could not work out what
+    new means", and only the first is a failure of the work."""
     agreements: tuple[AgreementResult, ...] = ()
     behaviour_changed: bool = False
     delta_approved: bool = False
@@ -314,6 +320,19 @@ def regression_proven(ctx: GateContext) -> GateResult:
     """
     if ctx.work_class != "defect":
         return GateResult("regression-proven", GateOutcome.SKIP, detail="not defect-class work")
+    if not ctx.parent_resolved:
+        # A gate that cannot look must say so rather than report a failure. Reporting this
+        # as FAIL blocked correct defect fixes in any repository whose base commit could
+        # not be resolved -- a shallow clone, or a repository with a single commit -- and
+        # told the author to write a test they had already written.
+        return GateResult(
+            "regression-proven",
+            GateOutcome.ERROR,
+            detail=(
+                "the commit this work sits on could not be resolved, so which tests are "
+                "new cannot be determined"
+            ),
+        )
     if not ctx.new_test_ids:
         return GateResult(
             "regression-proven",
