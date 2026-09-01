@@ -164,3 +164,48 @@ def test_the_film_does_not_autoplay(tmp_path: Path) -> None:
         pytest.skip("the film has not been rendered in this checkout")
     assert "autoplay" not in index
     assert 'preload="none"' in index
+
+
+def test_the_diagrams_reach_the_site(tmp_path: Path) -> None:
+    """The site is the one place the interactive artefact works.
+
+    GitHub renders the PNG; a browser renders the real thing, with search, route probes and
+    lenses. Shipping only the raster to both would throw away the half that cannot be
+    printed.
+    """
+    out = tmp_path / "_site"
+    subprocess.run(
+        [sys.executable, "scripts/build_site.py", "--out", str(out)],
+        cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True,
+        check=True,
+    )
+
+    source = Path(__file__).resolve().parent.parent / "docs" / "diagrams"
+    if not source.is_dir():
+        pytest.skip("no diagrams in this checkout")
+
+    copied = {p.name for p in (out / "diagrams").glob("*")}
+    assert copied, "the diagrams directory exists and nothing was copied"
+    assert not any(".visual-check." in name for name in copied), (
+        "QA renders were published: two resolutions in two themes, meant to be looked at once"
+    )
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert 'href="diagrams/' in index, "the README's diagram links were not rewritten"
+
+
+def test_no_readme_link_points_at_a_missing_file() -> None:
+    """A README that references an image it does not have renders a broken icon on the
+    project's front page, which is the first thing anybody sees."""
+    import re
+
+    root = Path(__file__).resolve().parent.parent
+    text = (root / "README.md").read_text(encoding="utf-8")
+
+    # Generated reports are produced by commands that need a live model; everything else
+    # must exist in the checkout.
+    generated = {"docs/product-trial.md"}
+    referenced = set(re.findall(r"\((docs/[^)#]+)\)", text))
+    missing = sorted(r for r in referenced - generated if not (root / r).exists())
+
+    assert missing == [], f"README references files that do not exist: {missing}"

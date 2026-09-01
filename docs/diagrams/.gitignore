@@ -1,0 +1,5 @@
+# Visual-check renders are QA scratch, not deliverables: the same diagram at two
+# resolutions in two themes, produced to be looked at once. The deliverables are the
+# interactive HTML and the PNG the README embeds.
+*.visual-check.*
+spec/

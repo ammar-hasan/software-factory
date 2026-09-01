@@ -305,6 +305,8 @@ def link(href: str) -> str:
         return LINKS[clean]
     if clean.startswith("docs/images/"):
         return html.escape("images/" + clean.split("/", 2)[2])
+    if clean.startswith("docs/diagrams/"):
+        return html.escape("diagrams/" + clean.split("/", 2)[2])
     return html.escape(href)
 
 
@@ -394,6 +396,20 @@ def main() -> int:
     # The film, if it has been rendered. Copied rather than linked to the repository,
     # because a page that plays a video from a raw GitHub URL stops playing the moment the
     # branch is renamed -- and the site is the one place the film is actually watchable.
+    # The interactive diagrams, which are the one thing the site can show and the README
+    # cannot: GitHub renders a PNG, a browser renders the real artefact.
+    diagrams = ROOT / "docs" / "diagrams"
+    if diagrams.is_dir():
+        (out / "diagrams").mkdir(exist_ok=True)
+        for artefact in sorted(diagrams.glob("*.html")):
+            if ".visual-check." in artefact.name:
+                continue
+            shutil.copy2(artefact, out / "diagrams" / artefact.name)
+        for image in sorted(diagrams.glob("*.png")):
+            if ".visual-check." in image.name:
+                continue
+            shutil.copy2(image, out / "diagrams" / image.name)
+
     film = ROOT / "docs" / "video" / "software-factory.mp4"
     if film.is_file():
         (out / "video").mkdir(exist_ok=True)

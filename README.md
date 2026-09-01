@@ -6,7 +6,11 @@ record of every decision — or a refusal that tells you exactly what is missing
 The refusal is the point. Anything can produce a diff. This is built to know when its own
 work is not good enough to hand you, and to say so.
 
-<!-- DIAGRAM:stage-machine -->
+[![How a work item moves from intake to handoff, and where gates block it](docs/diagrams/stage-machine.workflow.png)](docs/diagrams/stage-machine.workflow.html)
+
+<sub>**A work item, intake to handoff.** Gates sit between stages; a blocked item stops and
+carries the exact action that would clear it. Defect-class work skips DESIGN.
+[Open the interactive version ↗](docs/diagrams/stage-machine.workflow.html)</sub>
 
 ## What that looks like
 
@@ -57,7 +61,14 @@ the one-line check most people would write. It failed with an `ImportError`, whi
 the module was missing, not that the bug was real. **The gate reads the failure's class,
 not its existence.** That distinction is the product.
 
-<!-- DIAGRAM:regression-proven -->
+[![The keystone gate: the suite runs at two commits, and only an assertion about behaviour counts as proof](docs/diagrams/regression-proven.sequence.png)](docs/diagrams/regression-proven.sequence.html)
+
+<sub>**Why it refuses.** The suite runs twice — once where the work stands, once at the
+parent in its own detached worktree, carrying the new tests over the old code. Only an
+assertion *about behaviour* counts. `assert hasattr(mod, "new_fn")` fails at the parent with
+a real `AssertionError` and proves only that the name did not exist: the same bypass an
+import error gives, one keystroke away, and refused for the same reason.
+[Open the interactive version ↗](docs/diagrams/regression-proven.sequence.html)</sub>
 
 ## Is this for you?
 
@@ -84,7 +95,13 @@ one before you could leave it alone with your backlog:
 | **When data is missing** | a plausible number | `unavailable`, with the reason. Never zero |
 | **Where it runs** | somebody's cloud | the same files on your laptop, your box, or your cloud |
 
-<!-- DIAGRAM:awareness-pack -->
+[![What an agent is given before it acts: five sources, deterministic builders, a token budget, and a digest](docs/diagrams/awareness-pack.dataflow.png)](docs/diagrams/awareness-pack.dataflow.html)
+
+<sub>**What the agent is given.** Five sources, assembled by builders that need no model, cut
+to a token budget by role, every item cited or dropped. Mission, contract and toolbelt keep a
+protected floor; overflow drops whole items from the tail, never half of one. The pack is
+digested, so identical inputs over the same snapshot produce an identical pack.
+[Open the interactive version ↗](docs/diagrams/awareness-pack.dataflow.html)</sub>
 
 **Local-first is not a degraded mode.** The same definition files, the same harness and the
 same guarantees run on a laptop with a local model as in a data centre. CI proves the whole
@@ -234,6 +251,16 @@ plausibility.
 | **Confidence** | Calibration scored against outcomes. Confidence with no cited evidence is rewritten to zero before anything downstream reads it. |
 | **Courage** | A machine-checked blast-radius contract, stated affirmatively. An agent that doesn't know undo is free picks the timid approach every time. |
 | **Quality** | Gates that block, and evidence that resolves claims rather than accompanying them. |
+
+## How it fits together
+
+[![The definition layer, the coordinator, the harness, the executors, and the ledger everything observable is folded from](docs/diagrams/architecture.architecture.png)](docs/diagrams/architecture.architecture.html)
+
+<sub>**The system.** Definition files describe it; the coordinator carries work items through
+the stage machine; the harness assembles a pack and runs the turn loop against a typed tool
+registry; executors run commands under a sandbox. Everything observable — metrics, the
+dashboard, the HTTP API — is folded from one append-only, hash-chained ledger rather than
+kept beside it. [Open the interactive version ↗](docs/diagrams/architecture.architecture.html)</sub>
 
 ## The five subsystems
 
