@@ -24,6 +24,7 @@ from pathlib import Path
 from software_factory.definition.models import NetworkPolicy
 from software_factory.errors import FactoryError
 from software_factory.evals.gates import ViolationClass
+from software_factory.runtime.workspace import HOME_DIR
 
 #: How long to wait for a SIGKILLed process group to release the output pipes. Anything
 #: still holding them after this could not be signalled, so its output is unreachable.
@@ -128,7 +129,13 @@ class SandboxPolicy:
         """The environment a command sees: an allowlist, plus declared secrets only."""
         env = {name: os.environ[name] for name in self.env_allowlist if name in os.environ}
         env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
-        env["HOME"] = str(self.workspace)
+        # Not the workspace root. With `HOME` there, anything the run's tooling caches --
+        # pip, cargo, rustup -- lands in the repository and is swept into `changed_paths`,
+        # which is what the blast-radius contract is checked against and what a change would
+        # commit. The workspace creates this directory and excludes it from git.
+        home = self.workspace / HOME_DIR
+        home.mkdir(parents=True, exist_ok=True)
+        env["HOME"] = str(home)
         env["PWD"] = str(self.workspace)
         env.update(self.secrets)
         # A run that declares no network must not reach one by accident through a proxy

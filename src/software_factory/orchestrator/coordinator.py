@@ -1147,7 +1147,7 @@ class Coordinator:
             grants=grants,
             pack=pack,
             contract=contract,
-            budget=Budget(),
+            budget=_budget_from(execution),
             routing=routing,
             role_prompt=prompt,
             task=task,
@@ -1979,3 +1979,33 @@ def _plan_score(outcome: WorkOutcome) -> float | None:
     if not counted:
         return None
     return sum(1 for result in counted if result.outcome is GateOutcome.PASS) / len(counted)
+
+
+def _budget_from(execution: Any) -> Budget:
+    """The run bound this agent declared, falling back to the harness default per field.
+
+    `ExecutionDefaults.budget` was a declared, validated, inheritance-resolved field that
+    nothing read: every run got `Budget()` regardless of what the definition said. An
+    operator could write `budget: {tokens: 50000}` in `factory.yaml`, watch it validate, and
+    have it ignored -- the fifth control in this codebase that existed and was not wired in,
+    and the one that matters most, because a bound nobody applies is discovered by the bill.
+
+    Per field rather than all-or-nothing. A definition that sets only `tokens` means "this
+    many tokens, everything else as usual", and reading an unset field as zero would end
+    every run on its first turn.
+
+    `turns` has no counterpart in the definition schema and keeps the harness default. It is
+    a bound of the same kind, but adding it to the schema is a definition change, and
+    inventing a value here would apply a limit nobody wrote.
+    """
+    default = Budget()
+    declared = getattr(execution, "budget", None)
+    if declared is None:
+        return default
+    return Budget(
+        wall_clock_s=float(declared.wall_clock_s or default.wall_clock_s),
+        tool_calls=int(declared.tool_calls or default.tool_calls),
+        tokens=int(declared.tokens or default.tokens),
+        cost_units=float(declared.cost_units or default.cost_units),
+        turns=default.turns,
+    )

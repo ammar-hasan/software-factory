@@ -156,6 +156,17 @@ class Workspace:
         return result.stdout if result.returncode == 0 else None
 
 
+#: Where a run's tooling writes its own state. Inside the workspace because the sandbox
+#: confines writes there, and excluded from git because none of it is the change.
+HOME_DIR = ".sf-home"
+
+#: Build artifacts no run authors and every run produces. Excluded so a repository that
+#: does not happen to ignore them does not report a cache file as part of the change.
+#: Deliberately short: anything ambiguous belongs in the repository's own `.gitignore`,
+#: where a person decided it, rather than here where the factory decided it for them.
+IGNORED_ARTIFACTS = ("__pycache__/", "*.py[cod]", ".pytest_cache/", ".ruff_cache/", ".mypy_cache/")
+
+
 class WorkspaceFactory:
     """Creates isolated workspaces from a source repository."""
 
@@ -202,6 +213,26 @@ class WorkspaceFactory:
         )
         _git(["checkout", "--quiet", "--detach", ref], cwd=root)
         base = _git(["rev-parse", "HEAD"], cwd=root).stdout.strip()
+
+        # A place for the run's tooling to put its own droppings. The sandbox confines
+        # writes to the workspace, so `HOME` has to live inside it -- and with `HOME` set to
+        # the repository root, one `pip install` put forty cache files into `changed_paths`.
+        # That surface is not cosmetic: it is what the blast-radius contract is checked
+        # against, what the review pack describes, and what a change would commit. A real
+        # trial reached handoff having "changed" `.rustup/settings.toml`.
+        #
+        # Excluded through `.git/info/exclude` rather than a `.gitignore`, because a
+        # `.gitignore` is a file in the user's repository and writing one would make the
+        # factory's own scaffolding show up in the diff it is trying to keep clean.
+        (root / HOME_DIR).mkdir(exist_ok=True)
+        exclude = root / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with exclude.open("a", encoding="utf-8") as handle:
+            handle.write("\n# written by the factory: not part of the repository\n")
+            handle.write(f"/{HOME_DIR}/\n")
+            for pattern in IGNORED_ARTIFACTS:
+                handle.write(f"{pattern}\n")
+
         return Workspace(root=root, run_id=run_id, base_commit=base)
 
     def destroy(self, workspace: Workspace) -> None:

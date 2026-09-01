@@ -372,3 +372,75 @@ def test_running_without_a_sandbox_requires_opting_in(tmp_path: Path) -> None:
         LocalExecutor(policy(tmp_path), level=SandboxLevel.NONE)
 
     assert LocalExecutor(policy(tmp_path), level=SandboxLevel.NONE, allow_unsandboxed=True)
+
+
+def test_a_runs_tooling_does_not_pollute_the_change_surface(tmp_path: Path) -> None:
+    """`changed_paths` is what the blast-radius contract is checked against.
+
+    The sandbox confines writes to the workspace, so `HOME` has to live inside it — and with
+    `HOME` set to the repository root, one `pip install` put forty cache files into the
+    change surface. A real product trial reached handoff having "changed"
+    `.rustup/settings.toml` and thirty-eight pip cache entries, which is a diff nobody can
+    review and a blast radius computed over files nothing wrote.
+    """
+    import subprocess
+
+    from software_factory.runtime.executor import LocalExecutor, SandboxPolicy
+    from software_factory.runtime.workspace import HOME_DIR, WorkspaceFactory
+
+    source = tmp_path / "repo"
+    source.mkdir()
+    (source / "a.py").write_text("x = 1\n", encoding="utf-8")
+    for command in (
+        ["init", "-q", "-b", "main"],
+        ["config", "user.email", "t@example.test"],
+        ["config", "user.name", "t"],
+        ["add", "-A"],
+        ["commit", "-qm", "initial"],
+    ):
+        subprocess.run(["git", *command], cwd=source, check=True, capture_output=True)
+
+    workspace = WorkspaceFactory(source=source, state_dir=tmp_path / "state").create()
+    policy = SandboxPolicy(workspace=workspace.root)
+    executor = LocalExecutor(policy, allow_unsandboxed=True)
+
+    # Exactly what a run's tooling does: write into $HOME, and leave a bytecode cache.
+    executor.run(["sh", "-c", 'mkdir -p "$HOME/.cache/pip" && echo x > "$HOME/.cache/pip/f"'])
+    (workspace.root / "__pycache__").mkdir(exist_ok=True)
+    (workspace.root / "__pycache__" / "a.cpython-311.pyc").write_bytes(b"\x00")
+
+    changed = workspace.changed_paths()
+
+    assert changed == set(), sorted(changed)
+    assert (workspace.root / HOME_DIR / ".cache" / "pip" / "f").exists(), (
+        "the write went somewhere other than the workspace home"
+    )
+
+
+def test_a_real_change_is_still_seen(tmp_path: Path) -> None:
+    """The exclusion must not be so wide that it hides the work.
+
+    A filter that quietly swallowed a source file would turn every run into a no-op that
+    passed its gates, which is worse than the pollution it was written to stop.
+    """
+    import subprocess
+
+    from software_factory.runtime.workspace import WorkspaceFactory
+
+    source = tmp_path / "repo"
+    source.mkdir()
+    (source / "a.py").write_text("x = 1\n", encoding="utf-8")
+    for command in (
+        ["init", "-q", "-b", "main"],
+        ["config", "user.email", "t@example.test"],
+        ["config", "user.name", "t"],
+        ["add", "-A"],
+        ["commit", "-qm", "initial"],
+    ):
+        subprocess.run(["git", *command], cwd=source, check=True, capture_output=True)
+
+    workspace = WorkspaceFactory(source=source, state_dir=tmp_path / "state").create()
+    (workspace.root / "a.py").write_text("x = 2\n", encoding="utf-8")
+    (workspace.root / "b.py").write_text("y = 3\n", encoding="utf-8")
+
+    assert workspace.changed_paths() == {"a.py", "b.py"}

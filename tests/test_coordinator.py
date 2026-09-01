@@ -743,3 +743,116 @@ def test_an_agent_cannot_send_as_somebody_else(definition, repo: Path, tmp_path:
     tool.handler({"to": "reviewer", "body": "hi", "sender": "architect", "from": "architect"})
 
     assert [m.sender for m in coord.mailbox.inbox("reviewer")[0]] == [agent]
+
+
+# ------------------------------------------------------- the budget the definition declares
+
+
+def test_a_declared_budget_reaches_the_run(definition, repo: Path, tmp_path: Path) -> None:
+    """`ExecutionDefaults.budget` was declared, validated, inheritance-resolved and read by
+    nothing: every run got `Budget()` whatever the definition said.
+
+    An operator could write `budget: {tokens: 50000}` in `factory.yaml`, watch it validate,
+    and have it ignored. A bound nobody applies is a bound discovered by the bill — and a
+    real product trial spent 700,000 input tokens adding a `--version` flag with no way to
+    say otherwise.
+    """
+    from software_factory.orchestrator.coordinator import _budget_from
+
+    class Declared:
+        budget = type(
+            "B",
+            (),
+            {"wall_clock_s": 90.0, "tool_calls": 7, "tokens": 50_000, "cost_units": 2.5},
+        )()
+
+    budget = _budget_from(Declared())
+
+    assert budget.tokens == 50_000
+    assert budget.tool_calls == 7
+    assert budget.wall_clock_s == 90.0
+    assert budget.cost_units == 2.5
+
+
+def test_an_unset_field_keeps_the_harness_default(definition, repo: Path, tmp_path: Path) -> None:
+    """A definition setting only `tokens` means "this many tokens, everything else as
+    usual". Reading an unset field as zero would end every run on its first turn."""
+    from software_factory.harness.loop import Budget
+    from software_factory.orchestrator.coordinator import _budget_from
+
+    class PartlyDeclared:
+        budget = type(
+            "B",
+            (),
+            {"wall_clock_s": None, "tool_calls": None, "tokens": 1_000, "cost_units": None},
+        )()
+
+    budget = _budget_from(PartlyDeclared())
+
+    assert budget.tokens == 1_000
+    assert budget.tool_calls == Budget().tool_calls
+    assert budget.wall_clock_s == Budget().wall_clock_s
+
+
+def test_no_declared_budget_is_the_harness_default(definition, repo: Path, tmp_path: Path) -> None:
+    from software_factory.harness.loop import Budget
+    from software_factory.orchestrator.coordinator import _budget_from
+
+    class Nothing:
+        budget = None
+
+    assert _budget_from(Nothing()) == Budget()
+
+
+def test_the_declared_budget_is_what_the_loop_is_given(
+    definition, repo: Path, tmp_path: Path
+) -> None:
+    """The end-to-end half: the number in `factory.yaml` is the number the run is bound by.
+
+    The first version of this ran a work item and asserted the item was blocked *or* that
+    no stage exceeded one tool call. With a scripted model no tool calls happen at all, so
+    `0 <= 1` was trivially true and the test passed with the budget unwired -- an escape
+    hatch in an assertion, which is the same defect as a control nobody calls.
+
+    So this captures the `Budget` the coordinator actually hands the loop, which is the
+    claim, and cannot be satisfied by a run that did nothing.
+    """
+    import yaml
+
+    from software_factory.definition import load_strict
+    from software_factory.harness import loop as loop_module
+
+    root = tmp_path / "budgeted"
+    root.mkdir()
+    init_factory(root, name="demo", owner="acme", repo="demo")
+    document = yaml.safe_load((root / "factory.yaml").read_text(encoding="utf-8"))
+    document["agentDefaults"]["budget"] = {"tokens": 12345, "toolCalls": 7}
+    (root / "factory.yaml").write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    seen: list[object] = []
+    original = loop_module.TurnLoop
+
+    class Recording(original):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, **kwargs):
+            seen.append(kwargs.get("budget"))
+            super().__init__(*args, **kwargs)
+
+    import software_factory.orchestrator.coordinator as coordinator_module
+
+    coordinator_module.TurnLoop = Recording  # type: ignore[misc]
+    try:
+        local_coordinator(
+            load_strict(root),
+            repo=repo,
+            state_dir=tmp_path / "budget-state",
+            provider=StubProvider(
+                [says(triage_output()), says(build_output()), says(review_output())] * 3
+            ),
+            allow_unsandboxed=True,
+        ).run(item(WorkClass.CHORE))
+    finally:
+        coordinator_module.TurnLoop = original  # type: ignore[misc]
+
+    assert seen, "no run was started, so nothing was bound by anything"
+    assert all(budget.tokens == 12345 for budget in seen), [b.tokens for b in seen]
+    assert all(budget.tool_calls == 7 for budget in seen)
